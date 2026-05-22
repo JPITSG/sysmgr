@@ -1,0 +1,9 @@
+# Generated Android build outputs.
+# Contains APKs, DEX/classes, generated Java, compiled resources, and local paths.
+/build/
+
+# Local debug signing key. Do not commit private keystores.
+/keystore/debug.keystore
+
+# Local build helper with machine-specific SDK defaults.
+/build.sh

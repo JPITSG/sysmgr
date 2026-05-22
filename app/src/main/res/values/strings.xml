@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">System Manager</string>
+    <string name="high_priority_notification_listener">System Manager Alerts</string>
+    <string name="accessibility_service_description">Lets System Manager watch Wi-Fi changes without a foreground monitor notification and press reboot controls when configured.</string>
+</resources>

@@ -1,0 +1,13 @@
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/sysmgr_background</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:colorAccent">@color/sysmgr_accent</item>
+        <item name="android:colorPrimary">@color/sysmgr_primary</item>
+        <item name="android:textColor">@color/sysmgr_text</item>
+        <item name="android:statusBarColor">@color/sysmgr_background</item>
+        <item name="android:navigationBarColor">@color/sysmgr_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

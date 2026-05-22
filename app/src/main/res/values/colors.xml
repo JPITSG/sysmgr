@@ -1,0 +1,6 @@
+<resources>
+    <color name="sysmgr_primary">#1E6F4F</color>
+    <color name="sysmgr_accent">#1E6F4F</color>
+    <color name="sysmgr_background">#F4F7F4</color>
+    <color name="sysmgr_text">#131D1A</color>
+</resources>

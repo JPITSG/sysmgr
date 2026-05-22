@@ -1,0 +1,862 @@
+#!/usr/bin/env node
+'use strict';
+
+const crypto = require('crypto');
+const childProcess = require('child_process');
+const fs = require('fs');
+const https = require('https');
+const net = require('net');
+const os = require('os');
+const path = require('path');
+
+const CONTROL_SOCKET_PATH = '/tmp/syslogd.sock';
+const DELIVERY_ACK_TIMEOUT_MS = 10000;
+const PING_TIMEOUT_MS = 10000;
+const PROXY_V2_SIGNATURE = Buffer.from('\r\n\r\n\0\r\nQUIT\n', 'binary');
+const PROXY_HEADER_TIMEOUT_MS = 5000;
+
+function parseArgs(argv) {
+  const args = {};
+  for (const item of argv) {
+    const match = item.match(/^--([^=]+)=(.*)$/);
+    if (match) {
+      args[match[1]] = match[2];
+    }
+  }
+  return args;
+}
+
+const args = parseArgs(process.argv.slice(2));
+if (!args.bindip || !args.bindport || !args.log || !args.users) {
+  console.error('usage: sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2>');
+  process.exit(2);
+}
+
+const bindIp = args.bindip;
+const bindPort = Number(args.bindport);
+if (!Number.isInteger(bindPort) || bindPort < 1 || bindPort > 65535) {
+  console.error('invalid --bindport value');
+  process.exit(2);
+}
+
+fs.mkdirSync(path.dirname(args.log), {recursive: true});
+const logStream = fs.createWriteStream(args.log, {flags: 'a'});
+const users = parseUsers(args.users);
+if (users.size === 0) {
+  console.error('invalid --users value');
+  process.exit(2);
+}
+let nextConnectionId = 1;
+let certDir = null;
+const clients = new Map();
+const pendingDeliveries = new Map();
+const pendingPings = new Map();
+
+function log(message) {
+  logStream.write(`${formatTimestamp(new Date())} | ${message}\n`);
+}
+
+function formatTimestamp(date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1, 2)}-${pad(date.getDate(), 2)} ` +
+    `${pad(date.getHours(), 2)}:${pad(date.getMinutes(), 2)}:${pad(date.getSeconds(), 2)}.` +
+    `${pad(date.getMilliseconds(), 3)}`;
+}
+
+function pad(value, width) {
+  return String(value).padStart(width, '0');
+}
+
+function websocketAccept(key) {
+  return crypto
+    .createHash('sha1')
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest('base64');
+}
+
+function normalizedAddress(address) {
+  const text = String(address || '');
+  return text.startsWith('::ffff:') ? text.slice(7) : text;
+}
+
+function clientAddress(socket) {
+  const proxyInfo = socketProxyInfo(socket);
+  return normalizedAddress(proxyInfo && proxyInfo.sourceAddress ? proxyInfo.sourceAddress : socket.remoteAddress);
+}
+
+function socketProxyInfo(socket) {
+  if (!socket) {
+    return null;
+  }
+  if (socket.proxyProtocol) {
+    return socket.proxyProtocol;
+  }
+  if (socket._parent && socket._parent.proxyProtocol) {
+    return socket._parent.proxyProtocol;
+  }
+  if (socket.socket && socket.socket.proxyProtocol) {
+    return socket.socket.proxyProtocol;
+  }
+  return null;
+}
+
+function couldBeProxyV2Header(buffer) {
+  const length = Math.min(buffer.length, PROXY_V2_SIGNATURE.length);
+  for (let i = 0; i < length; i += 1) {
+    if (buffer[i] !== PROXY_V2_SIGNATURE[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function parseProxyV2Header(buffer) {
+  if (buffer.length < 16 || !buffer.slice(0, PROXY_V2_SIGNATURE.length).equals(PROXY_V2_SIGNATURE)) {
+    return null;
+  }
+
+  const versionCommand = buffer[12];
+  const version = versionCommand >> 4;
+  const command = versionCommand & 0x0f;
+  const familyProtocol = buffer[13];
+  const payloadLength = buffer.readUInt16BE(14);
+  const totalLength = 16 + payloadLength;
+  if (version !== 2) {
+    throw new Error(`invalid PROXY protocol version ${version}`);
+  }
+  if (buffer.length < totalLength) {
+    return null;
+  }
+
+  const info = {
+    sourceAddress: '',
+    destinationAddress: '',
+    sourcePort: 0,
+    destinationPort: 0,
+    command,
+    familyProtocol
+  };
+
+  if (command === 0x00) {
+    return {info, totalLength};
+  }
+  if (command !== 0x01) {
+    throw new Error(`invalid PROXY protocol command ${command}`);
+  }
+
+  const family = familyProtocol & 0xf0;
+  const protocol = familyProtocol & 0x0f;
+  if (protocol !== 0x01) {
+    return {info, totalLength};
+  }
+  if (family === 0x10 && payloadLength >= 12) {
+    info.sourceAddress = Array.from(buffer.slice(16, 20)).join('.');
+    info.destinationAddress = Array.from(buffer.slice(20, 24)).join('.');
+    info.sourcePort = buffer.readUInt16BE(24);
+    info.destinationPort = buffer.readUInt16BE(26);
+  } else if (family === 0x20 && payloadLength >= 36) {
+    info.sourceAddress = formatIpv6(buffer.slice(16, 32));
+    info.destinationAddress = formatIpv6(buffer.slice(32, 48));
+    info.sourcePort = buffer.readUInt16BE(48);
+    info.destinationPort = buffer.readUInt16BE(50);
+  }
+  return {info, totalLength};
+}
+
+function formatIpv6(bytes) {
+  const parts = [];
+  for (let i = 0; i < 16; i += 2) {
+    parts.push(bytes.readUInt16BE(i).toString(16));
+  }
+  return parts.join(':');
+}
+
+function handOffToHttps(socket, initialBuffer) {
+  socket.removeAllListeners('data');
+  socket.removeAllListeners('error');
+  server.emit('connection', socket);
+  if (initialBuffer && initialBuffer.length > 0) {
+    socket.unshift(initialBuffer);
+  }
+  socket.resume();
+}
+
+function handleIncomingTcpConnection(socket) {
+  let buffer = Buffer.alloc(0);
+  socket.pause();
+
+  const timeout = setTimeout(() => {
+    log(`tcp proxy header timeout from=${normalizedAddress(socket.remoteAddress)}`);
+    socket.destroy();
+  }, PROXY_HEADER_TIMEOUT_MS);
+
+  function cleanup() {
+    clearTimeout(timeout);
+    socket.removeListener('data', onData);
+    socket.removeListener('error', onError);
+  }
+
+  function onError(err) {
+    cleanup();
+    log(`tcp connection error from=${normalizedAddress(socket.remoteAddress)} error=${err.message}`);
+  }
+
+  function onData(chunk) {
+    buffer = Buffer.concat([buffer, chunk]);
+    if (!couldBeProxyV2Header(buffer)) {
+      cleanup();
+      handOffToHttps(socket, buffer);
+      return;
+    }
+    if (buffer.length < 16) {
+      return;
+    }
+    let parsed;
+    try {
+      parsed = parseProxyV2Header(buffer);
+    } catch (err) {
+      cleanup();
+      log(`proxy protocol rejected from=${normalizedAddress(socket.remoteAddress)} error=${err.message}`);
+      socket.destroy();
+      return;
+    }
+    if (!parsed) {
+      return;
+    }
+
+    socket.proxyProtocol = parsed.info;
+    if (parsed.info.sourceAddress) {
+      log(`proxy protocol received from=${normalizedAddress(socket.remoteAddress)} source=${normalizedAddress(parsed.info.sourceAddress)} source_port=${parsed.info.sourcePort}`);
+    } else {
+      log(`proxy protocol received from=${normalizedAddress(socket.remoteAddress)} source=unknown`);
+    }
+    cleanup();
+    handOffToHttps(socket, buffer.slice(parsed.totalLength));
+  }
+
+  socket.on('data', onData);
+  socket.on('error', onError);
+  socket.resume();
+}
+
+function parseUsers(value) {
+  const result = new Map();
+  const parts = String(value || '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 2 && !parts[0].includes(':') && !parts[1].includes(':')) {
+    result.set(parts[0], parts[1]);
+    return result;
+  }
+  for (const part of parts) {
+    const colon = part.indexOf(':');
+    if (colon <= 0) {
+      continue;
+    }
+    const username = part.slice(0, colon).trim();
+    const password = part.slice(colon + 1);
+    if (username) {
+      result.set(username, password);
+    }
+  }
+  return result;
+}
+
+function basicCredentials(headerValue) {
+  if (!headerValue || !headerValue.toLowerCase().startsWith('basic ')) {
+    return null;
+  }
+  try {
+    const decoded = Buffer.from(headerValue.slice(6).trim(), 'base64').toString('utf8');
+    const colon = decoded.indexOf(':');
+    if (colon < 0) {
+      return null;
+    }
+    return {
+      username: decoded.slice(0, colon),
+      password: decoded.slice(colon + 1)
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+function authorizedCredentials(headerValue) {
+  const credentials = basicCredentials(headerValue);
+  if (!credentials || !users.has(credentials.username)) {
+    return null;
+  }
+  const expected = Buffer.from(users.get(credentials.username), 'utf8');
+  const actual = Buffer.from(credentials.password, 'utf8');
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+    return null;
+  }
+  return credentials;
+}
+
+function writeUnauthorizedSocket(socket) {
+  socket.end(
+    'HTTP/1.1 401 Unauthorized\r\n' +
+    'WWW-Authenticate: Basic realm="sysmgrd"\r\n' +
+    'Connection: close\r\n' +
+    'Content-Length: 13\r\n' +
+    '\r\n' +
+    'unauthorized\n'
+  );
+}
+
+function sendFrame(socket, opcode, payload) {
+  const data = Buffer.isBuffer(payload) ? payload : Buffer.from(payload || '', 'utf8');
+  const header = [];
+  header.push(0x80 | opcode);
+  if (data.length <= 125) {
+    header.push(data.length);
+  } else if (data.length <= 65535) {
+    header.push(126, (data.length >> 8) & 0xff, data.length & 0xff);
+  } else {
+    const extended = Buffer.alloc(8);
+    extended.writeBigUInt64BE(BigInt(data.length));
+    socket.write(Buffer.concat([Buffer.from(header.concat([127])), extended, data]));
+    return;
+  }
+  socket.write(Buffer.concat([Buffer.from(header), data]));
+}
+
+function sendJson(socket, value) {
+  sendFrame(socket, 0x1, JSON.stringify(value));
+}
+
+function parseFrames(state, chunk, onFrame) {
+  state.buffer = Buffer.concat([state.buffer, chunk]);
+  while (state.buffer.length >= 2) {
+    const first = state.buffer[0];
+    const second = state.buffer[1];
+    const masked = (second & 0x80) !== 0;
+    let length = second & 0x7f;
+    let offset = 2;
+
+    if (length === 126) {
+      if (state.buffer.length < offset + 2) return;
+      length = state.buffer.readUInt16BE(offset);
+      offset += 2;
+    } else if (length === 127) {
+      if (state.buffer.length < offset + 8) return;
+      const longLength = state.buffer.readBigUInt64BE(offset);
+      if (longLength > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error('websocket frame too large');
+      }
+      length = Number(longLength);
+      offset += 8;
+    }
+
+    let mask;
+    if (masked) {
+      if (state.buffer.length < offset + 4) return;
+      mask = state.buffer.slice(offset, offset + 4);
+      offset += 4;
+    }
+    if (state.buffer.length < offset + length) return;
+
+    const payload = Buffer.from(state.buffer.slice(offset, offset + length));
+    state.buffer = state.buffer.slice(offset + length);
+    if (mask) {
+      for (let i = 0; i < payload.length; i += 1) {
+        payload[i] ^= mask[i % 4];
+      }
+    }
+    onFrame(first & 0x0f, payload);
+  }
+}
+
+function cleanUuid(value) {
+  const uuid = String(value || '').trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uuid) ? uuid : '';
+}
+
+function assignClientUuid(connectionId, socket, rawUuid) {
+  const uuid = cleanUuid(rawUuid);
+  const client = clients.get(connectionId);
+  if (!client) {
+    return '';
+  }
+  if (!uuid) {
+    client.uuid = '';
+    socket.clientUuid = '';
+    return '';
+  }
+
+  client.uuid = uuid;
+  socket.clientUuid = uuid;
+  for (const other of clients.values()) {
+    if (other.id === connectionId || other.uuid !== uuid || !other.socket || other.socket.destroyed) {
+      continue;
+    }
+    log(`uuid duplicate detected uuid=${uuid} new_connection=${connectionId} old_connection=${other.id} old_from=${other.from || ''}; terminating old connection`);
+    try {
+      sendFrame(other.socket, 0x8, Buffer.from('duplicate uuid', 'utf8'));
+    } catch (err) {
+      log(`uuid duplicate close frame failed old_connection=${other.id} error=${err.message}`);
+    }
+    other.socket.destroy();
+  }
+  return uuid;
+}
+
+function handleTextMessage(connectionId, socket, text) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    log(`connection=${connectionId} text ${text}`);
+    return;
+  }
+
+  if (parsed.type === 'heartbeat') {
+    log(`heartbeat received connection=${connectionId} ts=${parsed.ts || ''} battery=${parsed.battery}`);
+    sendJson(socket, {type: 'heartbeat_ack', ts: Math.floor(Date.now() / 1000)});
+    return;
+  }
+  if (parsed.type === 'ack' && parsed.id) {
+    handleAck(connectionId, String(parsed.id));
+    return;
+  }
+  if (parsed.type === 'ping') {
+    const id = String(parsed.id || '');
+    log(`ping received connection=${connectionId} id=${id} source=${parsed.source || ''}`);
+    sendJson(socket, {
+      type: 'pong',
+      id,
+      ts: Math.floor(Date.now() / 1000),
+      source: 'sysmgrd'
+    });
+    log(`pong sent connection=${connectionId} id=${id}`);
+    return;
+  }
+  if (parsed.type === 'pong') {
+    handlePong(connectionId, parsed.id);
+    return;
+  }
+  if (parsed.type === 'hello') {
+    const uuid = assignClientUuid(connectionId, socket, parsed.uuid || parsed.client_uuid || parsed.device_uuid);
+    log(`hello received connection=${connectionId} app=${parsed.app || ''} version=${parsed.version || ''} uuid=${uuid || ''} heartbeat_seconds=${parsed.heartbeat_seconds || ''}`);
+    sendJson(socket, {type: 'hello_ack', ts: Math.floor(Date.now() / 1000)});
+    return;
+  }
+  log(`message received connection=${connectionId} type=${parsed.type || 'unknown'} body=${text}`);
+}
+
+function handleAck(connectionId, messageId) {
+  const pending = pendingDeliveries.get(messageId);
+  if (!pending) {
+    log(`ack ignored connection=${connectionId} id=${messageId}`);
+    return;
+  }
+  clearTimeout(pending.timer);
+  pendingDeliveries.delete(messageId);
+  log(`message acked id=${messageId} connection=${connectionId}`);
+  pending.resolve(true);
+}
+
+function handlePong(connectionId, pingId) {
+  const id = String(pingId || '');
+  const client = clients.get(connectionId);
+  log(`pong received connection=${connectionId} uuid=${client && client.uuid ? client.uuid : ''} id=${id}`);
+  const pending = pendingPings.get(id);
+  if (!pending) {
+    return;
+  }
+  clearTimeout(pending.timer);
+  pendingPings.delete(id);
+  pending.resolve({
+    ok: true,
+    id,
+    client,
+    reason: 'pong',
+    connectionId
+  });
+}
+
+function activeClients() {
+  return Array.from(clients.values()).filter((client) => client.socket && !client.socket.destroyed);
+}
+
+function sendApplicationPing(client, id, reason) {
+  sendJson(client.socket, {
+    type: 'ping',
+    id,
+    ts: Math.floor(Date.now() / 1000),
+    source: 'sysmgrd',
+    reason
+  });
+  log(`ping sent connection=${client.id} uuid=${client.uuid || ''} id=${id} reason=${reason}`);
+}
+
+function pingAnyClient(reason) {
+  const candidates = activeClients();
+  const id = `ping-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  if (candidates.length === 0) {
+    log(`ping failed id=${id} reason=${reason} error=no-connected-clients`);
+    return Promise.resolve({id, ok: false, reason: 'no connected clients'});
+  }
+
+  return new Promise((resolve) => {
+    const sentClients = [];
+    const timer = setTimeout(() => {
+      pendingPings.delete(id);
+      log(`ping failed id=${id} reason=${reason} error=no-pong timeout_ms=${PING_TIMEOUT_MS} clients=${sentClients.map((client) => client.id).join(',')}`);
+      for (const client of sentClients) {
+        if (client.socket && !client.socket.destroyed) {
+          log(`ping timeout; terminating connection=${client.id} uuid=${client.uuid || ''} from=${client.from || ''}`);
+          client.socket.destroy();
+        }
+      }
+      resolve({id, ok: false, reason: 'no pong'});
+    }, PING_TIMEOUT_MS);
+
+    pendingPings.set(id, {
+      timer,
+      resolve
+    });
+
+    for (const client of candidates) {
+      try {
+        sendApplicationPing(client, id, reason);
+        sentClients.push(client);
+      } catch (err) {
+        log(`ping send failed connection=${client.id} uuid=${client.uuid || ''} id=${id} error=${err.message}`);
+        try {
+          client.socket.destroy();
+        } catch (destroyErr) {
+          log(`ping failed connection destroy failed connection=${client.id} error=${destroyErr.message}`);
+        }
+      }
+    }
+
+    if (sentClients.length === 0) {
+      clearTimeout(timer);
+      pendingPings.delete(id);
+      log(`ping failed id=${id} reason=${reason} error=no-sendable-clients`);
+      resolve({id, ok: false, reason: 'no sendable clients'});
+    }
+  });
+}
+
+async function deliverNotification(notification) {
+  const action = notification.action || 'message';
+  const preflight = await pingAnyClient(`preflight:${action}`);
+  if (!preflight.ok) {
+    log(`message delivery failed action=${action} reason=preflight-ping-failed ping_id=${preflight.id} detail=${preflight.reason}`);
+    return {id: preflight.id, ok: false, reason: `preflight ping failed: ${preflight.reason}`};
+  }
+
+  const availableClients = activeClients();
+  const id = `msg-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const payload = {
+    type: 'notification',
+    id,
+    action,
+    message: notification.message || '',
+    ts: Math.floor(Date.now() / 1000)
+  };
+  if (notification.title) {
+    payload.title = notification.title;
+  }
+  if (notification.imageBase64) {
+    payload.image_mime = notification.imageMime || 'image/jpeg';
+    payload.image_base64 = notification.imageBase64;
+  }
+  if (availableClients.length === 0) {
+    log(`message delivery failed id=${id} action=${action} reason=no-connected-clients`);
+    return Promise.resolve({id, ok: false, reason: 'no connected clients'});
+  }
+
+  let sentCount = 0;
+  for (const client of availableClients) {
+    try {
+      sendJson(client.socket, payload);
+      sentCount += 1;
+    } catch (err) {
+      log(`message send failed id=${id} action=${action} connection=${client.id} error=${err.message}`);
+    }
+  }
+
+  if (sentCount === 0) {
+    log(`message delivery failed id=${id} action=${action} reason=no-sendable-clients`);
+    return Promise.resolve({id, ok: false, reason: 'no sendable clients'});
+  }
+
+  log(`message sent id=${id} action=${action} clients=${sentCount}`);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingDeliveries.delete(id);
+      log(`message delivery failed id=${id} action=${action} reason=no-ack timeout_ms=${DELIVERY_ACK_TIMEOUT_MS}`);
+      resolve({id, ok: false, reason: 'no ack'});
+    }, DELIVERY_ACK_TIMEOUT_MS);
+    pendingDeliveries.set(id, {
+      timer,
+      resolve: (ok) => resolve({id, ok, reason: ok ? 'acked' : 'failed'})
+    });
+  });
+}
+
+function generateSelfSignedCertificate() {
+  certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sysmgrd-cert-'));
+  const keyPath = path.join(certDir, 'sysmgrd.key');
+  const certPath = path.join(certDir, 'sysmgrd.crt');
+  childProcess.execFileSync('openssl', [
+    'req',
+    '-x509',
+    '-newkey',
+    'rsa:2048',
+    '-sha256',
+    '-nodes',
+    '-subj',
+    '/CN=sysmgrd.local',
+    '-days',
+    '1',
+    '-keyout',
+    keyPath,
+    '-out',
+    certPath
+  ], {stdio: 'ignore'});
+  return {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
+    certPath
+  };
+}
+
+const tlsOptions = generateSelfSignedCertificate();
+
+const server = https.createServer(tlsOptions, (req, res) => {
+  const credentials = authorizedCredentials(req.headers.authorization);
+  if (!credentials) {
+    log(`http unauthorized ${req.method} ${req.url} from=${clientAddress(req.socket)}`);
+    res.writeHead(401, {
+      'content-type': 'text/plain',
+      'www-authenticate': 'Basic realm="sysmgrd"',
+      'connection': 'close'
+    });
+    res.end('unauthorized\n');
+    return;
+  }
+  log(`http ${req.method} ${req.url} from=${clientAddress(req.socket)}`);
+  res.writeHead(200, {'content-type': 'text/plain'});
+  res.end('sysmgrd\n');
+});
+
+server.on('secureConnection', (socket) => {
+  const proxyInfo = socketProxyInfo(socket);
+  if (proxyInfo) {
+    socket.proxyProtocol = proxyInfo;
+  }
+});
+
+server.on('upgrade', (req, socket) => {
+  const credentials = authorizedCredentials(req.headers.authorization);
+  if (!credentials) {
+    log(`websocket unauthorized from=${clientAddress(req.socket)}`);
+    writeUnauthorizedSocket(socket);
+    return;
+  }
+  const key = req.headers['sec-websocket-key'];
+  if (!key) {
+    socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+    return;
+  }
+
+  const connectionId = nextConnectionId++;
+  const client = {
+    id: connectionId,
+    socket,
+    user: credentials.username,
+    uuid: '',
+    from: clientAddress(req.socket)
+  };
+  clients.set(connectionId, client);
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+    'Upgrade: websocket\r\n' +
+    'Connection: Upgrade\r\n' +
+    `Sec-WebSocket-Accept: ${websocketAccept(key)}\r\n` +
+    '\r\n'
+  );
+  log(`websocket connected connection=${connectionId} from=${client.from} user=${credentials.username}`);
+  sendJson(socket, {type: 'connected', connection_id: connectionId, ts: Math.floor(Date.now() / 1000)});
+
+  const state = {buffer: Buffer.alloc(0)};
+  socket.on('data', (chunk) => {
+    try {
+      parseFrames(state, chunk, (opcode, payload) => {
+        if (opcode === 0x1) {
+          handleTextMessage(connectionId, socket, payload.toString('utf8'));
+        } else if (opcode === 0x8) {
+          log(`websocket close frame connection=${connectionId}`);
+          socket.end();
+        } else if (opcode === 0x9) {
+          sendFrame(socket, 0xA, payload);
+        }
+      });
+    } catch (err) {
+      log(`websocket parse error connection=${connectionId} error=${err.message}`);
+      socket.destroy();
+    }
+  });
+  socket.on('end', () => {
+    log(`websocket ended connection=${connectionId}`);
+    socket.destroy();
+  });
+  socket.on('close', () => log(`websocket disconnected connection=${connectionId}`));
+  socket.on('close', () => {
+    clients.delete(connectionId);
+  });
+  socket.on('error', (err) => log(`websocket error connection=${connectionId} error=${err.message}`));
+});
+
+server.on('error', (err) => {
+  log(`daemon error ${err.message}`);
+  process.exitCode = 1;
+});
+
+const tcpServer = net.createServer(handleIncomingTcpConnection);
+tcpServer.on('error', (err) => {
+  log(`tcp server error ${err.message}`);
+  process.exitCode = 1;
+});
+tcpServer.listen(bindPort, bindIp, () => {
+  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')}`);
+});
+
+function parseControlMessage(text) {
+  const result = {};
+  for (const rawLine of String(text || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+    const match = line.match(/^([^=]+?)\s*=\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+    result[match[1].trim().toLowerCase()] = match[2];
+  }
+  return result;
+}
+
+function startControlSocket() {
+  try {
+    fs.unlinkSync(CONTROL_SOCKET_PATH);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      throw err;
+    }
+  }
+
+  const controlServer = net.createServer({allowHalfOpen: true}, (socket) => {
+    let buffer = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+    });
+    socket.on('end', async () => {
+      const request = parseControlMessage(buffer);
+      request.action = String(request.action || '').trim().toLowerCase();
+      if (!['message', 'reboot', 'ping'].includes(request.action) || (request.action === 'message' && !request.message)) {
+        log(`control request rejected reason=invalid body=${JSON.stringify(request)}`);
+        socket.end('error invalid request\n');
+        return;
+      }
+      if (request.action === 'ping') {
+        log('control ping requested');
+        const result = await pingAnyClient('control');
+        socket.end(result.ok
+          ? `ok id=${result.id} connection=${result.connectionId}\n`
+          : `error id=${result.id} reason=${result.reason}\n`);
+        return;
+      }
+      if (request.action === 'reboot' && !request.message) {
+        request.message = 'Remote reboot requested';
+      }
+      const imageBase64 = request.image_base64 || '';
+      const imageBytes = imageBase64 ? Buffer.byteLength(imageBase64, 'base64') : 0;
+      log(`control notification requested action=${request.action} title=${request.title || ''} image_bytes=${imageBytes} message=${request.message}`);
+      const result = await deliverNotification({
+        action: request.action,
+        title: request.title || '',
+        message: request.message,
+        imageMime: request.image_mime || '',
+        imageBase64
+      });
+      socket.end(result.ok ? `ok id=${result.id}\n` : `error id=${result.id} reason=${result.reason}\n`);
+    });
+    socket.on('error', (err) => {
+      log(`control socket client error ${err.message}`);
+    });
+  });
+
+  controlServer.on('error', (err) => {
+    log(`control socket error ${err.message}`);
+  });
+  controlServer.listen(CONTROL_SOCKET_PATH, () => {
+    fs.chmodSync(CONTROL_SOCKET_PATH, 0o660);
+    log(`control socket listening path=${CONTROL_SOCKET_PATH}`);
+  });
+  return controlServer;
+}
+
+const controlServer = startControlSocket();
+
+function shutdown(signal) {
+  log(`daemon shutdown signal=${signal}`);
+  cleanupCertificate();
+  cleanupControlSocket();
+  controlServer.close();
+  for (const client of clients.values()) {
+    try {
+      client.socket.destroy();
+    } catch (err) {
+      // Ignore shutdown cleanup errors.
+    }
+  }
+  tcpServer.close(() => {
+    logStream.end(() => process.exit(0));
+  });
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+
+function cleanupCertificate() {
+  if (!certDir) {
+    return;
+  }
+  try {
+    fs.rmSync(certDir, {recursive: true, force: true});
+  } catch (err) {
+    log(`certificate cleanup failed ${err.message}`);
+  }
+  certDir = null;
+}
+
+function cleanupControlSocket() {
+  try {
+    fs.unlinkSync(CONTROL_SOCKET_PATH);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      log(`control socket cleanup failed ${err.message}`);
+    }
+  }
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+process.on('uncaughtException', (err) => {
+  log(`uncaught exception ${err && err.stack ? err.stack : err}`);
+  cleanupCertificate();
+  cleanupControlSocket();
+  process.exit(1);
+});
+process.on('unhandledRejection', (err) => {
+  log(`unhandled rejection ${err && err.stack ? err.stack : err}`);
+  cleanupCertificate();
+  cleanupControlSocket();
+  process.exit(1);
+});
