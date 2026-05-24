@@ -400,7 +400,7 @@ public final class MainActivity extends Activity {
         trackPathField = addField(panel, "Track path", InputType.TYPE_CLASS_TEXT);
         httpTimeoutField = addField(panel, "HTTP timeout (seconds)", InputType.TYPE_CLASS_NUMBER);
         LinearLayout group = addToggleGroup(panel);
-        gpsUseRemoteLinkSwitch = addGroupedToggle(group, "Send GPS over Remote Link when connected");
+        gpsUseRemoteLinkSwitch = addGroupedToggle(group, "Send GPS over Remote Link");
         includeExtendedFieldsSwitch = addGroupedToggle(group, "Include extended fields");
     }
 
@@ -1990,7 +1990,7 @@ public final class MainActivity extends Activity {
     }
 
     private void sendNow() {
-        saveConfig(false);
+        saveGpsConfigOnly();
         LogStore.append(this, "ui", "Manual send requested");
         try {
             SystemTaskService.startTask(this, TaskIds.GPS_POST, "manual-send", false);
