@@ -7,6 +7,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioAttributes;
+import android.media.Ringtone;
 import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Bundle;
@@ -63,6 +65,9 @@ final class TonePickerDialog {
     private static final class PickerDialog extends Dialog {
         private final String currentTitle;
         private final Listener listener;
+        private ToneAdapter adapter;
+        private Ringtone previewRingtone;
+        private String previewUri;
 
         PickerDialog(Context context, String currentTitle, Listener listener) {
             super(context);
@@ -84,7 +89,7 @@ final class TonePickerDialog {
             header.setGravity(Gravity.CENTER_VERTICAL);
             root.addView(header, matchWrap());
 
-            final ToneAdapter adapter = new ToneAdapter(getContext(), new ArrayList<ToneEntry>());
+            adapter = new ToneAdapter(getContext(), new ArrayList<ToneEntry>());
 
             final EditText search = new EditText(getContext());
             search.setSingleLine(true);
@@ -175,10 +180,15 @@ final class TonePickerDialog {
                 @Override
                 public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
                     ToneEntry entry = adapter.getItem(position);
-                    if (listener != null) {
-                        listener.onToneSelected(entry.title, entry.typeLabel);
+                    if (entry.uri.equals(previewUri)) {
+                        stopPreview();
+                        if (listener != null) {
+                            listener.onToneSelected(entry.title, entry.typeLabel);
+                        }
+                        dismiss();
+                        return;
                     }
-                    dismiss();
+                    playPreview(entry);
                 }
             });
 
@@ -207,6 +217,57 @@ final class TonePickerDialog {
             int width = (int) (getContext().getResources().getDisplayMetrics().widthPixels * 0.94f);
             int height = (int) (getContext().getResources().getDisplayMetrics().heightPixels * 0.86f);
             window.setLayout(width, height);
+        }
+
+        @Override
+        public void dismiss() {
+            stopPreview();
+            super.dismiss();
+        }
+
+        @Override
+        protected void onStop() {
+            stopPreview();
+            super.onStop();
+        }
+
+        private void playPreview(ToneEntry entry) {
+            stopPreview();
+            try {
+                Ringtone ringtone = RingtoneManager.getRingtone(getContext(), Uri.parse(entry.uri));
+                if (ringtone == null) {
+                    return;
+                }
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                    ringtone.setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build());
+                }
+                ringtone.play();
+                previewRingtone = ringtone;
+                previewUri = entry.uri;
+                adapter.setPreviewUri(previewUri);
+            } catch (RuntimeException ignored) {
+                previewUri = null;
+                adapter.setPreviewUri(null);
+            }
+        }
+
+        private void stopPreview() {
+            if (previewRingtone != null) {
+                try {
+                    previewRingtone.stop();
+                } catch (RuntimeException ignored) {
+                }
+                previewRingtone = null;
+            }
+            if (previewUri != null) {
+                previewUri = null;
+                if (adapter != null) {
+                    adapter.setPreviewUri(null);
+                }
+            }
         }
     }
 
@@ -342,6 +403,7 @@ final class TonePickerDialog {
         private final List<ToneEntry> all = new ArrayList<>();
         private final List<ToneEntry> visible = new ArrayList<>();
         private String currentQuery = "";
+        private String previewUri;
 
         ToneAdapter(Context context, List<ToneEntry> entries) {
             this.context = context;
@@ -353,6 +415,11 @@ final class TonePickerDialog {
             visible.clear();
             all.addAll(entries);
             filter(currentQuery);
+        }
+
+        void setPreviewUri(String uri) {
+            previewUri = uri;
+            notifyDataSetChanged();
         }
 
         void filter(String query) {
@@ -402,7 +469,9 @@ final class TonePickerDialog {
             row.badge.setText(entry.typeAbbrev);
             row.title.setText(entry.title);
             row.type.setText(entry.typeLabel);
-            row.selected.setVisibility(entry.selected ? View.VISIBLE : View.GONE);
+            boolean previewing = entry.uri.equals(previewUri);
+            row.selected.setText(previewing ? "Playing" : "Selected");
+            row.selected.setVisibility((previewing || entry.selected) ? View.VISIBLE : View.GONE);
             return convertView;
         }
 

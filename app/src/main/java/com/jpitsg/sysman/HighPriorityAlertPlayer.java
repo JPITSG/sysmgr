@@ -24,6 +24,7 @@ final class HighPriorityAlertPlayer {
     private static final int MODE_LOOPING = 1;
     private static final int MODE_SINGLE_CYCLE = 2;
     private static final int UNLOCKED_VIBRATION_SECONDS = 10;
+    private static final long SCREEN_OFF_PLAY_DELAY_MILLIS = 1_000L;
 
     private static Ringtone currentRingtone;
     private static Runnable stopRunnable;
@@ -54,7 +55,7 @@ final class HighPriorityAlertPlayer {
                 LogStore.append(app, "alert", "High-priority device state interactive="
                         + state.interactive + " locked=" + state.locked + " reason=" + reason);
                 if (!state.interactive) {
-                    playOnMain(app, reason + ":screen-off", MODE_LOOPING, true);
+                    playAfterScreenOffWakeDelay(app, reason + ":screen-off");
                 } else if (state.locked) {
                     playOnMain(app, reason + ":screen-on-locked", MODE_SINGLE_CYCLE, false);
                 } else {
@@ -74,6 +75,37 @@ final class HighPriorityAlertPlayer {
                 }
             }
         });
+    }
+
+    private static void playAfterScreenOffWakeDelay(final Context app, final String reason) {
+        synchronized (LOCK) {
+            stopLocked(app, "screen-off-alert-delay");
+            cancelVibration(app);
+            stopRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    synchronized (LOCK) {
+                        if (stopRunnable != this) {
+                            return;
+                        }
+                        stopRunnable = null;
+                        DeviceState state = DeviceState.read(app);
+                        LogStore.append(app, "alert", "Delayed high-priority device state interactive="
+                                + state.interactive + " locked=" + state.locked + " reason=" + reason);
+                        if (!state.interactive) {
+                            playOnMain(app, reason + ":delayed-still-screen-off", MODE_LOOPING, true);
+                        } else if (state.locked) {
+                            playOnMain(app, reason + ":delayed-screen-on-locked", MODE_SINGLE_CYCLE, false);
+                        } else {
+                            vibrateOnMain(app, reason + ":delayed-screen-on-unlocked", UNLOCKED_VIBRATION_SECONDS);
+                        }
+                    }
+                }
+            };
+            MAIN.postDelayed(stopRunnable, SCREEN_OFF_PLAY_DELAY_MILLIS);
+            LogStore.append(app, "alert", "Delaying screen-off high-priority tone by "
+                    + SCREEN_OFF_PLAY_DELAY_MILLIS + "ms reason=" + reason);
+        }
     }
 
     private static void playOnMain(Context app, String reason, int mode, boolean stopOnScreenOn) {
