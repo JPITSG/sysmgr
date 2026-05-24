@@ -41,7 +41,7 @@ public final class HighPriorityNotificationListener extends NotificationListener
 
             LogStore.append(this, "notification", "Package-based high-priority match title=" + payload.shortTitle()
                     + " text=" + payload.shortText());
-            NotificationHistoryStore.add(this, "High Priority", payload.title, payload.text, packageName, false);
+            NotificationHistoryStore.add(this, "High Priority", payload.title, payload.text, packageName, false, true);
             HighPriorityAlertPlayer.handleNotification(this, "notification:" + packageName);
         }
     }

@@ -23,27 +23,21 @@ final class HighPriorityAlertPlayer {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final int MODE_LOOPING = 1;
     private static final int MODE_SINGLE_CYCLE = 2;
-    private static final int UNLOCKED_VIBRATION_SECONDS = 10;
-    private static final long SCREEN_OFF_PLAY_DELAY_MILLIS = 1_000L;
+    private static final long LOCKED_PLAY_DELAY_MILLIS = 1_000L;
 
     private static Ringtone currentRingtone;
     private static Runnable stopRunnable;
+    private static Runnable unlockPollRunnable;
     private static boolean shouldRestoreAlarmVolume;
     private static int originalAlarmVolume = -1;
-    private static BroadcastReceiver screenOnReceiver;
-    private static boolean screenOnReceiverRegistered;
+    private static BroadcastReceiver unlockReceiver;
+    private static boolean unlockReceiverRegistered;
 
     private HighPriorityAlertPlayer() {
     }
 
     static void play(final Context context, final String reason) {
-        final Context app = context.getApplicationContext();
-        MAIN.post(new Runnable() {
-            @Override
-            public void run() {
-                playOnMain(app, reason, MODE_LOOPING, false);
-            }
-        });
+        handleNotification(context, reason);
     }
 
     static void handleNotification(final Context context, final String reason) {
@@ -54,12 +48,10 @@ final class HighPriorityAlertPlayer {
                 DeviceState state = DeviceState.read(app);
                 LogStore.append(app, "alert", "High-priority device state interactive="
                         + state.interactive + " locked=" + state.locked + " reason=" + reason);
-                if (!state.interactive) {
-                    playAfterScreenOffWakeDelay(app, reason + ":screen-off");
-                } else if (state.locked) {
-                    playOnMain(app, reason + ":screen-on-locked", MODE_SINGLE_CYCLE, false);
+                if (state.locked) {
+                    playAfterLockedDelay(app, reason + ":locked");
                 } else {
-                    vibrateOnMain(app, reason + ":screen-on-unlocked", UNLOCKED_VIBRATION_SECONDS);
+                    playOnMain(app, reason + ":unlocked", MODE_SINGLE_CYCLE, false, true);
                 }
             }
         });
@@ -77,10 +69,9 @@ final class HighPriorityAlertPlayer {
         });
     }
 
-    private static void playAfterScreenOffWakeDelay(final Context app, final String reason) {
+    private static void playAfterLockedDelay(final Context app, final String reason) {
         synchronized (LOCK) {
-            stopLocked(app, "screen-off-alert-delay");
-            cancelVibration(app);
+            stopLocked(app, "locked-alert-delay");
             stopRunnable = new Runnable() {
                 @Override
                 public void run() {
@@ -92,26 +83,23 @@ final class HighPriorityAlertPlayer {
                         DeviceState state = DeviceState.read(app);
                         LogStore.append(app, "alert", "Delayed high-priority device state interactive="
                                 + state.interactive + " locked=" + state.locked + " reason=" + reason);
-                        if (!state.interactive) {
-                            playOnMain(app, reason + ":delayed-still-screen-off", MODE_LOOPING, true);
-                        } else if (state.locked) {
-                            playOnMain(app, reason + ":delayed-screen-on-locked", MODE_SINGLE_CYCLE, false);
+                        if (!state.locked) {
+                            LogStore.append(app, "alert", "High-priority alert skipped; device unlocked during delay reason=" + reason);
                         } else {
-                            vibrateOnMain(app, reason + ":delayed-screen-on-unlocked", UNLOCKED_VIBRATION_SECONDS);
+                            playOnMain(app, reason + ":delayed", MODE_LOOPING, true, true);
                         }
                     }
                 }
             };
-            MAIN.postDelayed(stopRunnable, SCREEN_OFF_PLAY_DELAY_MILLIS);
-            LogStore.append(app, "alert", "Delaying screen-off high-priority tone by "
-                    + SCREEN_OFF_PLAY_DELAY_MILLIS + "ms reason=" + reason);
+            MAIN.postDelayed(stopRunnable, LOCKED_PLAY_DELAY_MILLIS);
+            LogStore.append(app, "alert", "Delaying locked high-priority tone by "
+                    + LOCKED_PLAY_DELAY_MILLIS + "ms reason=" + reason);
         }
     }
 
-    private static void playOnMain(Context app, String reason, int mode, boolean stopOnScreenOn) {
+    private static void playOnMain(Context app, String reason, int mode, boolean stopOnUnlock, boolean vibrateWithTone) {
         synchronized (LOCK) {
             stopLocked(app, "restart");
-            cancelVibration(app);
 
             Config config = Config.get(app);
             AudioManager audio = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
@@ -148,18 +136,23 @@ final class HighPriorityAlertPlayer {
             }
 
             currentRingtone = ringtone;
-            if (stopOnScreenOn) {
-                registerScreenOnStop(app);
+            long maxPlayMillis = Math.max(1000L, config.highPriorityPlaySeconds() * 1000L);
+            if (vibrateWithTone) {
+                vibrate(app, reason + ":tone", maxPlayMillis);
+            }
+            if (stopOnUnlock) {
+                registerUnlockStop(app);
             }
             if (mode == MODE_SINGLE_CYCLE) {
-                scheduleSingleCycleStop(app, ringtone, Math.max(1000L, config.highPriorityPlaySeconds() * 1000L));
+                scheduleSingleCycleStop(app, ringtone, maxPlayMillis);
             } else {
-                scheduleTimeoutStop(app, Math.max(1000L, config.highPriorityPlaySeconds() * 1000L));
+                scheduleTimeoutStop(app, maxPlayMillis);
             }
             LogStore.append(app, "alert", "Playing high-priority alert tone=" + config.highPriorityToneTitle()
                     + " reason=" + reason
                     + " mode=" + (mode == MODE_SINGLE_CYCLE ? "single-cycle" : "looping")
-                    + " stopOnScreenOn=" + stopOnScreenOn
+                    + " stopOnUnlock=" + stopOnUnlock
+                    + " vibrateWithTone=" + vibrateWithTone
                     + " maxDuration=" + config.highPriorityPlaySeconds() + "s");
         }
     }
@@ -206,13 +199,6 @@ final class HighPriorityAlertPlayer {
         MAIN.postDelayed(stopRunnable, 500L);
     }
 
-    private static void vibrateOnMain(Context app, String reason, int seconds) {
-        synchronized (LOCK) {
-            stopLocked(app, "vibrate-mode");
-            vibrate(app, reason, seconds);
-        }
-    }
-
     private static void prepareAlarmVolume(Context app, AudioManager audio, Config config) {
         shouldRestoreAlarmVolume = false;
         originalAlarmVolume = -1;
@@ -242,7 +228,8 @@ final class HighPriorityAlertPlayer {
             MAIN.removeCallbacks(stopRunnable);
             stopRunnable = null;
         }
-        unregisterScreenOnStop(app);
+        unregisterUnlockStop(app);
+        cancelVibration(app);
 
         if (currentRingtone != null) {
             try {
@@ -258,50 +245,77 @@ final class HighPriorityAlertPlayer {
         restoreAlarmVolume(app, audio);
     }
 
-    private static void registerScreenOnStop(final Context app) {
-        if (screenOnReceiverRegistered) {
+    private static void registerUnlockStop(final Context app) {
+        if (!unlockReceiverRegistered) {
+            unlockReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    if (intent != null && Intent.ACTION_USER_PRESENT.equals(intent.getAction())) {
+                        LogStore.append(app, "alert", "Device unlocked; stopping high-priority alert");
+                        stop(app, "unlocked");
+                    }
+                }
+            };
+
+            IntentFilter filter = new IntentFilter(Intent.ACTION_USER_PRESENT);
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    app.registerReceiver(unlockReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+                } else {
+                    app.registerReceiver(unlockReceiver, filter);
+                }
+                unlockReceiverRegistered = true;
+                LogStore.append(app, "alert", "Registered unlock stop receiver");
+            } catch (RuntimeException e) {
+                unlockReceiver = null;
+                unlockReceiverRegistered = false;
+                LogStore.append(app, "alert", "Could not register unlock receiver: " + e.getMessage());
+            }
+        }
+        scheduleUnlockPoll(app);
+    }
+
+    private static void scheduleUnlockPoll(final Context app) {
+        if (unlockPollRunnable != null) {
             return;
         }
-
-        screenOnReceiver = new BroadcastReceiver() {
+        unlockPollRunnable = new Runnable() {
             @Override
-            public void onReceive(Context context, Intent intent) {
-                if (intent != null && Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
-                    LogStore.append(app, "alert", "Screen turned on; stopping high-priority alert");
-                    stop(app, "screen-on");
+            public void run() {
+                synchronized (LOCK) {
+                    if (currentRingtone == null) {
+                        unlockPollRunnable = null;
+                        return;
+                    }
+                    if (!DeviceState.read(app).locked) {
+                        LogStore.append(app, "alert", "Device unlock detected by poll; stopping high-priority alert");
+                        stopLocked(app, "unlocked");
+                        return;
+                    }
+                    MAIN.postDelayed(this, 500L);
                 }
             }
         };
-
-        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_ON);
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                app.registerReceiver(screenOnReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-            } else {
-                app.registerReceiver(screenOnReceiver, filter);
-            }
-            screenOnReceiverRegistered = true;
-            LogStore.append(app, "alert", "Registered screen-on stop receiver");
-        } catch (RuntimeException e) {
-            screenOnReceiver = null;
-            screenOnReceiverRegistered = false;
-            LogStore.append(app, "alert", "Could not register screen-on receiver: " + e.getMessage());
-        }
+        MAIN.postDelayed(unlockPollRunnable, 500L);
     }
 
-    private static void unregisterScreenOnStop(Context app) {
-        if (!screenOnReceiverRegistered || screenOnReceiver == null) {
-            screenOnReceiver = null;
-            screenOnReceiverRegistered = false;
+    private static void unregisterUnlockStop(Context app) {
+        if (unlockPollRunnable != null) {
+            MAIN.removeCallbacks(unlockPollRunnable);
+            unlockPollRunnable = null;
+        }
+        if (!unlockReceiverRegistered || unlockReceiver == null) {
+            unlockReceiver = null;
+            unlockReceiverRegistered = false;
             return;
         }
         try {
-            app.unregisterReceiver(screenOnReceiver);
+            app.unregisterReceiver(unlockReceiver);
         } catch (RuntimeException e) {
-            LogStore.append(app, "alert", "Could not unregister screen-on receiver: " + e.getMessage());
+            LogStore.append(app, "alert", "Could not unregister unlock receiver: " + e.getMessage());
         } finally {
-            screenOnReceiver = null;
-            screenOnReceiverRegistered = false;
+            unlockReceiver = null;
+            unlockReceiverRegistered = false;
         }
     }
 
@@ -396,8 +410,8 @@ final class HighPriorityAlertPlayer {
     }
 
     @SuppressWarnings("deprecation")
-    private static void vibrate(Context context, String reason, int seconds) {
-        if (seconds <= 0) {
+    private static void vibrate(Context context, String reason, long durationMillis) {
+        if (durationMillis <= 0L) {
             return;
         }
         Vibrator vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
@@ -406,14 +420,13 @@ final class HighPriorityAlertPlayer {
             return;
         }
 
-        long durationMillis = seconds * 1000L;
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 vibrator.vibrate(VibrationEffect.createOneShot(durationMillis, VibrationEffect.DEFAULT_AMPLITUDE));
             } else {
                 vibrator.vibrate(durationMillis);
             }
-            LogStore.append(context, "alert", "Vibrating high-priority alert for " + seconds + "s reason=" + reason);
+            LogStore.append(context, "alert", "Vibrating high-priority alert for " + durationMillis + "ms reason=" + reason);
         } catch (RuntimeException e) {
             LogStore.append(context, "alert", "High-priority vibration failed: " + e.getMessage());
         }

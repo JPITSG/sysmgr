@@ -41,8 +41,10 @@ final class NotificationHistoryStore {
         final String icon;
         final boolean hasImage;
         final String imageFileName;
+        final boolean highPriority;
 
-        Entry(long timestampMillis, String id, String source, String title, String message, String icon, boolean hasImage, String imageFileName) {
+        Entry(long timestampMillis, String id, String source, String title, String message, String icon,
+              boolean hasImage, String imageFileName, boolean highPriority) {
             this.timestampMillis = timestampMillis;
             this.id = id == null ? "" : id;
             this.source = source;
@@ -51,20 +53,30 @@ final class NotificationHistoryStore {
             this.icon = icon;
             this.hasImage = hasImage;
             this.imageFileName = imageFileName == null ? "" : imageFileName;
+            this.highPriority = highPriority;
         }
     }
 
     static void add(Context context, String source, String title, String message, String icon, boolean hasImage) {
-        add(context, source, title, message, icon, hasImage, "");
+        add(context, source, title, message, icon, hasImage, false);
+    }
+
+    static void add(Context context, String source, String title, String message, String icon, boolean hasImage, boolean highPriority) {
+        add(context, source, title, message, icon, hasImage, "", highPriority);
     }
 
     static void add(Context context, String source, String title, String message, String icon, String imageBase64) {
-        Context app = context.getApplicationContext();
-        String imageFileName = writeImage(app, imageBase64);
-        add(app, source, title, message, icon, !imageFileName.isEmpty(), imageFileName);
+        add(context, source, title, message, icon, imageBase64, false);
     }
 
-    private static void add(Context context, String source, String title, String message, String icon, boolean hasImage, String imageFileName) {
+    static void add(Context context, String source, String title, String message, String icon, String imageBase64, boolean highPriority) {
+        Context app = context.getApplicationContext();
+        String imageFileName = writeImage(app, imageBase64);
+        add(app, source, title, message, icon, !imageFileName.isEmpty(), imageFileName, highPriority);
+    }
+
+    private static void add(Context context, String source, String title, String message, String icon,
+                            boolean hasImage, String imageFileName, boolean highPriority) {
         Context app = context.getApplicationContext();
         synchronized (LOCK) {
             List<Entry> entries = readLocked(app);
@@ -76,7 +88,8 @@ final class NotificationHistoryStore {
                     clean(message, ""),
                     clean(icon, ""),
                     hasImage,
-                    cleanImageFileName(imageFileName)));
+                    cleanImageFileName(imageFileName),
+                    highPriority));
             while (entries.size() > MAX_ENTRIES) {
                 Entry removed = entries.remove(entries.size() - 1);
                 deleteImage(app, removed.imageFileName);
@@ -168,6 +181,7 @@ final class NotificationHistoryStore {
                 String message = object.optString("message", "");
                 String icon = object.optString("icon", "");
                 String imageFile = cleanImageFileName(object.optString("image_file", ""));
+                boolean highPriority = object.optBoolean("high_priority", "High Priority".equalsIgnoreCase(source));
                 long ts = object.optLong("ts", 0L);
                 if (id.isEmpty()) {
                     id = legacyId(ts, source, title, message, icon, imageFile);
@@ -180,7 +194,8 @@ final class NotificationHistoryStore {
                         message,
                         icon,
                         object.optBoolean("image", false) || !imageFile.isEmpty(),
-                        imageFile));
+                        imageFile,
+                        highPriority));
             }
         } catch (Exception ignored) {
             return new ArrayList<>();
@@ -201,6 +216,7 @@ final class NotificationHistoryStore {
                 object.put("icon", entry.icon);
                 object.put("image", entry.hasImage);
                 object.put("image_file", entry.imageFileName);
+                object.put("high_priority", entry.highPriority);
                 array.put(object);
             }
         } catch (Exception ignored) {

@@ -12,6 +12,7 @@ const path = require('path');
 const CONTROL_SOCKET_PATH = '/tmp/syslogd.sock';
 const DELIVERY_ACK_TIMEOUT_MS = 10000;
 const PING_TIMEOUT_MS = 10000;
+const PING_RECONNECT_GRACE_MS = 5000;
 const PROXY_V2_SIGNATURE = Buffer.from('\r\n\r\n\0\r\nQUIT\n', 'binary');
 const PROXY_HEADER_TIMEOUT_MS = 5000;
 const MYSQL_DEFAULT_CLIENT = '/usr/bin/mysql';
@@ -701,6 +702,62 @@ function replacementClientsFor(sentClients) {
   return activeClients().filter((client) => client.uuid && uuids.has(client.uuid) && !sentIds.has(client.id));
 }
 
+function uuidsForClients(sentClients) {
+  return Array.from(new Set((sentClients || []).map((client) => client.uuid).filter(Boolean)));
+}
+
+function waitForReplacementClients(sentClients, timeoutMs) {
+  return new Promise((resolve) => {
+    let finished = false;
+    let interval = null;
+    let timeout = null;
+    const done = (clients) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearInterval(interval);
+      clearTimeout(timeout);
+      resolve(clients);
+    };
+    const check = () => {
+      const replacements = replacementClientsFor(sentClients);
+      if (replacements.length > 0) {
+        done(replacements);
+      }
+    };
+    interval = setInterval(check, 250);
+    timeout = setTimeout(() => done(replacementClientsFor(sentClients)), timeoutMs);
+    check();
+  });
+}
+
+function resolveConnectionLostPings(connectionId, uuid, reason, excludingId) {
+  for (const [id, pending] of pendingPings.entries()) {
+    if (id === excludingId) {
+      continue;
+    }
+    if (!pending.sentClients || !pending.sentClients.some((client) => client.id === connectionId)) {
+      continue;
+    }
+    const liveSentClients = pending.sentClients.filter((client) =>
+      client.id !== connectionId && !client.supersededBy && client.socket && !client.socket.destroyed);
+    if (liveSentClients.length > 0) {
+      log(`ping connection lost id=${id} connection=${connectionId} uuid=${uuid || ''} reason=${reason} waiting_clients=${liveSentClients.map((client) => client.id).join(',')}`);
+      continue;
+    }
+    clearTimeout(pending.timer);
+    pendingPings.delete(id);
+    log(`ping connection lost id=${id} connection=${connectionId} uuid=${uuid || ''} reason=${reason}`);
+    pending.resolve({
+      id,
+      ok: false,
+      reason,
+      sentClients: pending.sentClients
+    });
+  }
+}
+
 function resolveSupersededPings(uuid, oldConnectionId, newConnectionId) {
   for (const [id, pending] of pendingPings.entries()) {
     if (!pending.sentClients || !pending.sentClients.some((client) => client.id === oldConnectionId && client.uuid === uuid)) {
@@ -735,7 +792,19 @@ async function pingAnyClient(reason) {
     return first;
   }
 
-  const replacements = replacementClientsFor(first.sentClients || []);
+  let replacements = replacementClientsFor(first.sentClients || []);
+  if (replacements.length === 0) {
+    const uuids = uuidsForClients(first.sentClients || []);
+    if (uuids.length > 0) {
+      log(`ping waiting for replacement reason=${reason} prior_id=${first.id} uuids=${uuids.join(',')} timeout_ms=${PING_RECONNECT_GRACE_MS}`);
+      replacements = await waitForReplacementClients(first.sentClients || [], PING_RECONNECT_GRACE_MS);
+      if (replacements.length > 0) {
+        log(`ping replacement appeared reason=${reason} prior_id=${first.id} replacement_connections=${replacements.map((client) => client.id).join(',')}`);
+      } else {
+        log(`ping replacement wait expired reason=${reason} prior_id=${first.id} uuids=${uuids.join(',')}`);
+      }
+    }
+  }
   if (replacements.length === 0) {
     return first;
   }
@@ -774,6 +843,7 @@ function pingClientSet(reason, candidates, attempt) {
           log(`ping timeout; terminating connection=${client.id} uuid=${client.uuid || ''} from=${client.from || ''}`);
           client.socket.destroy();
         }
+        resolveConnectionLostPings(client.id, client.uuid, 'connection-timeout', id);
       }
       resolve({id, ok: false, reason: 'no pong', sentClients});
     }, PING_TIMEOUT_MS);
@@ -972,8 +1042,12 @@ server.on('upgrade', (req, socket) => {
     log(`websocket ended connection=${connectionId}`);
     socket.destroy();
   });
-  socket.on('close', () => log(`websocket disconnected connection=${connectionId}`));
   socket.on('close', () => {
+    log(`websocket disconnected connection=${connectionId}`);
+    const closedClient = clients.get(connectionId);
+    if (closedClient) {
+      resolveConnectionLostPings(connectionId, closedClient.uuid, 'connection-closed');
+    }
     clients.delete(connectionId);
   });
   socket.on('error', (err) => log(`websocket error connection=${connectionId} error=${err.message}`));

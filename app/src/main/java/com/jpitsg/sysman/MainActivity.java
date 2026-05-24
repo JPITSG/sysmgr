@@ -376,6 +376,7 @@ public final class MainActivity extends Activity {
 
         notificationHistoryList = newColumn();
         notificationHistoryList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        notificationHistoryList.setClipToOutline(true);
         frame.content.addView(notificationHistoryList, stack(frame.content));
 
         LinearLayout buttons = newRow();
@@ -712,13 +713,15 @@ public final class MainActivity extends Activity {
     private void addHistoryEntry(NotificationHistoryStore.Entry entry) {
         LinearLayout item = newColumn();
         item.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        item.setBackgroundColor(entry.highPriority ? COLOR_DANGER_CONTAINER : COLOR_FIELD_BG);
 
         LinearLayout meta = newRow();
         item.addView(meta, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        TextView source = historyText(entry.source.toUpperCase(Locale.US), 10, COLOR_PRIMARY, true);
+        TextView source = historyText(entry.source.toUpperCase(Locale.US), 10,
+                entry.highPriority ? COLOR_DANGER_ON_CONTAINER : COLOR_PRIMARY, true);
         source.setLetterSpacing(0.12f);
         source.setSingleLine(true);
         source.setEllipsize(TextUtils.TruncateAt.END);
@@ -728,7 +731,8 @@ public final class MainActivity extends Activity {
         time.setSingleLine(true);
         meta.addView(time, inRow(meta, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
 
-        TextView title = historyText(historyDisplayTitle(entry), 14, COLOR_TEXT, true);
+        TextView title = historyText(historyDisplayTitle(entry), 14,
+                entry.highPriority ? COLOR_DANGER_ON_CONTAINER : COLOR_TEXT, true);
         title.setMaxLines(2);
         title.setEllipsize(TextUtils.TruncateAt.END);
         item.addView(title, topMarginParams(6));

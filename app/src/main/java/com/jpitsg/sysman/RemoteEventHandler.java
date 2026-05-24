@@ -92,29 +92,30 @@ final class RemoteEventHandler {
             return;
         }
 
-        handleHighPrioritySocketAlert(context, id, title, body);
-        NotificationHistoryStore.add(context, "Remote", title, body, "", imageBase64);
+        boolean highPriority = handleHighPrioritySocketAlert(context, id, title, body);
+        NotificationHistoryStore.add(context, "Remote", title, body, "", imageBase64, highPriority);
         showNotification(context, id, action, title, body, imageMime, imageBase64);
     }
 
-    private static void handleHighPrioritySocketAlert(Context context, String id, String title, String body) {
+    private static boolean handleHighPrioritySocketAlert(Context context, String id, String title, String body) {
         Context app = context.getApplicationContext();
         Config config = Config.get(app);
         if (!config.highPriorityRemoteEnabled()) {
-            return;
+            return false;
         }
         String filter = config.highPriorityRemoteTextFilter();
         String haystack = cleanTitle(title) + "\n" + body;
         if (!hasText(filter) || !haystack.contains(filter)) {
             LogStore.append(app, "remote", "Remote Link high-priority alert ignored; text did not contain filter id=" + id);
-            return;
+            return false;
         }
         if (NotificationDeduper.wasRecentlyHandled("remote-socket", haystack, config.highPriorityRemoteDedupeSeconds())) {
             LogStore.append(app, "remote", "Duplicate Remote Link high-priority alert suppressed id=" + id);
-            return;
+            return true;
         }
         LogStore.append(app, "remote", "Remote Link high-priority alert matched id=" + id + " filter=" + filter);
         HighPriorityAlertPlayer.handleNotification(app, "remote-link:" + id);
+        return true;
     }
 
     private static void showNotification(Context context, String id, String action, String title, String body,
