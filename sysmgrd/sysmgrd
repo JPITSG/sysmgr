@@ -453,7 +453,10 @@ function assignClientUuid(connectionId, socket, rawUuid) {
     if (other.id === connectionId || other.uuid !== uuid || !other.socket || other.socket.destroyed) {
       continue;
     }
+    other.supersededBy = connectionId;
+    other.supersededAt = Date.now();
     log(`uuid duplicate detected uuid=${uuid} new_connection=${connectionId} old_connection=${other.id} old_from=${other.from || ''}; terminating old connection`);
+    resolveSupersededPings(uuid, other.id, connectionId);
     try {
       sendFrame(other.socket, 0x8, Buffer.from('duplicate uuid', 'utf8'));
     } catch (err) {
@@ -689,6 +692,32 @@ function activeClients() {
   return Array.from(clients.values()).filter((client) => client.socket && !client.socket.destroyed);
 }
 
+function replacementClientsFor(sentClients) {
+  const sentIds = new Set(sentClients.map((client) => client.id));
+  const uuids = new Set(sentClients.map((client) => client.uuid).filter(Boolean));
+  if (uuids.size === 0) {
+    return [];
+  }
+  return activeClients().filter((client) => client.uuid && uuids.has(client.uuid) && !sentIds.has(client.id));
+}
+
+function resolveSupersededPings(uuid, oldConnectionId, newConnectionId) {
+  for (const [id, pending] of pendingPings.entries()) {
+    if (!pending.sentClients || !pending.sentClients.some((client) => client.id === oldConnectionId && client.uuid === uuid)) {
+      continue;
+    }
+    clearTimeout(pending.timer);
+    pendingPings.delete(id);
+    log(`ping superseded id=${id} uuid=${uuid} old_connection=${oldConnectionId} new_connection=${newConnectionId}`);
+    pending.resolve({
+      id,
+      ok: false,
+      reason: 'superseded',
+      sentClients: pending.sentClients
+    });
+  }
+}
+
 function sendApplicationPing(client, id, reason) {
   sendJson(client.socket, {
     type: 'ping',
@@ -700,31 +729,59 @@ function sendApplicationPing(client, id, reason) {
   log(`ping sent connection=${client.id} uuid=${client.uuid || ''} id=${id} reason=${reason}`);
 }
 
-function pingAnyClient(reason) {
-  const candidates = activeClients();
+async function pingAnyClient(reason) {
+  const first = await pingClientSet(reason, activeClients(), 1);
+  if (first.ok) {
+    return first;
+  }
+
+  const replacements = replacementClientsFor(first.sentClients || []);
+  if (replacements.length === 0) {
+    return first;
+  }
+
+  log(`ping retrying reason=${reason} prior_id=${first.id} replacement_connections=${replacements.map((client) => client.id).join(',')} replacement_uuids=${Array.from(new Set(replacements.map((client) => client.uuid).filter(Boolean))).join(',')}`);
+  const second = await pingClientSet(`${reason}:replacement`, replacements, 2);
+  if (second.ok) {
+    return second;
+  }
+  return {
+    id: second.id,
+    ok: false,
+    reason: `replacement retry failed: ${second.reason}`,
+    sentClients: second.sentClients
+  };
+}
+
+function pingClientSet(reason, candidates, attempt) {
   const id = `ping-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
   if (candidates.length === 0) {
-    log(`ping failed id=${id} reason=${reason} error=no-connected-clients`);
-    return Promise.resolve({id, ok: false, reason: 'no connected clients'});
+    log(`ping failed id=${id} reason=${reason} attempt=${attempt} error=no-connected-clients`);
+    return Promise.resolve({id, ok: false, reason: 'no connected clients', sentClients: []});
   }
 
   return new Promise((resolve) => {
     const sentClients = [];
     const timer = setTimeout(() => {
       pendingPings.delete(id);
-      log(`ping failed id=${id} reason=${reason} error=no-pong timeout_ms=${PING_TIMEOUT_MS} clients=${sentClients.map((client) => client.id).join(',')}`);
+      log(`ping failed id=${id} reason=${reason} attempt=${attempt} error=no-pong timeout_ms=${PING_TIMEOUT_MS} clients=${sentClients.map((client) => client.id).join(',')}`);
       for (const client of sentClients) {
+        if (client.supersededBy) {
+          log(`ping timeout skipped superseded connection=${client.id} uuid=${client.uuid || ''} superseded_by=${client.supersededBy}`);
+          continue;
+        }
         if (client.socket && !client.socket.destroyed) {
           log(`ping timeout; terminating connection=${client.id} uuid=${client.uuid || ''} from=${client.from || ''}`);
           client.socket.destroy();
         }
       }
-      resolve({id, ok: false, reason: 'no pong'});
+      resolve({id, ok: false, reason: 'no pong', sentClients});
     }, PING_TIMEOUT_MS);
 
     pendingPings.set(id, {
       timer,
-      resolve
+      resolve,
+      sentClients
     });
 
     for (const client of candidates) {
@@ -744,8 +801,8 @@ function pingAnyClient(reason) {
     if (sentClients.length === 0) {
       clearTimeout(timer);
       pendingPings.delete(id);
-      log(`ping failed id=${id} reason=${reason} error=no-sendable-clients`);
-      resolve({id, ok: false, reason: 'no sendable clients'});
+      log(`ping failed id=${id} reason=${reason} attempt=${attempt} error=no-sendable-clients`);
+      resolve({id, ok: false, reason: 'no sendable clients', sentClients: candidates});
     }
   });
 }
