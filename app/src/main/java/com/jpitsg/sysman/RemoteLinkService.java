@@ -21,12 +21,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class RemoteLinkService extends Service {
     private static final String CHANNEL_ID = "system_manager_remote_link";
     private static final int NOTIFICATION_ID = 0x5303;
+    private static final long GPS_ACK_TIMEOUT_MILLIS = 10_000L;
     private static volatile RemoteLinkService activeService;
 
     private final AtomicBoolean workerRunning = new AtomicBoolean(false);
     private final ConcurrentLinkedQueue<String> pendingManualPingReasons = new ConcurrentLinkedQueue<>();
+    private final Object gpsAckLock = new Object();
+    private final java.util.Map<String, PendingGpsAck> pendingGpsAcks = new java.util.HashMap<>();
     private volatile boolean stopRequested;
     private volatile RemoteWebSocketClient client;
+    private volatile long heartbeatResetAtMillis;
     private Thread worker;
 
     @Override
@@ -186,6 +190,7 @@ public final class RemoteLinkService extends Service {
     private void runConnectedLoop(RemoteWebSocketClient current) throws IOException {
         long nextHeartbeatAt = 0L;
         long lastInboundAt = current.lastInboundAtMillis();
+        long lastHeartbeatResetAt = heartbeatResetAtMillis;
         while (!stopRequested && Config.get(this).remoteLinkEnabled() && current.isOpen()) {
             Config config = Config.get(this);
             sendQueuedPings(current);
@@ -198,13 +203,55 @@ public final class RemoteLinkService extends Service {
                         + config.remoteLinkHeartbeatSeconds() + "s");
             }
             if (message != null) {
-                RemoteEventHandler.handle(this, current, message);
+                if (!handleServiceMessage(message)) {
+                    RemoteEventHandler.handle(this, current, message);
+                }
+            }
+            long heartbeatResetAt = heartbeatResetAtMillis;
+            if (heartbeatResetAt > lastHeartbeatResetAt) {
+                lastHeartbeatResetAt = heartbeatResetAt;
+                nextHeartbeatAt = heartbeatResetAt + heartbeatDelayMillis(config);
+                LogStore.append(this, "remote", "Heartbeat timer reset by outbound traffic next_in="
+                        + config.remoteLinkHeartbeatSeconds() + "s");
             }
             long now = SystemClock.elapsedRealtime();
             if (now >= nextHeartbeatAt) {
                 sendHeartbeat(current);
                 nextHeartbeatAt = now + heartbeatDelayMillis(config);
             }
+        }
+    }
+
+    private boolean handleServiceMessage(String message) {
+        try {
+            JSONObject json = new JSONObject(message);
+            if ("gps_ack".equals(json.optString("type", ""))) {
+                handleGpsAck(json);
+                return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private void handleGpsAck(JSONObject json) {
+        String id = json.optString("id", "");
+        if (id.isEmpty()) {
+            LogStore.append(this, "remote", "GPS ack ignored; missing id");
+            return;
+        }
+        synchronized (gpsAckLock) {
+            PendingGpsAck pending = pendingGpsAcks.remove(id);
+            if (pending == null) {
+                LogStore.append(this, "remote", "GPS ack ignored id=" + id);
+                return;
+            }
+            pending.complete = true;
+            pending.ok = json.optBoolean("ok", true);
+            pending.reason = json.optString("reason", "");
+            gpsAckLock.notifyAll();
+            LogStore.append(this, "remote", "GPS ack received id=" + id
+                    + " ok=" + pending.ok + " reason=" + pending.reason);
         }
     }
 
@@ -265,16 +312,68 @@ public final class RemoteLinkService extends Service {
             LogStore.append(this, "remote", "Remote Link not connected for GPS payload");
             return false;
         }
+        String id = payload.optString("id", "");
+        if (id.isEmpty()) {
+            id = "gps-" + UUID.randomUUID().toString();
+            try {
+                payload.put("id", id);
+            } catch (Exception e) {
+                LogStore.append(this, "remote", "GPS payload id failed: " + e.getMessage());
+                return false;
+            }
+        }
+
+        PendingGpsAck pending = new PendingGpsAck();
+        synchronized (gpsAckLock) {
+            pendingGpsAcks.put(id, pending);
+        }
         try {
             current.sendText(payload.toString());
-            LogStore.append(this, "remote", "GPS payload sent over Remote Link");
-            return true;
+            heartbeatResetAtMillis = SystemClock.elapsedRealtime();
+            LogStore.append(this, "remote", "GPS payload sent over Remote Link id=" + id);
         } catch (Exception e) {
+            synchronized (gpsAckLock) {
+                pendingGpsAcks.remove(id);
+            }
             LogStore.append(this, "remote", "GPS payload send failed: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());
             current.close();
             return false;
         }
+
+        long deadline = SystemClock.elapsedRealtime() + GPS_ACK_TIMEOUT_MILLIS;
+        synchronized (gpsAckLock) {
+            while (!pending.complete) {
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                if (remaining <= 0L) {
+                    pendingGpsAcks.remove(id);
+                    LogStore.append(this, "remote", "GPS ack timeout id=" + id
+                            + " timeout_ms=" + GPS_ACK_TIMEOUT_MILLIS);
+                    current.close();
+                    return false;
+                }
+                try {
+                    gpsAckLock.wait(Math.min(remaining, 1000L));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    pendingGpsAcks.remove(id);
+                    LogStore.append(this, "remote", "GPS ack wait interrupted id=" + id);
+                    return false;
+                }
+            }
+            if (!pending.ok) {
+                LogStore.append(this, "remote", "GPS ack reported failure id=" + id
+                        + " reason=" + pending.reason);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static final class PendingGpsAck {
+        boolean complete;
+        boolean ok;
+        String reason = "";
     }
 
     private void closeClient() {

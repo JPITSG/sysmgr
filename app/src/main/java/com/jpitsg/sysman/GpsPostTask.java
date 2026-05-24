@@ -68,10 +68,10 @@ final class GpsPostTask implements SystemTask {
             try {
                 JSONObject payload = gpsPayload(params);
                 if (RemoteLinkService.sendGpsIfRunning(context, payload)) {
-                    LogStore.append(context, "gps", "Sent GPS payload over Remote Link " + params);
-                    return TaskResult.success("Remote Link GPS sent");
+                    LogStore.append(context, "gps", "Sent GPS payload over Remote Link with ack " + params);
+                    return TaskResult.success("Remote Link GPS acked");
                 }
-                LogStore.append(context, "gps", "Remote Link unavailable; falling back to HTTP GET");
+                LogStore.append(context, "gps", "Remote Link GPS not acked; falling back to HTTP GET");
             } catch (Exception e) {
                 LogStore.append(context, "gps", "Remote Link GPS payload failed; falling back to HTTP GET: "
                         + e.getClass().getSimpleName() + ": " + e.getMessage());

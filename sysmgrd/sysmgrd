@@ -479,7 +479,8 @@ function handleTextMessage(connectionId, socket, text) {
     return;
   }
   if (parsed.type === 'gps') {
-    logGpsMessage(connectionId, parsed);
+    const result = handleGpsMessage(connectionId, parsed);
+    sendGpsAck(connectionId, socket, parsed.id, result);
     return;
   }
   if (parsed.type === 'ack' && parsed.id) {
@@ -517,7 +518,7 @@ function logValue(value) {
     .slice(0, 240);
 }
 
-function logGpsMessage(connectionId, message) {
+function handleGpsMessage(connectionId, message) {
   log(`gps received connection=${connectionId}` +
     ` lat=${logValue(message.lat)}` +
     ` lon=${logValue(message.lon)}` +
@@ -529,7 +530,25 @@ function logGpsMessage(connectionId, message) {
     ` source=${logValue(message.source)}` +
     ` reason=${logValue(message.reason)}` +
     ` ts=${logValue(message.ts)}`);
-  insertGpsMessage(connectionId, message);
+  return insertGpsMessage(connectionId, message);
+}
+
+function sendGpsAck(connectionId, socket, id, result) {
+  const ackId = String(id || '');
+  const ok = Boolean(result && result.ok);
+  const reason = result && result.reason ? result.reason : '';
+  try {
+    sendJson(socket, {
+      type: 'gps_ack',
+      id: ackId,
+      ok,
+      reason,
+      ts: Math.floor(Date.now() / 1000)
+    });
+    log(`gps ack sent connection=${connectionId} id=${logValue(ackId)} ok=${ok} reason=${logValue(reason)}`);
+  } catch (err) {
+    log(`gps ack failed connection=${connectionId} id=${logValue(ackId)} error=${logValue(err && err.message ? err.message : err)}`);
+  }
 }
 
 function parseGpsNumber(value, min, max) {
@@ -586,7 +605,7 @@ function sqlString(value) {
 function insertGpsMessage(connectionId, message) {
   if (!gpsMysql.enabled) {
     log(`gps mysql insert skipped connection=${connectionId} reason=not-configured`);
-    return;
+    return {ok: false, reason: 'mysql-not-configured'};
   }
 
   const lat = parseGpsNumber(message.lat, -90, 90);
@@ -594,7 +613,7 @@ function insertGpsMessage(connectionId, message) {
   const batt = parseBatteryPercent(message.batt);
   if (lat === null || lon === null || batt === null) {
     log(`gps mysql insert failed connection=${connectionId} reason=invalid-values lat=${logValue(message.lat)} lon=${logValue(message.lon)} batt=${logValue(message.batt)}`);
-    return;
+    return {ok: false, reason: 'invalid-values'};
   }
 
   const distance = roundTo(haversineKm(gpsMysql.homeLat, gpsMysql.homeLon, lat, lon), 2);
@@ -627,9 +646,11 @@ function insertGpsMessage(connectionId, message) {
       timeout: 10000
     });
     log(`gps mysql insert succeeded connection=${connectionId} lat=${insertLat.toFixed(7)} lon=${insertLon.toFixed(7)} batt=${batt} distancehome=${insertDistance.toFixed(2)} source=${awayFromHome ? 'reported' : 'home'}`);
+    return {ok: true, reason: 'inserted'};
   } catch (err) {
     const stderr = err && err.stderr ? String(err.stderr).replace(/\s+/g, ' ').trim() : '';
     log(`gps mysql insert failed connection=${connectionId} error=${logValue(err && err.message ? err.message : err)} stderr=${logValue(stderr)}`);
+    return {ok: false, reason: 'mysql-failed'};
   }
 }
 
