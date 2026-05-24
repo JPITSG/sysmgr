@@ -1,5 +1,6 @@
 package com.jpitsg.sysman;
 
+import android.os.SystemClock;
 import android.util.Base64;
 
 import java.io.ByteArrayOutputStream;
@@ -40,6 +41,7 @@ final class RemoteWebSocketClient implements Closeable {
     private Socket socket;
     private InputStream in;
     private OutputStream out;
+    private volatile long lastInboundAtMillis;
 
     RemoteWebSocketClient(String endpoint, String username, String password, boolean acceptAnySslCert) {
         this.endpoint = endpoint;
@@ -79,6 +81,10 @@ final class RemoteWebSocketClient implements Closeable {
         sendFrame(OPCODE_TEXT, text == null ? new byte[0] : text.getBytes(StandardCharsets.UTF_8));
     }
 
+    long lastInboundAtMillis() {
+        return lastInboundAtMillis;
+    }
+
     String readTextFrame() throws IOException {
         int first;
         try {
@@ -89,6 +95,7 @@ final class RemoteWebSocketClient implements Closeable {
         if (first < 0) {
             throw new EOFException("websocket closed");
         }
+        lastInboundAtMillis = SystemClock.elapsedRealtime();
 
         int second = readByte();
         boolean masked = (second & 0x80) != 0;

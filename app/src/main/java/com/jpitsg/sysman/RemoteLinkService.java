@@ -176,19 +176,31 @@ public final class RemoteLinkService extends Service {
 
     private void runConnectedLoop(RemoteWebSocketClient current) throws IOException {
         long nextHeartbeatAt = 0L;
+        long lastInboundAt = current.lastInboundAtMillis();
         while (!stopRequested && Config.get(this).remoteLinkEnabled() && current.isOpen()) {
             Config config = Config.get(this);
-            long now = SystemClock.elapsedRealtime();
-            if (now >= nextHeartbeatAt) {
-                sendHeartbeat(current);
-                nextHeartbeatAt = now + config.remoteLinkHeartbeatSeconds() * 1000L;
-            }
             sendQueuedPings(current);
             String message = current.readTextFrame();
+            long inboundAt = current.lastInboundAtMillis();
+            if (inboundAt > lastInboundAt) {
+                lastInboundAt = inboundAt;
+                nextHeartbeatAt = inboundAt + heartbeatDelayMillis(config);
+                LogStore.append(this, "remote", "Heartbeat timer reset by inbound traffic next_in="
+                        + config.remoteLinkHeartbeatSeconds() + "s");
+            }
             if (message != null) {
                 RemoteEventHandler.handle(this, current, message);
             }
+            long now = SystemClock.elapsedRealtime();
+            if (now >= nextHeartbeatAt) {
+                sendHeartbeat(current);
+                nextHeartbeatAt = now + heartbeatDelayMillis(config);
+            }
         }
+    }
+
+    private long heartbeatDelayMillis(Config config) {
+        return Math.max(1L, config.remoteLinkHeartbeatSeconds()) * 1000L;
     }
 
     private void sendHello(RemoteWebSocketClient current, Config config) throws IOException {
