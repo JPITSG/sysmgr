@@ -33,6 +33,7 @@ final class Config {
     private static final String KEY_DESIRED_ACCURACY_METERS = "desired_accuracy_meters";
     private static final String KEY_MAX_CACHED_LOCATION_MINUTES = "max_cached_location_minutes";
     private static final String KEY_HTTP_TIMEOUT_SECONDS = "http_timeout_seconds";
+    private static final String KEY_GPS_USE_REMOTE_LINK = "gps_use_remote_link";
     private static final String KEY_FALLBACK_LATITUDE = "fallback_latitude";
     private static final String KEY_FALLBACK_LONGITUDE = "fallback_longitude";
     private static final String KEY_USE_EXACT_ALARMS = "use_exact_alarms";
@@ -170,6 +171,10 @@ final class Config {
 
     int httpTimeoutSeconds() {
         return intValue(KEY_HTTP_TIMEOUT_SECONDS, 10, 1, 120);
+    }
+
+    boolean gpsUseRemoteLink() {
+        return prefs.getBoolean(KEY_GPS_USE_REMOTE_LINK, true);
     }
 
     double fallbackLatitude() {
@@ -417,6 +422,7 @@ final class Config {
             String httpTimeoutSeconds,
             String fallbackLatitude,
             String fallbackLongitude,
+            boolean gpsUseRemoteLink,
             boolean useExactAlarms,
             boolean allowIdleAlarms,
             boolean postOnStartup,
@@ -444,6 +450,7 @@ final class Config {
                 .putInt(KEY_HTTP_TIMEOUT_SECONDS, parseInt(httpTimeoutSeconds, 10, 1, 120))
                 .putString(KEY_FALLBACK_LATITUDE, clean(fallbackLatitude, "52.520008"))
                 .putString(KEY_FALLBACK_LONGITUDE, clean(fallbackLongitude, "13.404954"))
+                .putBoolean(KEY_GPS_USE_REMOTE_LINK, gpsUseRemoteLink)
                 .putBoolean(KEY_USE_EXACT_ALARMS, useExactAlarms)
                 .putBoolean(KEY_ALLOW_IDLE_ALARMS, allowIdleAlarms)
                 .putBoolean(KEY_POST_ON_STARTUP, postOnStartup)

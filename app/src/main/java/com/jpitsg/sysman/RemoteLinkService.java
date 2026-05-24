@@ -100,6 +100,15 @@ public final class RemoteLinkService extends Service {
         return service.queueManualPing(reason == null ? "unknown" : reason);
     }
 
+    static boolean sendGpsIfRunning(Context context, JSONObject payload) {
+        RemoteLinkService service = activeService;
+        if (service == null) {
+            LogStore.append(context, "remote", "Remote Link unavailable for GPS payload");
+            return false;
+        }
+        return service.sendGpsPayload(payload);
+    }
+
     private void startWorkerIfNeeded(final String reason) {
         if (!workerRunning.compareAndSet(false, true)) {
             return;
@@ -247,6 +256,24 @@ public final class RemoteLinkService extends Service {
             LogStore.append(this, "remote", "Manual ping failed id=" + id + ": "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());
             current.close();
+        }
+    }
+
+    private boolean sendGpsPayload(JSONObject payload) {
+        RemoteWebSocketClient current = client;
+        if (current == null || !current.isOpen()) {
+            LogStore.append(this, "remote", "Remote Link not connected for GPS payload");
+            return false;
+        }
+        try {
+            current.sendText(payload.toString());
+            LogStore.append(this, "remote", "GPS payload sent over Remote Link");
+            return true;
+        } catch (Exception e) {
+            LogStore.append(this, "remote", "GPS payload send failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            current.close();
+            return false;
         }
     }
 

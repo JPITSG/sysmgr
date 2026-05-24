@@ -416,6 +416,10 @@ function handleTextMessage(connectionId, socket, text) {
     sendJson(socket, {type: 'heartbeat_ack', ts: Math.floor(Date.now() / 1000)});
     return;
   }
+  if (parsed.type === 'gps') {
+    logGpsMessage(connectionId, parsed);
+    return;
+  }
   if (parsed.type === 'ack' && parsed.id) {
     handleAck(connectionId, String(parsed.id));
     return;
@@ -443,6 +447,26 @@ function handleTextMessage(connectionId, socket, text) {
     return;
   }
   log(`message received connection=${connectionId} type=${parsed.type || 'unknown'} body=${text}`);
+}
+
+function logValue(value) {
+  return String(value === undefined || value === null ? '' : value)
+    .replace(/[\r\n|]/g, ' ')
+    .slice(0, 240);
+}
+
+function logGpsMessage(connectionId, message) {
+  log(`gps received connection=${connectionId}` +
+    ` lat=${logValue(message.lat)}` +
+    ` lon=${logValue(message.lon)}` +
+    ` batt=${logValue(message.batt)}` +
+    ` bssid=${logValue(message.bssid)}` +
+    ` ssid=${logValue(message.ssid)}` +
+    ` accuracy=${logValue(message.accuracy)}` +
+    ` provider=${logValue(message.provider)}` +
+    ` source=${logValue(message.source)}` +
+    ` reason=${logValue(message.reason)}` +
+    ` ts=${logValue(message.ts)}`);
 }
 
 function handleAck(connectionId, messageId) {

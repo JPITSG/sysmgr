@@ -179,6 +179,7 @@ public final class MainActivity extends Activity {
     private Switch useCachedBeforeFreshSwitch;
     private Switch includeExtendedFieldsSwitch;
     private Switch caseSensitiveSsidSwitch;
+    private Switch gpsUseRemoteLinkSwitch;
     private Switch highPriorityEnabledSwitch;
     private Switch highPriorityRemoteEnabledSwitch;
     private Switch highPriorityRaiseAlarmVolumeSwitch;
@@ -399,6 +400,7 @@ public final class MainActivity extends Activity {
         trackPathField = addField(panel, "Track path", InputType.TYPE_CLASS_TEXT);
         httpTimeoutField = addField(panel, "HTTP timeout (seconds)", InputType.TYPE_CLASS_NUMBER);
         LinearLayout group = addToggleGroup(panel);
+        gpsUseRemoteLinkSwitch = addGroupedToggle(group, "Send GPS over Remote Link when connected");
         includeExtendedFieldsSwitch = addGroupedToggle(group, "Include extended fields");
     }
 
@@ -1632,6 +1634,7 @@ public final class MainActivity extends Activity {
             httpTimeoutField.setText(Integer.toString(config.httpTimeoutSeconds()));
             fallbackLatitudeField.setText(Double.toString(config.fallbackLatitude()));
             fallbackLongitudeField.setText(Double.toString(config.fallbackLongitude()));
+            gpsUseRemoteLinkSwitch.setChecked(config.gpsUseRemoteLink());
             logEnabledSwitch.setChecked(config.logEnabled());
             logMaxLinesField.setText(Integer.toString(config.logMaxLines()));
             highPriorityEnabledSwitch.setChecked(config.highPriorityEnabled());
@@ -1703,6 +1706,7 @@ public final class MainActivity extends Activity {
         bindSaveGpsConfig(useCachedBeforeFreshSwitch);
         bindSaveGpsConfig(includeExtendedFieldsSwitch);
         bindSaveGpsConfig(caseSensitiveSsidSwitch);
+        bindSaveGpsConfig(gpsUseRemoteLinkSwitch);
 
         bindSaveHighPriorityConfig(highPriorityEnabledSwitch);
         bindSaveHighPriorityConfig(highPriorityRemoteEnabledSwitch);
@@ -1808,6 +1812,7 @@ public final class MainActivity extends Activity {
                 text(httpTimeoutField),
                 text(fallbackLatitudeField),
                 text(fallbackLongitudeField),
+                gpsUseRemoteLinkSwitch.isChecked(),
                 useExactAlarmsSwitch.isChecked(),
                 allowIdleAlarmsSwitch.isChecked(),
                 postOnStartupSwitch.isChecked(),
@@ -1892,6 +1897,7 @@ public final class MainActivity extends Activity {
                 text(httpTimeoutField),
                 text(fallbackLatitudeField),
                 text(fallbackLongitudeField),
+                gpsUseRemoteLinkSwitch.isChecked(),
                 useExactAlarmsSwitch.isChecked(),
                 allowIdleAlarmsSwitch.isChecked(),
                 postOnStartupSwitch.isChecked(),

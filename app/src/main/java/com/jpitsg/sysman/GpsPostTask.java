@@ -2,6 +2,8 @@ package com.jpitsg.sysman;
 
 import android.content.Context;
 
+import org.json.JSONObject;
+
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -62,6 +64,20 @@ final class GpsPostTask implements SystemTask {
             params.put("time", Long.toString(System.currentTimeMillis()));
         }
 
+        if (config.gpsUseRemoteLink()) {
+            try {
+                JSONObject payload = gpsPayload(params);
+                if (RemoteLinkService.sendGpsIfRunning(context, payload)) {
+                    LogStore.append(context, "gps", "Sent GPS payload over Remote Link " + params);
+                    return TaskResult.success("Remote Link GPS sent");
+                }
+                LogStore.append(context, "gps", "Remote Link unavailable; falling back to HTTP GET");
+            } catch (Exception e) {
+                LogStore.append(context, "gps", "Remote Link GPS payload failed; falling back to HTTP GET: "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+        }
+
         try {
             LogStore.append(context, "gps", "GET " + params + " to " + config.serverBaseUrl() + config.trackPath());
             HttpResult result = HttpPoster.getForm(config.serverBaseUrl(), config.trackPath(), params, config.httpTimeoutSeconds());
@@ -73,6 +89,16 @@ final class GpsPostTask implements SystemTask {
         } catch (Exception e) {
             return TaskResult.failure("Post failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+    }
+
+    private static JSONObject gpsPayload(Map<String, String> params) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("type", "gps");
+        payload.put("ts", System.currentTimeMillis() / 1000L);
+        for (Map.Entry<String, String> entry : params.entrySet()) {
+            payload.put(entry.getKey(), entry.getValue() == null ? "" : entry.getValue());
+        }
+        return payload;
     }
 
     private static String formatDouble(double value) {
