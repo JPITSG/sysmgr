@@ -33,6 +33,10 @@ final class HighPriorityAlertPlayer {
     private static BroadcastReceiver unlockReceiver;
     private static boolean unlockReceiverRegistered;
 
+    interface StartCallback {
+        void onResult(boolean ok, String reason);
+    }
+
     private HighPriorityAlertPlayer() {
     }
 
@@ -64,6 +68,24 @@ final class HighPriorityAlertPlayer {
             public void run() {
                 synchronized (LOCK) {
                     stopLocked(app, reason);
+                }
+            }
+        });
+    }
+
+    static void playRemoteAlarm(final Context context, final String toneTitle, final int seconds,
+                                final boolean vibrateWithTone, final String reason,
+                                final StartCallback callback) {
+        final Context app = context.getApplicationContext();
+        MAIN.post(new Runnable() {
+            @Override
+            public void run() {
+                StartResult result;
+                synchronized (LOCK) {
+                    result = playRemoteAlarmOnMain(app, toneTitle, seconds, vibrateWithTone, reason);
+                }
+                if (callback != null) {
+                    callback.onResult(result.ok, result.reason);
                 }
             }
         });
@@ -155,6 +177,58 @@ final class HighPriorityAlertPlayer {
                     + " vibrateWithTone=" + vibrateWithTone
                     + " maxDuration=" + config.highPriorityPlaySeconds() + "s");
         }
+    }
+
+    private static StartResult playRemoteAlarmOnMain(Context app, String toneTitle, int seconds,
+                                                     boolean vibrateWithTone, String reason) {
+        stopLocked(app, "remote-alarm-restart");
+
+        int safeSeconds = Math.max(1, Math.min(300, seconds));
+        Config config = Config.get(app);
+        AudioManager audio = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
+        prepareAlarmVolume(app, audio, config);
+
+        Uri toneUri = findRemoteAlarmToneUri(app, toneTitle);
+        if (toneUri == null) {
+            LogStore.append(app, "alert", "Remote alarm failed; no tone URI available tone=" + safeText(toneTitle));
+            restoreAlarmVolume(app, audio);
+            return new StartResult(false, "tone unavailable");
+        }
+
+        Ringtone ringtone = RingtoneManager.getRingtone(app, toneUri);
+        if (ringtone == null) {
+            LogStore.append(app, "alert", "Remote alarm failed; could not load tone uri=" + toneUri);
+            restoreAlarmVolume(app, audio);
+            return new StartResult(false, "tone load failed");
+        }
+
+        try {
+            ringtone.setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build());
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                ringtone.setLooping(true);
+                ringtone.setVolume(1.0f);
+            }
+            ringtone.play();
+        } catch (RuntimeException e) {
+            LogStore.append(app, "alert", "Remote alarm failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            restoreAlarmVolume(app, audio);
+            return new StartResult(false, "playback failed");
+        }
+
+        currentRingtone = ringtone;
+        long maxPlayMillis = safeSeconds * 1000L;
+        if (vibrateWithTone) {
+            vibrate(app, reason + ":remote-alarm", maxPlayMillis);
+        }
+        scheduleTimeoutStop(app, maxPlayMillis);
+        LogStore.append(app, "alert", "Playing remote alarm tone=" + safeText(toneTitle)
+                + " reason=" + reason
+                + " vibrateWithTone=" + vibrateWithTone
+                + " duration=" + safeSeconds + "s");
+        return new StartResult(true, "started");
     }
 
     private static void scheduleTimeoutStop(final Context app, long playMillis) {
@@ -360,6 +434,23 @@ final class HighPriorityAlertPlayer {
         return RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
     }
 
+    private static Uri findRemoteAlarmToneUri(Context context, String requestedTitle) {
+        String wanted = requestedTitle == null ? "" : requestedTitle.trim();
+        if (wanted.isEmpty()) {
+            return findToneUri(context, "");
+        }
+        Uri exact = findToneUri(context, wanted, true);
+        if (exact != null) {
+            return exact;
+        }
+        Uri contains = findToneUri(context, wanted, false);
+        if (contains != null) {
+            return contains;
+        }
+        LogStore.append(context, "alert", "Remote alarm tone title not found title=" + safeText(wanted));
+        return null;
+    }
+
     private static Uri findToneUri(Context context, String wanted, boolean exact) {
         int[] types = new int[]{
                 RingtoneManager.TYPE_ALARM,
@@ -407,6 +498,11 @@ final class HighPriorityAlertPlayer {
             return normalizedTitle.equals(normalizedWanted);
         }
         return normalizedTitle.contains(normalizedWanted);
+    }
+
+    private static String safeText(String value) {
+        String text = value == null ? "" : value.trim();
+        return text.length() > 80 ? text.substring(0, 80) + "..." : text;
     }
 
     @SuppressWarnings("deprecation")
@@ -465,6 +561,16 @@ final class HighPriorityAlertPlayer {
                 locked = keyguardManager.isKeyguardLocked();
             }
             return new DeviceState(interactive, locked);
+        }
+    }
+
+    private static final class StartResult {
+        final boolean ok;
+        final String reason;
+
+        StartResult(boolean ok, String reason) {
+            this.ok = ok;
+            this.reason = reason;
         }
     }
 }

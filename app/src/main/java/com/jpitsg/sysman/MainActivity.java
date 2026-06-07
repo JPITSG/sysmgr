@@ -48,6 +48,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
@@ -62,6 +63,7 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_NOTIFICATIONS = 12;
     private static final int REQUEST_EXPORT_SETTINGS = 20;
     private static final int REQUEST_IMPORT_SETTINGS = 21;
+    private static final int REQUEST_SAVE_NOTIFICATION_IMAGE = 22;
 
     /** Single spacing unit used for every margin and every padding in the UI. */
     private static final int GAP = 12;
@@ -77,7 +79,7 @@ public final class MainActivity extends Activity {
     private static final int STATUS_ROW_MIN_HEIGHT = 36;
     private static final int PILL_WIDTH = 118;
     private static final int PANEL_ANIMATION_MS = 180;
-    private static final int CHEVRON_SIZE = 24;
+    private static final int CHEVRON_SIZE = 32;
     private static final int STATUS_DOT_SIZE = 8;
     private static final int LOG_VISIBLE_LINES = 16;
 
@@ -122,6 +124,8 @@ public final class MainActivity extends Activity {
     private TextView wifiSummary;
     private TextView wifiMonitorWarning;
     private LinearLayout notificationHistoryList;
+    private Panel notificationHistoryPanel;
+    private NotificationHistoryStore.Entry pendingImageSaveEntry;
     private TextView logView;
     private Button startTrackingButton;
     private Button stopTrackingButton;
@@ -272,6 +276,7 @@ public final class MainActivity extends Activity {
         registerRemoteLinkStateReceiver();
         registerNotificationHistoryReceiver();
         collapseAllPanels();
+        expandPanel(notificationHistoryPanel);
         refreshStatusAndLog();
     }
 
@@ -372,6 +377,7 @@ public final class MainActivity extends Activity {
 
     private void buildNotificationHistoryPanel(LinearLayout root) {
         Panel frame = addExpandablePanel(root, "Notification History", true);
+        notificationHistoryPanel = frame;
         notificationHistoryPill = frame.pill;
 
         notificationHistoryList = newColumn();
@@ -751,6 +757,15 @@ public final class MainActivity extends Activity {
             imageView.setImageBitmap(image);
             imageView.setBackground(roundedFill(COLOR_SURFACE, FIELD_CORNER, 1, COLOR_BORDER));
             item.addView(imageView, topMarginParams(8));
+
+            LinearLayout imageActions = newRow();
+            item.addView(imageActions, topMarginParams(8));
+            addRowButton(imageActions, tonalButton("Save Image", new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    saveNotificationImage(entry);
+                }
+            }));
         }
 
         setHistorySwipeToClear(item, entry);
@@ -830,6 +845,68 @@ public final class MainActivity extends Activity {
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inSampleSize = sampleSize(bounds.outWidth, targetWidth);
         return BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+    }
+
+    private void saveNotificationImage(NotificationHistoryStore.Entry entry) {
+        File file = NotificationHistoryStore.imageFile(this, entry);
+        if (file == null) {
+            Toast.makeText(this, "Image is no longer available", Toast.LENGTH_LONG).show();
+            return;
+        }
+        pendingImageSaveEntry = entry;
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("image/jpeg");
+        intent.putExtra(Intent.EXTRA_TITLE, historyImageFileName(entry));
+        try {
+            startActivityForResult(intent, REQUEST_SAVE_NOTIFICATION_IMAGE);
+        } catch (RuntimeException e) {
+            pendingImageSaveEntry = null;
+            LogStore.append(this, "history", "Notification image save picker failed: " + e.getMessage());
+            Toast.makeText(this, "Could not open image save picker", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void handleNotificationImageSave(Uri uri) {
+        NotificationHistoryStore.Entry entry = pendingImageSaveEntry;
+        pendingImageSaveEntry = null;
+        File file = NotificationHistoryStore.imageFile(this, entry);
+        if (file == null) {
+            Toast.makeText(this, "Image is no longer available", Toast.LENGTH_LONG).show();
+            return;
+        }
+        try (InputStream input = new FileInputStream(file);
+             OutputStream output = getContentResolver().openOutputStream(uri, "w")) {
+            if (output == null) {
+                throw new IllegalStateException("Output stream unavailable");
+            }
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            output.flush();
+            LogStore.append(this, "history", "Notification image saved source=" + entry.source);
+            Toast.makeText(this, "Image saved", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            LogStore.append(this, "history", "Notification image save failed: " + e.getMessage());
+            Toast.makeText(this, "Image save failed", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private String historyImageFileName(NotificationHistoryStore.Entry entry) {
+        String label = hasText(entry.title) ? entry.title : entry.message;
+        label = label == null ? "" : label.toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "-");
+        label = label.replaceAll("^-+|-+$", "");
+        if (label.length() > 36) {
+            label = label.substring(0, 36).replaceAll("-+$", "");
+        }
+        if (label.isEmpty()) {
+            label = "notification";
+        }
+        String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+                .format(new Date(entry.timestampMillis > 0L ? entry.timestampMillis : System.currentTimeMillis()));
+        return "system-manager-" + timestamp + "-" + label + ".jpg";
     }
 
     private int sampleSize(int width, int targetWidth) {
@@ -960,6 +1037,7 @@ public final class MainActivity extends Activity {
         titleView.setSingleLine(true);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
         titleView.setIncludeFontPadding(false);
+        titleView.setPadding(dp(4), 0, 0, 0);
         headerRow.addView(titleView, inRow(headerRow, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView panelPill = null;
@@ -972,7 +1050,7 @@ public final class MainActivity extends Activity {
 
         final TextView indicator = new TextView(this);
         indicator.setText("▾");
-        indicator.setTextSize(14);
+        indicator.setTextSize(20);
         indicator.setTypeface(Typeface.DEFAULT_BOLD);
         indicator.setTextColor(COLOR_TEXT_FAINT);
         indicator.setGravity(Gravity.CENTER);
@@ -996,6 +1074,21 @@ public final class MainActivity extends Activity {
         Panel panel = new Panel(content, panelPill, indicator);
         panels.add(panel);
         return panel;
+    }
+
+    private void expandPanel(Panel panel) {
+        if (panel == null) {
+            return;
+        }
+        panel.content.animate().cancel();
+        panel.content.setVisibility(View.VISIBLE);
+        ViewGroup.LayoutParams lp = panel.content.getLayoutParams();
+        if (lp != null) {
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            panel.content.setLayoutParams(lp);
+        }
+        panel.indicator.animate().cancel();
+        panel.indicator.setRotation(0f);
     }
 
     private void collapseAllPanels() {
@@ -2309,6 +2402,9 @@ public final class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            if (requestCode == REQUEST_SAVE_NOTIFICATION_IMAGE) {
+                pendingImageSaveEntry = null;
+            }
             return;
         }
         Uri uri = data.getData();
@@ -2316,6 +2412,8 @@ public final class MainActivity extends Activity {
             handleSettingsExport(uri);
         } else if (requestCode == REQUEST_IMPORT_SETTINGS) {
             handleSettingsImport(uri);
+        } else if (requestCode == REQUEST_SAVE_NOTIFICATION_IMAGE) {
+            handleNotificationImageSave(uri);
         }
     }
 

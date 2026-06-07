@@ -68,22 +68,24 @@ final class RemoteEventHandler {
         String imageMime = json.optString("image_mime", "");
         String imageBase64 = json.optString("image_base64", "");
         boolean rebootAction = "reboot".equalsIgnoreCase(action);
+        boolean alarmAction = "alarm".equalsIgnoreCase(action);
         if (rebootAction && body.isEmpty()) {
             body = "Remote reboot requested";
+        }
+        if (alarmAction && body.isEmpty()) {
+            body = "Remote alarm requested";
         }
         if (id.isEmpty() || body.isEmpty()) {
             LogStore.append(context, "remote", "Notification message missing id or body");
             return;
         }
 
-        try {
-            JSONObject ack = new JSONObject();
-            ack.put("type", "ack");
-            ack.put("id", id);
-            client.sendText(ack.toString());
-            LogStore.append(context, "remote", "Acked remote notification id=" + id);
-        } catch (Exception e) {
-            LogStore.append(context, "remote", "Remote notification ack failed id=" + id + ": " + e.getMessage());
+        if (alarmAction) {
+            handleAlarmAction(context, client, id, json);
+            return;
+        }
+
+        if (!sendAck(context, client, id, true, "accepted")) {
             return;
         }
 
@@ -93,8 +95,49 @@ final class RemoteEventHandler {
         }
 
         boolean highPriority = handleHighPrioritySocketAlert(context, id, title, body);
-        NotificationHistoryStore.add(context, "Remote", title, body, "", imageBase64, highPriority);
-        showNotification(context, id, action, title, body, imageMime, imageBase64);
+        NotificationHistoryStore.Entry historyEntry =
+                NotificationHistoryStore.add(context, "Remote", title, body, "", imageBase64, highPriority);
+        showNotification(context, id, action, title, body, imageMime, imageBase64, historyEntry);
+    }
+
+    private static void handleAlarmAction(final Context context, final RemoteWebSocketClient client,
+                                          final String id, JSONObject json) {
+        String tone = json.optString("tone", "");
+        int length = Math.max(1, Math.min(300, json.optInt("length", 10)));
+        boolean vibrate = json.optBoolean("vibrate", true);
+        LogStore.append(context, "remote", "Remote alarm requested id=" + id
+                + " tone=" + tone + " length=" + length + " vibrate=" + vibrate);
+        HighPriorityAlertPlayer.playRemoteAlarm(
+                context,
+                tone,
+                length,
+                vibrate,
+                "remote-link:" + id,
+                new HighPriorityAlertPlayer.StartCallback() {
+                    @Override
+                    public void onResult(boolean ok, String reason) {
+                        sendAck(context, client, id, ok, reason);
+                    }
+                });
+    }
+
+    private static boolean sendAck(Context context, RemoteWebSocketClient client, String id, boolean ok, String reason) {
+        try {
+            JSONObject ack = new JSONObject();
+            ack.put("type", "ack");
+            ack.put("id", id);
+            ack.put("ok", ok);
+            if (reason != null && !reason.trim().isEmpty()) {
+                ack.put("reason", reason);
+            }
+            client.sendText(ack.toString());
+            LogStore.append(context, "remote", "Acked remote notification id=" + id
+                    + " ok=" + ok + " reason=" + (reason == null ? "" : reason));
+            return true;
+        } catch (Exception e) {
+            LogStore.append(context, "remote", "Remote notification ack failed id=" + id + ": " + e.getMessage());
+            return false;
+        }
     }
 
     private static boolean handleHighPrioritySocketAlert(Context context, String id, String title, String body) {
@@ -119,7 +162,8 @@ final class RemoteEventHandler {
     }
 
     private static void showNotification(Context context, String id, String action, String title, String body,
-                                         String imageMime, String imageBase64) {
+                                         String imageMime, String imageBase64,
+                                         NotificationHistoryStore.Entry historyEntry) {
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) {
             LogStore.append(context, "remote", "NotificationManager unavailable for remote notification id=" + id);
@@ -136,6 +180,17 @@ final class RemoteEventHandler {
             flags |= PendingIntent.FLAG_IMMUTABLE;
         }
         PendingIntent contentIntent = PendingIntent.getActivity(context, 0x5200 + Math.abs(id.hashCode() % 1000), openIntent, flags);
+        int notificationId = notificationIdFor(id);
+
+        Intent deleteIntent = new Intent(context, NotificationActionReceiver.class)
+                .setAction(NotificationActionReceiver.ACTION_DELETE_NOTIFICATION)
+                .putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId)
+                .putExtra(NotificationActionReceiver.EXTRA_HISTORY_ID, historyEntry == null ? "" : historyEntry.id);
+        PendingIntent deletePendingIntent = PendingIntent.getBroadcast(
+                context,
+                0x6400 + Math.abs(id.hashCode() % 10000),
+                deleteIntent,
+                flags);
 
         Bitmap picture = decodeNotificationImage(imageBase64);
         boolean hasTitle = hasText(title);
@@ -153,7 +208,8 @@ final class RemoteEventHandler {
                 .setAutoCancel(true)
                 .setShowWhen(true)
                 .setCategory(Notification.CATEGORY_MESSAGE)
-                .setPriority(Notification.PRIORITY_HIGH);
+                .setPriority(Notification.PRIORITY_HIGH)
+                .addAction(R.drawable.ic_stat_system_manager, "Delete", deletePendingIntent);
         if (picture != null) {
             Notification.BigPictureStyle style = new Notification.BigPictureStyle().bigPicture(picture);
             if (hasTitle) {
@@ -166,12 +222,16 @@ final class RemoteEventHandler {
         Notification notification = builder.build();
 
         try {
-            manager.notify(0x6200 + Math.abs(id.hashCode() % 10000), notification);
+            manager.notify(notificationId, notification);
             LogStore.append(context, "remote", "Remote notification shown id=" + id + " action=" + action
                     + " image=" + (picture != null));
         } catch (RuntimeException e) {
             LogStore.append(context, "remote", "Remote notification failed id=" + id + ": " + e.getMessage());
         }
+    }
+
+    private static int notificationIdFor(String id) {
+        return 0x6200 + Math.abs(id.hashCode() % 10000);
     }
 
     private static String cleanTitle(String title) {

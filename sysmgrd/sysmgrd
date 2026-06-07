@@ -488,7 +488,7 @@ function handleTextMessage(connectionId, socket, text) {
     return;
   }
   if (parsed.type === 'ack' && parsed.id) {
-    handleAck(connectionId, String(parsed.id));
+    handleAck(connectionId, String(parsed.id), parsed.ok, parsed.reason);
     return;
   }
   if (parsed.type === 'ping') {
@@ -658,7 +658,7 @@ function insertGpsMessage(connectionId, message) {
   }
 }
 
-function handleAck(connectionId, messageId) {
+function handleAck(connectionId, messageId, okValue, reasonValue) {
   const pending = pendingDeliveries.get(messageId);
   if (!pending) {
     log(`ack ignored connection=${connectionId} id=${messageId}`);
@@ -666,8 +666,10 @@ function handleAck(connectionId, messageId) {
   }
   clearTimeout(pending.timer);
   pendingDeliveries.delete(messageId);
-  log(`message acked id=${messageId} connection=${connectionId}`);
-  pending.resolve(true);
+  const ok = okValue !== false;
+  const reason = reasonValue ? String(reasonValue) : '';
+  log(`message ${ok ? 'acked' : 'rejected'} id=${messageId} connection=${connectionId}${reason ? ` reason=${logValue(reason)}` : ''}`);
+  pending.resolve(ok, reason);
 }
 
 function handlePong(connectionId, pingId) {
@@ -901,6 +903,11 @@ async function deliverNotification(notification) {
     payload.image_mime = notification.imageMime || 'image/jpeg';
     payload.image_base64 = notification.imageBase64;
   }
+  if (action === 'alarm') {
+    payload.tone = notification.tone || '';
+    payload.length = notification.lengthSeconds || 10;
+    payload.vibrate = notification.vibrate !== false;
+  }
   if (availableClients.length === 0) {
     log(`message delivery failed id=${id} action=${action} reason=no-connected-clients`);
     return Promise.resolve({id, ok: false, reason: 'no connected clients'});
@@ -930,7 +937,7 @@ async function deliverNotification(notification) {
     }, DELIVERY_ACK_TIMEOUT_MS);
     pendingDeliveries.set(id, {
       timer,
-      resolve: (ok) => resolve({id, ok, reason: ok ? 'acked' : 'failed'})
+      resolve: (ok, reason) => resolve({id, ok, reason: ok ? 'acked' : (reason || 'failed')})
     });
   });
 }
@@ -1083,6 +1090,28 @@ function parseControlMessage(text) {
   return result;
 }
 
+function parseControlBoolean(value, fallback) {
+  const text = String(value === undefined || value === null ? '' : value).trim().toLowerCase();
+  if (!text) {
+    return fallback;
+  }
+  if (['1', 'true', 'yes', 'on'].includes(text)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(text)) {
+    return false;
+  }
+  return fallback;
+}
+
+function parseControlSeconds(value, fallback, min, max) {
+  const number = Number(String(value === undefined || value === null ? '' : value).trim());
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(number)));
+}
+
 function startControlSocket() {
   try {
     fs.unlinkSync(CONTROL_SOCKET_PATH);
@@ -1101,7 +1130,7 @@ function startControlSocket() {
     socket.on('end', async () => {
       const request = parseControlMessage(buffer);
       request.action = String(request.action || '').trim().toLowerCase();
-      if (!['message', 'reboot', 'ping'].includes(request.action) || (request.action === 'message' && !request.message)) {
+      if (!['message', 'reboot', 'ping', 'alarm'].includes(request.action) || (request.action === 'message' && !request.message)) {
         log(`control request rejected reason=invalid body=${JSON.stringify(request)}`);
         socket.end('error invalid request\n');
         return;
@@ -1117,15 +1146,28 @@ function startControlSocket() {
       if (request.action === 'reboot' && !request.message) {
         request.message = 'Remote reboot requested';
       }
+      if (request.action === 'alarm') {
+        request.message = request.message || 'Remote alarm requested';
+        request.tone = String(request.tone || '').trim();
+        request.length = parseControlSeconds(request.length, 10, 1, 300);
+        request.vibrate = parseControlBoolean(request.vibrate, true);
+      }
       const imageBase64 = request.image_base64 || '';
       const imageBytes = imageBase64 ? Buffer.byteLength(imageBase64, 'base64') : 0;
-      log(`control notification requested action=${request.action} title=${request.title || ''} image_bytes=${imageBytes} message=${request.message}`);
+      if (request.action === 'alarm') {
+        log(`control alarm requested tone=${logValue(request.tone)} length=${request.length} vibrate=${request.vibrate}`);
+      } else {
+        log(`control notification requested action=${request.action} title=${request.title || ''} image_bytes=${imageBytes} message=${request.message}`);
+      }
       const result = await deliverNotification({
         action: request.action,
         title: request.title || '',
         message: request.message,
         imageMime: request.image_mime || '',
-        imageBase64
+        imageBase64,
+        tone: request.tone || '',
+        lengthSeconds: request.length,
+        vibrate: request.vibrate
       });
       socket.end(result.ok ? `ok id=${result.id}\n` : `error id=${result.id} reason=${result.reason}\n`);
     });

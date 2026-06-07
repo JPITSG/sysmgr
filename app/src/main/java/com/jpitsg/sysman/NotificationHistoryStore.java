@@ -57,39 +57,40 @@ final class NotificationHistoryStore {
         }
     }
 
-    static void add(Context context, String source, String title, String message, String icon, boolean hasImage) {
-        add(context, source, title, message, icon, hasImage, false);
+    static Entry add(Context context, String source, String title, String message, String icon, boolean hasImage) {
+        return add(context, source, title, message, icon, hasImage, false);
     }
 
-    static void add(Context context, String source, String title, String message, String icon, boolean hasImage, boolean highPriority) {
-        add(context, source, title, message, icon, hasImage, "", highPriority);
+    static Entry add(Context context, String source, String title, String message, String icon, boolean hasImage, boolean highPriority) {
+        return add(context, source, title, message, icon, hasImage, "", highPriority);
     }
 
-    static void add(Context context, String source, String title, String message, String icon, String imageBase64) {
-        add(context, source, title, message, icon, imageBase64, false);
+    static Entry add(Context context, String source, String title, String message, String icon, String imageBase64) {
+        return add(context, source, title, message, icon, imageBase64, false);
     }
 
-    static void add(Context context, String source, String title, String message, String icon, String imageBase64, boolean highPriority) {
+    static Entry add(Context context, String source, String title, String message, String icon, String imageBase64, boolean highPriority) {
         Context app = context.getApplicationContext();
         String imageFileName = writeImage(app, imageBase64);
-        add(app, source, title, message, icon, !imageFileName.isEmpty(), imageFileName, highPriority);
+        return add(app, source, title, message, icon, !imageFileName.isEmpty(), imageFileName, highPriority);
     }
 
-    private static void add(Context context, String source, String title, String message, String icon,
+    private static Entry add(Context context, String source, String title, String message, String icon,
                             boolean hasImage, String imageFileName, boolean highPriority) {
         Context app = context.getApplicationContext();
+        Entry entry = new Entry(
+                System.currentTimeMillis(),
+                UUID.randomUUID().toString(),
+                clean(source, "Notification"),
+                clean(title, ""),
+                clean(message, ""),
+                clean(icon, ""),
+                hasImage,
+                cleanImageFileName(imageFileName),
+                highPriority);
         synchronized (LOCK) {
             List<Entry> entries = readLocked(app);
-            entries.add(0, new Entry(
-                    System.currentTimeMillis(),
-                    UUID.randomUUID().toString(),
-                    clean(source, "Notification"),
-                    clean(title, ""),
-                    clean(message, ""),
-                    clean(icon, ""),
-                    hasImage,
-                    cleanImageFileName(imageFileName),
-                    highPriority));
+            entries.add(0, entry);
             while (entries.size() > MAX_ENTRIES) {
                 Entry removed = entries.remove(entries.size() - 1);
                 deleteImage(app, removed.imageFileName);
@@ -97,26 +98,36 @@ final class NotificationHistoryStore {
             writeLocked(app, entries);
         }
         broadcastChanged(app);
+        return entry;
     }
 
     static void remove(Context context, Entry target) {
         if (target == null) {
             return;
         }
+        removeById(context, target.id);
+    }
+
+    static boolean removeById(Context context, String targetId) {
+        String cleanId = targetId == null ? "" : targetId.trim();
+        if (cleanId.isEmpty()) {
+            return false;
+        }
         Context app = context.getApplicationContext();
         synchronized (LOCK) {
             List<Entry> entries = readLocked(app);
             for (int i = 0; i < entries.size(); i++) {
                 Entry entry = entries.get(i);
-                if (sameEntry(entry, target)) {
+                if (cleanId.equals(entry.id)) {
                     entries.remove(i);
                     deleteImage(app, entry.imageFileName);
                     writeLocked(app, entries);
                     broadcastChanged(app);
-                    return;
+                    return true;
                 }
             }
         }
+        return false;
     }
 
     static List<Entry> read(Context context, int maxEntries) {
