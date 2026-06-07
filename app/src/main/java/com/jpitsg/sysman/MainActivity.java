@@ -114,6 +114,7 @@ public final class MainActivity extends Activity {
     private TextView statusPill;
     private TextView highPriorityPill;
     private TextView batteryAlertPill;
+    private TextView volumeControlPill;
     private TextView rebootPill;
     private TextView remoteLinkPill;
     private TextView permissionsPill;
@@ -124,6 +125,7 @@ public final class MainActivity extends Activity {
     private TextView wifiSummary;
     private TextView wifiMonitorWarning;
     private LinearLayout notificationHistoryList;
+    private LinearLayout volumeRuleList;
     private Panel notificationHistoryPanel;
     private NotificationHistoryStore.Entry pendingImageSaveEntry;
     private TextView logView;
@@ -156,6 +158,11 @@ public final class MainActivity extends Activity {
     private EditText batteryAlertThresholdField;
     private EditText batteryAlertCheckIntervalField;
     private EditText batteryAlertVibrateSecondsField;
+    private EditText volumeRuleTimeField;
+    private EditText volumeRuleMediaField;
+    private EditText volumeRuleRingField;
+    private EditText volumeRuleNotificationField;
+    private EditText volumeRuleAlarmField;
     private EditText rebootTriggerPackageField;
     private EditText rebootTriggerTitleField;
     private EditText rebootTriggerTextField;
@@ -347,6 +354,7 @@ public final class MainActivity extends Activity {
         buildRemoteLinkPanel(root);
         buildHighPriorityPanel(root);
         buildBatteryAlertPanel(root);
+        buildVolumeControlPanel(root);
         buildRebootPanel(root);
         buildSettingsTransferPanel(root);
         buildPermissionsPanel(root);
@@ -355,6 +363,7 @@ public final class MainActivity extends Activity {
         setContentView(scrollView);
         BatteryAlertManager.sync(this, "activity-open");
         RemoteLinkManager.sync(this, "activity-open");
+        VolumeControlManager.sync(this, "activity-open");
     }
 
     private void buildGpsLoggerControls(LinearLayout panel) {
@@ -439,8 +448,8 @@ public final class MainActivity extends Activity {
     private void buildSchedulingSubsection(LinearLayout panel) {
         addSubsectionLabel(panel, "Schedule");
         LinearLayout group = addToggleGroup(panel);
-        useExactAlarmsSwitch = addGroupedToggle(group, "Use exact GPS and reboot alarms");
-        allowIdleAlarmsSwitch = addGroupedToggle(group, "Allow GPS and reboot alarms while idle");
+        useExactAlarmsSwitch = addGroupedToggle(group, "Use exact GPS, volume, and reboot alarms");
+        allowIdleAlarmsSwitch = addGroupedToggle(group, "Allow GPS, volume, and reboot alarms while idle");
         postOnStartupSwitch = addGroupedToggle(group, "Send once after boot");
         postOnWifiChangeSwitch = addGroupedToggle(group, "Send when Wi-Fi changes");
         showWifiMonitorNotificationSwitch = addGroupedToggle(group, "Show Wi-Fi monitor notification");
@@ -507,6 +516,27 @@ public final class MainActivity extends Activity {
         LinearLayout saveRow = newRow();
         frame.content.addView(saveRow, stack(frame.content));
         addRowButton(saveRow, tonalButton("Save Battery Alert Settings", action("save_battery_alert")));
+    }
+
+    private void buildVolumeControlPanel(LinearLayout root) {
+        Panel frame = addExpandablePanel(root, "Volume Control", true);
+        volumeControlPill = frame.pill;
+
+        addSubsectionLabel(frame.content, "Add Rule");
+        volumeRuleTimeField = addField(frame.content, "Time (HH:mm)", InputType.TYPE_CLASS_TEXT);
+        volumeRuleMediaField = addField(frame.content, "Media volume (% or Unchanged)", InputType.TYPE_CLASS_TEXT);
+        volumeRuleRingField = addField(frame.content, "Ring volume (% or Unchanged)", InputType.TYPE_CLASS_TEXT);
+        volumeRuleNotificationField = addField(frame.content, "Notification volume (% or Unchanged)", InputType.TYPE_CLASS_TEXT);
+        volumeRuleAlarmField = addField(frame.content, "Alarm volume (% or Unchanged)", InputType.TYPE_CLASS_TEXT);
+
+        LinearLayout addRow = newRow();
+        frame.content.addView(addRow, stack(frame.content));
+        addRowButton(addRow, tonalButton("Add Rule", action("add_volume_rule")));
+
+        addSubsectionLabel(frame.content, "Rules");
+        volumeRuleList = newColumn();
+        volumeRuleList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        frame.content.addView(volumeRuleList, stack(frame.content));
     }
 
     private void buildRebootPanel(LinearLayout root) {
@@ -714,6 +744,79 @@ public final class MainActivity extends Activity {
             addHistorySeparator();
             addHistoryEmptyRow("Showing newest " + entries.size() + " of " + count);
         }
+    }
+
+    private void refreshVolumeControlPanel() {
+        if (volumeControlPill == null) {
+            return;
+        }
+        List<Config.VolumeRule> rules = Config.get(this).volumeRules();
+        String label = rules.size() == 1 ? "1 RULE" : rules.size() + " RULES";
+        setPillState(
+                volumeControlPill,
+                label,
+                rules.isEmpty() ? COLOR_NEUTRAL_CONTAINER : COLOR_PRIMARY_CONTAINER,
+                rules.isEmpty() ? COLOR_NEUTRAL_ON_CONTAINER : COLOR_PRIMARY_ON_CONTAINER);
+        if (volumeRuleList == null) {
+            return;
+        }
+
+        volumeRuleList.removeAllViews();
+        if (rules.isEmpty()) {
+            TextView empty = historyText("No volume rules configured", 13, COLOR_TEXT_DIM, false);
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+            volumeRuleList.addView(empty, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+            return;
+        }
+
+        for (int i = 0; i < rules.size(); i++) {
+            if (i > 0) {
+                View hairline = new View(this);
+                hairline.setBackgroundColor(COLOR_FIELD_BORDER);
+                volumeRuleList.addView(hairline, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+            }
+            addVolumeRuleRow(rules.get(i));
+        }
+    }
+
+    private void addVolumeRuleRow(final Config.VolumeRule rule) {
+        LinearLayout item = newColumn();
+        item.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+
+        LinearLayout top = newRow();
+        item.addView(top, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView time = historyText(rule.displayTime(), 16, COLOR_TEXT, true);
+        top.addView(time, inRow(top, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button delete = neutralButton("Delete", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                deleteVolumeRule(rule);
+            }
+        });
+        top.addView(delete, inRow(top, dp(96), dp(BUTTON_MIN_HEIGHT), 0f));
+
+        TextView detail = historyText(volumeRuleDetail(rule), 12, COLOR_TEXT_DIM, false);
+        detail.setLineSpacing(0, 1.2f);
+        item.addView(detail, topMarginParams(6));
+
+        volumeRuleList.addView(item, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private String volumeRuleDetail(Config.VolumeRule rule) {
+        return "Media " + Config.volumeDisplay(rule.mediaPercent)
+                + "   Ring " + Config.volumeDisplay(rule.ringPercent)
+                + "\nNotification " + Config.volumeDisplay(rule.notificationPercent)
+                + "   Alarm " + Config.volumeDisplay(rule.alarmPercent);
     }
 
     private void addHistoryEntry(NotificationHistoryStore.Entry entry) {
@@ -1277,6 +1380,7 @@ public final class MainActivity extends Activity {
         if ("reboot".equals(tag)) return 0xFFFF8A65;
         if ("remote".equals(tag)) return 0xFF8BD3FF;
         if ("settings".equals(tag)) return 0xFFA7C7E7;
+        if ("volume".equals(tag)) return 0xFFB8F2C2;
         return 0xFFE3EBD9;
     }
 
@@ -1529,6 +1633,7 @@ public final class MainActivity extends Activity {
                 switchValue(highPriorityEnabledSwitch, config.highPriorityEnabled())
                         || switchValue(highPriorityRemoteEnabledSwitch, config.highPriorityRemoteEnabled()));
         setEnabledPill(batteryAlertPill, switchValue(batteryAlertEnabledSwitch, config.batteryAlertEnabled()));
+        refreshVolumeControlPanel();
         setEnabledPill(rebootPill, switchValue(rebootAutomationEnabledSwitch, config.rebootAutomationEnabled()));
         setRemoteLinkPill(RemoteLinkStateStore.isConnected(this));
         setEnabledPill(logPill, switchValue(logEnabledSwitch, config.logEnabled()));
@@ -1751,6 +1856,11 @@ public final class MainActivity extends Activity {
             batteryAlertVibrateSecondsField.setText(Integer.toString(config.batteryAlertVibrateSeconds()));
             batteryAlertUseExactAlarmsSwitch.setChecked(config.batteryAlertUseExactAlarms());
             batteryAlertAllowIdleAlarmsSwitch.setChecked(config.batteryAlertAllowIdleAlarms());
+            volumeRuleTimeField.setText("");
+            volumeRuleMediaField.setText("Unchanged");
+            volumeRuleRingField.setText("Unchanged");
+            volumeRuleNotificationField.setText("Unchanged");
+            volumeRuleAlarmField.setText("Unchanged");
             rebootAutomationEnabledSwitch.setChecked(config.rebootAutomationEnabled());
             rebootNotificationTriggerEnabledSwitch.setChecked(config.rebootNotificationTriggerEnabled());
             rebootRemoteTriggerEnabledSwitch.setChecked(config.rebootRemoteTriggerEnabled());
@@ -1972,6 +2082,7 @@ public final class MainActivity extends Activity {
         LogStore.append(this, "ui", "Configuration saved");
         NetworkMonitorService.sync(this);
         BatteryAlertManager.sync(this, "config-save");
+        VolumeControlManager.sync(this, "config-save");
         RebootManager.sync(this, "config-save");
         RemoteLinkManager.restart(this, "config-save");
         if (toast) {
@@ -2009,6 +2120,7 @@ public final class MainActivity extends Activity {
                 caseSensitiveSsidSwitch.isChecked(),
                 text(logMaxLinesField));
         NetworkMonitorService.sync(this);
+        VolumeControlManager.sync(this, "gps-config-live");
         RebootManager.sync(this, "gps-config-live");
         refreshStatusAndLog();
     }
@@ -2057,6 +2169,37 @@ public final class MainActivity extends Activity {
         saveBatteryAlertConfigOnly();
         LogStore.append(this, "ui", "Battery alert settings saved");
         Toast.makeText(this, "Battery alert settings saved", Toast.LENGTH_SHORT).show();
+    }
+
+    private void addVolumeRule() {
+        try {
+            Config.VolumeRule rule = Config.get(this).addVolumeRule(
+                    text(volumeRuleTimeField),
+                    text(volumeRuleMediaField),
+                    text(volumeRuleRingField),
+                    text(volumeRuleNotificationField),
+                    text(volumeRuleAlarmField));
+            volumeRuleTimeField.setText("");
+            volumeRuleMediaField.setText("Unchanged");
+            volumeRuleRingField.setText("Unchanged");
+            volumeRuleNotificationField.setText("Unchanged");
+            volumeRuleAlarmField.setText("Unchanged");
+            LogStore.append(this, "volume", "Volume rule added time=" + rule.displayTime());
+            VolumeControlManager.sync(this, "rule-added");
+            Toast.makeText(this, "Volume rule added", Toast.LENGTH_SHORT).show();
+        } catch (IllegalArgumentException e) {
+            Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show();
+            LogStore.append(this, "volume", "Volume rule add failed: " + e.getMessage());
+        }
+        refreshStatusAndLog();
+    }
+
+    private void deleteVolumeRule(Config.VolumeRule rule) {
+        Config.get(this).removeVolumeRule(rule.id);
+        LogStore.append(this, "volume", "Volume rule deleted time=" + rule.displayTime());
+        VolumeControlManager.sync(this, "rule-deleted");
+        Toast.makeText(this, "Volume rule deleted", Toast.LENGTH_SHORT).show();
+        refreshStatusAndLog();
     }
 
     private void startTracking() {
@@ -2364,6 +2507,7 @@ public final class MainActivity extends Activity {
         }
         NetworkMonitorService.sync(this);
         BatteryAlertManager.sync(this, "settings-import");
+        VolumeControlManager.sync(this, "settings-import");
         RebootManager.sync(this, "settings-import");
         RemoteLinkManager.restart(this, "settings-import");
     }
@@ -2472,6 +2616,8 @@ public final class MainActivity extends Activity {
                     testHighPriorityAlert();
                 } else if ("test_battery_alert".equals(command)) {
                     testBatteryAlert();
+                } else if ("add_volume_rule".equals(command)) {
+                    addVolumeRule();
                 } else if ("test_reboot_now".equals(command)) {
                     testRebootNow();
                 } else if ("test_reboot_delayed".equals(command)) {

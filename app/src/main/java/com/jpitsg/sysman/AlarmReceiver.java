@@ -36,6 +36,10 @@ public final class AlarmReceiver extends BroadcastReceiver {
             RebootManager.requestReboot(context, reason);
             return;
         }
+        if (TaskIds.VOLUME_RULE_APPLY.equals(taskId)) {
+            VolumeControlManager.handleScheduledAlarm(context, reason);
+            return;
+        }
         try {
             SystemTaskService.startTask(context, taskId, reason, true);
         } catch (RuntimeException e) {

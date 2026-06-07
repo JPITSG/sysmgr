@@ -6,10 +6,17 @@ import android.util.Xml;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlSerializer;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -68,6 +75,7 @@ final class Config {
     private static final String KEY_BATTERY_ALERT_VIBRATE_SECONDS = "battery_alert_vibrate_seconds";
     private static final String KEY_BATTERY_ALERT_USE_EXACT_ALARMS = "battery_alert_use_exact_alarms";
     private static final String KEY_BATTERY_ALERT_ALLOW_IDLE_ALARMS = "battery_alert_allow_idle_alarms";
+    private static final String KEY_VOLUME_RULES = "volume_rules";
     private static final String KEY_REBOOT_AUTOMATION_ENABLED = "reboot_automation_enabled";
     private static final String KEY_REBOOT_NOTIFICATION_TRIGGER_ENABLED = "reboot_notification_trigger_enabled";
     private static final String KEY_REBOOT_REMOTE_TRIGGER_ENABLED = "reboot_remote_trigger_enabled";
@@ -93,6 +101,43 @@ final class Config {
     private static final String KEY_SETTINGS_LAST_EXPORT_MILLIS = "settings_last_export_millis";
 
     private final SharedPreferences prefs;
+
+    static final int VOLUME_UNCHANGED = -1;
+
+    static final class VolumeRule {
+        final String id;
+        final int hour;
+        final int minute;
+        final int mediaPercent;
+        final int ringPercent;
+        final int notificationPercent;
+        final int alarmPercent;
+
+        VolumeRule(
+                String id,
+                int hour,
+                int minute,
+                int mediaPercent,
+                int ringPercent,
+                int notificationPercent,
+                int alarmPercent) {
+            this.id = id;
+            this.hour = hour;
+            this.minute = minute;
+            this.mediaPercent = mediaPercent;
+            this.ringPercent = ringPercent;
+            this.notificationPercent = notificationPercent;
+            this.alarmPercent = alarmPercent;
+        }
+
+        int minuteOfDay() {
+            return hour * 60 + minute;
+        }
+
+        String displayTime() {
+            return String.format(Locale.US, "%02d:%02d", hour, minute);
+        }
+    }
 
     private Config(SharedPreferences prefs) {
         this.prefs = prefs;
@@ -309,6 +354,82 @@ final class Config {
         return prefs.getBoolean(KEY_BATTERY_ALERT_ALLOW_IDLE_ALARMS, false);
     }
 
+    List<VolumeRule> volumeRules() {
+        List<VolumeRule> rules = new ArrayList<>();
+        String raw = prefs.getString(KEY_VOLUME_RULES, "[]");
+        if (raw == null || raw.trim().isEmpty()) {
+            return rules;
+        }
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject object = array.optJSONObject(i);
+                if (object == null) {
+                    continue;
+                }
+                String id = clean(object.optString("id", ""), "");
+                if (id.isEmpty()) {
+                    id = "rule-" + i;
+                }
+                int hour = clamp(object.optInt("hour", 0), 0, 23);
+                int minute = clamp(object.optInt("minute", 0), 0, 59);
+                rules.add(new VolumeRule(
+                        id,
+                        hour,
+                        minute,
+                        clampVolume(object.optInt("media", VOLUME_UNCHANGED)),
+                        clampVolume(object.optInt("ring", VOLUME_UNCHANGED)),
+                        clampVolume(object.optInt("notification", VOLUME_UNCHANGED)),
+                        clampVolume(object.optInt("alarm", VOLUME_UNCHANGED))));
+            }
+        } catch (Exception ignored) {
+            return new ArrayList<>();
+        }
+        sortVolumeRules(rules);
+        return rules;
+    }
+
+    VolumeRule addVolumeRule(
+            String time,
+            String mediaPercent,
+            String ringPercent,
+            String notificationPercent,
+            String alarmPercent) {
+        int[] parsedTime = parseTime(time);
+        VolumeRule rule = new VolumeRule(
+                UUID.randomUUID().toString(),
+                parsedTime[0],
+                parsedTime[1],
+                parseVolumePercent(mediaPercent),
+                parseVolumePercent(ringPercent),
+                parseVolumePercent(notificationPercent),
+                parseVolumePercent(alarmPercent));
+        if (rule.mediaPercent == VOLUME_UNCHANGED
+                && rule.ringPercent == VOLUME_UNCHANGED
+                && rule.notificationPercent == VOLUME_UNCHANGED
+                && rule.alarmPercent == VOLUME_UNCHANGED) {
+            throw new IllegalArgumentException("Set at least one volume level");
+        }
+        List<VolumeRule> rules = volumeRules();
+        rules.add(rule);
+        saveVolumeRules(rules);
+        return rule;
+    }
+
+    void removeVolumeRule(String id) {
+        String cleanId = id == null ? "" : id.trim();
+        if (cleanId.isEmpty()) {
+            return;
+        }
+        List<VolumeRule> kept = new ArrayList<>();
+        for (VolumeRule rule : volumeRules()) {
+            if (!cleanId.equals(rule.id)) {
+                kept.add(rule);
+            }
+        }
+        saveVolumeRules(kept);
+    }
+
     boolean rebootAutomationEnabled() {
         return prefs.getBoolean(KEY_REBOOT_AUTOMATION_ENABLED, false);
     }
@@ -509,6 +630,26 @@ final class Config {
                 .putBoolean(KEY_BATTERY_ALERT_USE_EXACT_ALARMS, useExactAlarms)
                 .putBoolean(KEY_BATTERY_ALERT_ALLOW_IDLE_ALARMS, allowIdleAlarms)
                 .apply();
+    }
+
+    private void saveVolumeRules(List<VolumeRule> rules) {
+        sortVolumeRules(rules);
+        JSONArray array = new JSONArray();
+        for (VolumeRule rule : rules) {
+            JSONObject object = new JSONObject();
+            try {
+                object.put("id", rule.id);
+                object.put("hour", rule.hour);
+                object.put("minute", rule.minute);
+                object.put("media", rule.mediaPercent);
+                object.put("ring", rule.ringPercent);
+                object.put("notification", rule.notificationPercent);
+                object.put("alarm", rule.alarmPercent);
+                array.put(object);
+            } catch (Exception ignored) {
+            }
+        }
+        prefs.edit().putString(KEY_VOLUME_RULES, array.toString()).apply();
     }
 
     void saveRemoteLinkConfig(
@@ -796,6 +937,61 @@ final class Config {
         } catch (RuntimeException ignored) {
             return fallback;
         }
+    }
+
+    private static int[] parseTime(String value) {
+        String cleanValue = value == null ? "" : value.trim();
+        String[] parts = cleanValue.split(":", -1);
+        if (parts.length != 2) {
+            throw new IllegalArgumentException("Use 24-hour time like 17:00");
+        }
+        try {
+            int hour = Integer.parseInt(parts[0].trim());
+            int minute = Integer.parseInt(parts[1].trim());
+            if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                throw new IllegalArgumentException("Use 24-hour time like 17:00");
+            }
+            return new int[]{hour, minute};
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Use 24-hour time like 17:00");
+        }
+    }
+
+    static int parseVolumePercent(String value) {
+        String cleanValue = value == null ? "" : value.trim();
+        if (cleanValue.isEmpty()
+                || "unchanged".equalsIgnoreCase(cleanValue)
+                || "-".equals(cleanValue)) {
+            return VOLUME_UNCHANGED;
+        }
+        if (cleanValue.endsWith("%")) {
+            cleanValue = cleanValue.substring(0, cleanValue.length() - 1).trim();
+        }
+        try {
+            return clamp(Integer.parseInt(cleanValue), 0, 100);
+        } catch (RuntimeException e) {
+            throw new IllegalArgumentException("Use 0-100 or Unchanged for volume levels");
+        }
+    }
+
+    static String volumeDisplay(int percent) {
+        return percent == VOLUME_UNCHANGED ? "Unchanged" : percent + "%";
+    }
+
+    private static int clampVolume(int percent) {
+        if (percent == VOLUME_UNCHANGED) {
+            return VOLUME_UNCHANGED;
+        }
+        return clamp(percent, 0, 100);
+    }
+
+    private static void sortVolumeRules(List<VolumeRule> rules) {
+        Collections.sort(rules, new Comparator<VolumeRule>() {
+            @Override
+            public int compare(VolumeRule left, VolumeRule right) {
+                return left.minuteOfDay() - right.minuteOfDay();
+            }
+        });
     }
 
     private static int clamp(int value, int min, int max) {

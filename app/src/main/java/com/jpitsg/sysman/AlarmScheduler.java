@@ -10,6 +10,7 @@ import android.os.SystemClock;
 import android.provider.Settings;
 
 import java.util.Calendar;
+import java.util.List;
 
 final class AlarmScheduler {
     static final String ACTION_RUN_TASK = "com.jpitsg.sysman.action.RUN_TASK";
@@ -150,6 +151,32 @@ final class AlarmScheduler {
         LogStore.append(app, "alarm", "Canceled battery alert check");
     }
 
+    static void scheduleNextVolumeRule(Context context, String reason) {
+        Context app = context.getApplicationContext();
+        List<Config.VolumeRule> rules = Config.get(app).volumeRules();
+        if (rules.isEmpty()) {
+            cancelVolumeRule(app);
+            LogStore.append(app, "alarm", "Volume rule scheduling skipped; no rules configured");
+            return;
+        }
+        Calendar next = VolumeControlManager.nextRuleTimeAfter(rules, Calendar.getInstance());
+        if (next == null) {
+            cancelVolumeRule(app);
+            LogStore.append(app, "alarm", "Volume rule scheduling skipped; no next rule");
+            return;
+        }
+        scheduleVolumeRuleAt(app, next.getTimeInMillis(), reason);
+    }
+
+    static void cancelVolumeRule(Context context) {
+        Context app = context.getApplicationContext();
+        AlarmManager alarmManager = (AlarmManager) app.getSystemService(Context.ALARM_SERVICE);
+        if (alarmManager != null) {
+            alarmManager.cancel(pendingIntent(app, TaskIds.VOLUME_RULE_APPLY, "cancel"));
+        }
+        LogStore.append(app, "alarm", "Canceled volume rule alarm");
+    }
+
     static void scheduleDailyReboot(Context context, String reason) {
         Context app = context.getApplicationContext();
         Config config = Config.get(app);
@@ -183,6 +210,41 @@ final class AlarmScheduler {
             alarmManager.cancel(pendingIntent(app, TaskIds.REBOOT_SCHEDULED, "cancel"));
         }
         LogStore.append(app, "alarm", "Canceled scheduled reboot alarm");
+    }
+
+    private static void scheduleVolumeRuleAt(Context context, long triggerAtMillis, String reason) {
+        Context app = context.getApplicationContext();
+        Config config = Config.get(app);
+        AlarmManager alarmManager = (AlarmManager) app.getSystemService(Context.ALARM_SERVICE);
+        if (alarmManager == null) {
+            LogStore.append(app, "alarm", "AlarmManager unavailable for volume rule");
+            return;
+        }
+
+        PendingIntent pendingIntent = pendingIntent(app, TaskIds.VOLUME_RULE_APPLY, "volume:" + reason);
+        long delaySeconds = Math.max(0L, (triggerAtMillis - System.currentTimeMillis()) / 1000L);
+        try {
+            if (config.useExactAlarms() && canScheduleExact(alarmManager)) {
+                if (config.allowIdleAlarms() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
+                } else {
+                    alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
+                }
+                LogStore.append(app, "alarm", "Scheduled exact volume rule alarm in " + delaySeconds + " sec");
+            } else {
+                if (config.useExactAlarms()) {
+                    LogStore.append(app, "alarm", "Exact alarms not allowed; falling back to inexact volume rule alarm");
+                }
+                if (config.allowIdleAlarms() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
+                } else {
+                    alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
+                }
+                LogStore.append(app, "alarm", "Scheduled inexact volume rule alarm in " + delaySeconds + " sec");
+            }
+        } catch (SecurityException e) {
+            LogStore.append(app, "alarm", "Volume rule alarm scheduling failed: " + e.getMessage());
+        }
     }
 
     private static void scheduleRebootAlarmAt(Context context, String taskId, long triggerAtMillis, String reason) {
