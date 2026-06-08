@@ -396,14 +396,33 @@ final class Config {
             String notificationPercent,
             String alarmPercent) {
         int[] parsedTime = parseTime(time);
-        VolumeRule rule = new VolumeRule(
-                UUID.randomUUID().toString(),
+        return addVolumeRule(
                 parsedTime[0],
                 parsedTime[1],
                 parseVolumePercent(mediaPercent),
                 parseVolumePercent(ringPercent),
                 parseVolumePercent(notificationPercent),
                 parseVolumePercent(alarmPercent));
+    }
+
+    VolumeRule addVolumeRule(
+            int hour,
+            int minute,
+            int mediaPercent,
+            int ringPercent,
+            int notificationPercent,
+            int alarmPercent) {
+        if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+            throw new IllegalArgumentException("Pick a valid 24-hour time");
+        }
+        VolumeRule rule = new VolumeRule(
+                UUID.randomUUID().toString(),
+                hour,
+                minute,
+                clampVolume(mediaPercent),
+                clampVolume(ringPercent),
+                clampVolume(notificationPercent),
+                clampVolume(alarmPercent));
         if (rule.mediaPercent == VOLUME_UNCHANGED
                 && rule.ringPercent == VOLUME_UNCHANGED
                 && rule.notificationPercent == VOLUME_UNCHANGED

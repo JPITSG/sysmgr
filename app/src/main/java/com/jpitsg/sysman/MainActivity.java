@@ -3,6 +3,7 @@ package com.jpitsg.sysman;
 import android.Manifest;
 import android.animation.ValueAnimator;
 import android.app.Activity;
+import android.app.TimePickerDialog;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -43,6 +44,7 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -158,11 +160,13 @@ public final class MainActivity extends Activity {
     private EditText batteryAlertThresholdField;
     private EditText batteryAlertCheckIntervalField;
     private EditText batteryAlertVibrateSecondsField;
-    private EditText volumeRuleTimeField;
-    private EditText volumeRuleMediaField;
-    private EditText volumeRuleRingField;
-    private EditText volumeRuleNotificationField;
-    private EditText volumeRuleAlarmField;
+    private Button volumeRuleTimeButton;
+    private VolumeInput volumeRuleMediaInput;
+    private VolumeInput volumeRuleRingInput;
+    private VolumeInput volumeRuleNotificationInput;
+    private VolumeInput volumeRuleAlarmInput;
+    private int volumeRuleHour = -1;
+    private int volumeRuleMinute = -1;
     private EditText rebootTriggerPackageField;
     private EditText rebootTriggerTitleField;
     private EditText rebootTriggerTextField;
@@ -220,6 +224,18 @@ public final class MainActivity extends Activity {
             this.content = content;
             this.pill = pill;
             this.indicator = indicator;
+        }
+    }
+
+    private static final class VolumeInput {
+        final SeekBar slider;
+        final Switch unchangedSwitch;
+        final TextView valueView;
+
+        VolumeInput(SeekBar slider, Switch unchangedSwitch, TextView valueView) {
+            this.slider = slider;
+            this.unchangedSwitch = unchangedSwitch;
+            this.valueView = valueView;
         }
     }
 
@@ -523,11 +539,16 @@ public final class MainActivity extends Activity {
         volumeControlPill = frame.pill;
 
         addSubsectionLabel(frame.content, "Add Rule");
-        volumeRuleTimeField = addField(frame.content, "Time (HH:mm)", InputType.TYPE_CLASS_TEXT);
-        volumeRuleMediaField = addField(frame.content, "Media volume (% or Unchanged)", InputType.TYPE_CLASS_TEXT);
-        volumeRuleRingField = addField(frame.content, "Ring volume (% or Unchanged)", InputType.TYPE_CLASS_TEXT);
-        volumeRuleNotificationField = addField(frame.content, "Notification volume (% or Unchanged)", InputType.TYPE_CLASS_TEXT);
-        volumeRuleAlarmField = addField(frame.content, "Alarm volume (% or Unchanged)", InputType.TYPE_CLASS_TEXT);
+        volumeRuleTimeButton = addPickerButton(frame.content, "Time", "Select Time", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                showVolumeRuleTimePicker();
+            }
+        });
+        volumeRuleMediaInput = addVolumeInput(frame.content, "Media");
+        volumeRuleRingInput = addVolumeInput(frame.content, "Ring");
+        volumeRuleNotificationInput = addVolumeInput(frame.content, "Notification");
+        volumeRuleAlarmInput = addVolumeInput(frame.content, "Alarm");
 
         LinearLayout addRow = newRow();
         frame.content.addView(addRow, stack(frame.content));
@@ -1389,14 +1410,7 @@ public final class MainActivity extends Activity {
     // ============================================================
 
     private EditText addField(LinearLayout root, String label, int inputType) {
-        TextView labelView = new TextView(this);
-        labelView.setText(label);
-        labelView.setTextSize(12);
-        labelView.setTextColor(COLOR_LABEL);
-        labelView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        labelView.setLetterSpacing(0.02f);
-        labelView.setIncludeFontPadding(false);
-        root.addView(labelView, stack(root));
+        addFieldLabel(root, label);
 
         EditText field = new EditText(this);
         field.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
@@ -1411,6 +1425,175 @@ public final class MainActivity extends Activity {
         field.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
         root.addView(field, stack(root));
         return field;
+    }
+
+    private void addFieldLabel(LinearLayout root, String label) {
+        TextView labelView = new TextView(this);
+        labelView.setText(label);
+        labelView.setTextSize(12);
+        labelView.setTextColor(COLOR_LABEL);
+        labelView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        labelView.setLetterSpacing(0.02f);
+        labelView.setIncludeFontPadding(false);
+        root.addView(labelView, stack(root));
+    }
+
+    private Button addPickerButton(LinearLayout root, String label, String text, View.OnClickListener listener) {
+        addFieldLabel(root, label);
+        Button button = tonalButton(text, listener);
+        root.addView(button, stack(root));
+        return button;
+    }
+
+    private VolumeInput addVolumeInput(LinearLayout root, String label) {
+        LinearLayout box = newColumn();
+        box.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        box.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        root.addView(box, stack(root));
+
+        LinearLayout top = newRow();
+        box.addView(top, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView title = new TextView(this);
+        title.setText(label);
+        title.setTextColor(COLOR_TEXT);
+        title.setTextSize(14);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setIncludeFontPadding(false);
+        top.addView(title, inRow(top, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        final TextView valueView = new TextView(this);
+        valueView.setTextColor(COLOR_TEXT_DIM);
+        valueView.setTextSize(12);
+        valueView.setTypeface(Typeface.DEFAULT_BOLD);
+        valueView.setIncludeFontPadding(false);
+        top.addView(valueView, inRow(top, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+
+        LinearLayout control = newRow();
+        box.addView(control, topMarginParams(8));
+
+        final SeekBar slider = new SeekBar(this);
+        slider.setMax(100);
+        slider.setProgress(50);
+        control.addView(slider, inRow(control, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        LinearLayout unchanged = newRow();
+        unchanged.setPadding(dp(GAP), 0, 0, 0);
+        TextView unchangedLabel = new TextView(this);
+        unchangedLabel.setText("Unchanged");
+        unchangedLabel.setTextColor(COLOR_TEXT_DIM);
+        unchangedLabel.setTextSize(12);
+        unchangedLabel.setSingleLine(true);
+        unchangedLabel.setIncludeFontPadding(false);
+        unchanged.addView(unchangedLabel, inRow(unchanged, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+
+        final Switch unchangedSwitch = makeSwitch();
+        unchangedSwitch.setChecked(true);
+        unchanged.addView(unchangedSwitch, inRow(unchanged, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+        control.addView(unchanged, inRow(control, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+
+        final VolumeInput input = new VolumeInput(slider, unchangedSwitch, valueView);
+        unchanged.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                unchangedSwitch.toggle();
+            }
+        });
+        unchangedSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                updateVolumeInput(input);
+            }
+        });
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (fromUser && unchangedSwitch.isChecked()) {
+                    unchangedSwitch.setChecked(false);
+                }
+                updateVolumeInput(input);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
+        updateVolumeInput(input);
+        return input;
+    }
+
+    private void showVolumeRuleTimePicker() {
+        int initialHour = volumeRuleHour >= 0 ? volumeRuleHour : 17;
+        int initialMinute = volumeRuleMinute >= 0 ? volumeRuleMinute : 0;
+        TimePickerDialog dialog = new TimePickerDialog(
+                this,
+                new TimePickerDialog.OnTimeSetListener() {
+                    @Override
+                    public void onTimeSet(android.widget.TimePicker view, int hourOfDay, int minute) {
+                        setVolumeRuleTime(hourOfDay, minute);
+                    }
+                },
+                initialHour,
+                initialMinute,
+                true);
+        dialog.show();
+    }
+
+    private void setVolumeRuleTime(int hour, int minute) {
+        volumeRuleHour = clamp(hour, 0, 23);
+        volumeRuleMinute = clamp(minute, 0, 59);
+        if (volumeRuleTimeButton != null) {
+            volumeRuleTimeButton.setText(formatRuleTime(volumeRuleHour, volumeRuleMinute));
+        }
+    }
+
+    private void resetVolumeRuleInputs() {
+        volumeRuleHour = -1;
+        volumeRuleMinute = -1;
+        if (volumeRuleTimeButton != null) {
+            volumeRuleTimeButton.setText("Select Time");
+        }
+        resetVolumeInput(volumeRuleMediaInput);
+        resetVolumeInput(volumeRuleRingInput);
+        resetVolumeInput(volumeRuleNotificationInput);
+        resetVolumeInput(volumeRuleAlarmInput);
+    }
+
+    private void resetVolumeInput(VolumeInput input) {
+        if (input == null) {
+            return;
+        }
+        input.slider.setProgress(50);
+        input.unchangedSwitch.setChecked(true);
+        updateVolumeInput(input);
+    }
+
+    private int volumeInputValue(VolumeInput input) {
+        if (input == null || input.unchangedSwitch.isChecked()) {
+            return Config.VOLUME_UNCHANGED;
+        }
+        return input.slider.getProgress();
+    }
+
+    private void updateVolumeInput(VolumeInput input) {
+        if (input == null) {
+            return;
+        }
+        boolean unchanged = input.unchangedSwitch.isChecked();
+        input.slider.setEnabled(!unchanged);
+        input.slider.setAlpha(unchanged ? 0.45f : 1f);
+        input.valueView.setText(unchanged ? "UNCHANGED" : input.slider.getProgress() + "%");
+        input.valueView.setTextColor(unchanged ? COLOR_TEXT_FAINT : COLOR_PRIMARY);
+    }
+
+    private String formatRuleTime(int hour, int minute) {
+        return String.format(Locale.US, "%02d:%02d", hour, minute);
     }
 
     private void configureAppPickerField(final EditText field) {
@@ -1856,11 +2039,7 @@ public final class MainActivity extends Activity {
             batteryAlertVibrateSecondsField.setText(Integer.toString(config.batteryAlertVibrateSeconds()));
             batteryAlertUseExactAlarmsSwitch.setChecked(config.batteryAlertUseExactAlarms());
             batteryAlertAllowIdleAlarmsSwitch.setChecked(config.batteryAlertAllowIdleAlarms());
-            volumeRuleTimeField.setText("");
-            volumeRuleMediaField.setText("Unchanged");
-            volumeRuleRingField.setText("Unchanged");
-            volumeRuleNotificationField.setText("Unchanged");
-            volumeRuleAlarmField.setText("Unchanged");
+            resetVolumeRuleInputs();
             rebootAutomationEnabledSwitch.setChecked(config.rebootAutomationEnabled());
             rebootNotificationTriggerEnabledSwitch.setChecked(config.rebootNotificationTriggerEnabled());
             rebootRemoteTriggerEnabledSwitch.setChecked(config.rebootRemoteTriggerEnabled());
@@ -2173,17 +2352,17 @@ public final class MainActivity extends Activity {
 
     private void addVolumeRule() {
         try {
+            if (volumeRuleHour < 0 || volumeRuleMinute < 0) {
+                throw new IllegalArgumentException("Pick a time");
+            }
             Config.VolumeRule rule = Config.get(this).addVolumeRule(
-                    text(volumeRuleTimeField),
-                    text(volumeRuleMediaField),
-                    text(volumeRuleRingField),
-                    text(volumeRuleNotificationField),
-                    text(volumeRuleAlarmField));
-            volumeRuleTimeField.setText("");
-            volumeRuleMediaField.setText("Unchanged");
-            volumeRuleRingField.setText("Unchanged");
-            volumeRuleNotificationField.setText("Unchanged");
-            volumeRuleAlarmField.setText("Unchanged");
+                    volumeRuleHour,
+                    volumeRuleMinute,
+                    volumeInputValue(volumeRuleMediaInput),
+                    volumeInputValue(volumeRuleRingInput),
+                    volumeInputValue(volumeRuleNotificationInput),
+                    volumeInputValue(volumeRuleAlarmInput));
+            resetVolumeRuleInputs();
             LogStore.append(this, "volume", "Volume rule added time=" + rule.displayTime());
             VolumeControlManager.sync(this, "rule-added");
             Toast.makeText(this, "Volume rule added", Toast.LENGTH_SHORT).show();
