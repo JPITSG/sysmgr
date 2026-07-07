@@ -11,7 +11,7 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 
 final class BatteryAlertManager {
-    private static final String CHANNEL_ID = "battery_alerts";
+    static final String CHANNEL_ID = "battery_alerts";
     private static final int NOTIFICATION_ID = 0xB477;
 
     private BatteryAlertManager() {

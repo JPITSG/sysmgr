@@ -165,8 +165,12 @@ public final class MainActivity extends Activity {
     private VolumeInput volumeRuleRingInput;
     private VolumeInput volumeRuleNotificationInput;
     private VolumeInput volumeRuleAlarmInput;
+    private Button volumeRuleDndUnchangedButton;
+    private Button volumeRuleDndEnableButton;
+    private Button volumeRuleDndDisableButton;
     private int volumeRuleHour = -1;
     private int volumeRuleMinute = -1;
+    private int volumeRuleDndMode = Config.DND_UNCHANGED;
     private EditText rebootTriggerPackageField;
     private EditText rebootTriggerTitleField;
     private EditText rebootTriggerTextField;
@@ -210,6 +214,7 @@ public final class MainActivity extends Activity {
     private Switch remoteLinkAcceptAnySslCertSwitch;
     private Switch remoteLinkShowNotificationSwitch;
     private Switch logEnabledSwitch;
+    private Switch clearNotificationsOnOpenSwitch;
     private final List<Panel> panels = new ArrayList<>();
     private BroadcastReceiver remoteLinkStateReceiver;
     private BroadcastReceiver notificationHistoryReceiver;
@@ -300,6 +305,7 @@ public final class MainActivity extends Activity {
         registerNotificationHistoryReceiver();
         collapseAllPanels();
         expandPanel(notificationHistoryPanel);
+        NotificationCleaner.clearOnAppOpen(this);
         refreshStatusAndLog();
     }
 
@@ -409,6 +415,9 @@ public final class MainActivity extends Activity {
         notificationHistoryList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
         notificationHistoryList.setClipToOutline(true);
         frame.content.addView(notificationHistoryList, stack(frame.content));
+
+        LinearLayout optionsGroup = addToggleGroup(frame.content);
+        clearNotificationsOnOpenSwitch = addGroupedToggle(optionsGroup, "Clear Android notifications on app open");
 
         LinearLayout buttons = newRow();
         frame.content.addView(buttons, stack(frame.content));
@@ -549,6 +558,7 @@ public final class MainActivity extends Activity {
         volumeRuleRingInput = addVolumeInput(frame.content, "Ring");
         volumeRuleNotificationInput = addVolumeInput(frame.content, "Notification");
         volumeRuleAlarmInput = addVolumeInput(frame.content, "Alarm");
+        addDndModeInput(frame.content);
 
         LinearLayout addRow = newRow();
         frame.content.addView(addRow, stack(frame.content));
@@ -671,8 +681,11 @@ public final class MainActivity extends Activity {
         addRowButton(r4, tonalButton("Notification Access", action("notification_access")));
         addRowButton(r4, tonalButton("Accessibility", action("accessibility_settings")));
 
+        LinearLayout r5 = newRow();
+        frame.content.addView(r5, stack(frame.content));
+        addRowButton(r5, tonalButton("DND Access", action("dnd_access")));
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            frame.content.addView(tonalButton("Notification Permission", action("notifications")), stack(frame.content));
+            addRowButton(r5, tonalButton("Notification Permission", action("notifications")));
         }
     }
 
@@ -837,7 +850,8 @@ public final class MainActivity extends Activity {
         return "Media " + Config.volumeDisplay(rule.mediaPercent)
                 + "   Ring " + Config.volumeDisplay(rule.ringPercent)
                 + "\nNotification " + Config.volumeDisplay(rule.notificationPercent)
-                + "   Alarm " + Config.volumeDisplay(rule.alarmPercent);
+                + "   Alarm " + Config.volumeDisplay(rule.alarmPercent)
+                + "\nDo Not Disturb " + Config.dndDisplay(rule.dndMode);
     }
 
     private void addHistoryEntry(NotificationHistoryStore.Entry entry) {
@@ -1528,6 +1542,34 @@ public final class MainActivity extends Activity {
         return input;
     }
 
+    private void addDndModeInput(LinearLayout root) {
+        addFieldLabel(root, "Do Not Disturb");
+        LinearLayout row = newRow();
+        root.addView(row, stack(root));
+        volumeRuleDndUnchangedButton = tonalButton("Unchanged", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setVolumeRuleDndMode(Config.DND_UNCHANGED);
+            }
+        });
+        volumeRuleDndEnableButton = tonalButton("Enable", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setVolumeRuleDndMode(Config.DND_ENABLE);
+            }
+        });
+        volumeRuleDndDisableButton = tonalButton("Disable", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setVolumeRuleDndMode(Config.DND_DISABLE);
+            }
+        });
+        addRowButton(row, volumeRuleDndUnchangedButton);
+        addRowButton(row, volumeRuleDndEnableButton);
+        addRowButton(row, volumeRuleDndDisableButton);
+        updateVolumeRuleDndButtons();
+    }
+
     private void showVolumeRuleTimePicker() {
         int initialHour = volumeRuleHour >= 0 ? volumeRuleHour : 17;
         int initialMinute = volumeRuleMinute >= 0 ? volumeRuleMinute : 0;
@@ -1563,6 +1605,7 @@ public final class MainActivity extends Activity {
         resetVolumeInput(volumeRuleRingInput);
         resetVolumeInput(volumeRuleNotificationInput);
         resetVolumeInput(volumeRuleAlarmInput);
+        setVolumeRuleDndMode(Config.DND_UNCHANGED);
     }
 
     private void resetVolumeInput(VolumeInput input) {
@@ -1590,6 +1633,34 @@ public final class MainActivity extends Activity {
         input.slider.setAlpha(unchanged ? 0.45f : 1f);
         input.valueView.setText(unchanged ? "UNCHANGED" : input.slider.getProgress() + "%");
         input.valueView.setTextColor(unchanged ? COLOR_TEXT_FAINT : COLOR_PRIMARY);
+    }
+
+    private void setVolumeRuleDndMode(int mode) {
+        if (mode == Config.DND_ENABLE || mode == Config.DND_DISABLE) {
+            volumeRuleDndMode = mode;
+        } else {
+            volumeRuleDndMode = Config.DND_UNCHANGED;
+        }
+        updateVolumeRuleDndButtons();
+    }
+
+    private void updateVolumeRuleDndButtons() {
+        styleChoiceButton(volumeRuleDndUnchangedButton, volumeRuleDndMode == Config.DND_UNCHANGED);
+        styleChoiceButton(volumeRuleDndEnableButton, volumeRuleDndMode == Config.DND_ENABLE);
+        styleChoiceButton(volumeRuleDndDisableButton, volumeRuleDndMode == Config.DND_DISABLE);
+    }
+
+    private void styleChoiceButton(Button button, boolean selected) {
+        if (button == null) {
+            return;
+        }
+        int bg = selected ? COLOR_PRIMARY : COLOR_PRIMARY_CONTAINER;
+        int fg = selected ? Color.WHITE : COLOR_PRIMARY_ON_CONTAINER;
+        button.setTextColor(fg);
+        button.setBackground(new RippleDrawable(
+                ColorStateList.valueOf(selected ? COLOR_RIPPLE_DARK : COLOR_RIPPLE_LIGHT),
+                roundedFill(bg, BUTTON_CORNER, 0, 0),
+                null));
     }
 
     private String formatRuleTime(int hour, int minute) {
@@ -1863,6 +1934,8 @@ public final class MainActivity extends Activity {
         boolean notifications = PermissionState.notificationsEnabled(this);
         boolean notificationAccess = PermissionState.notificationListenerEnabled(this);
         boolean accessibility = PermissionState.accessibilityServiceEnabled(this);
+        boolean dndRuleConfigured = volumeRulesNeedDndAccess(config.volumeRules());
+        boolean dndAccess = !dndRuleConfigured || PermissionState.notificationPolicyAccessGranted(this);
         boolean hiddenWifiMonitorNeedsAccessibility = tracking
                 && switchValue(postOnWifiChangeSwitch, config.postOnWifiChange())
                 && !switchValue(showWifiMonitorNotificationSwitch, config.showWifiMonitorNotification())
@@ -1879,7 +1952,8 @@ public final class MainActivity extends Activity {
                 && batteryUnrestricted
                 && notifications
                 && notificationAccess
-                && accessibility;
+                && accessibility
+                && dndAccess;
         setPillState(
                 permissionsPill,
                 allPermissionsOk ? "ALL OK" : "ATTENTION",
@@ -1896,12 +1970,27 @@ public final class MainActivity extends Activity {
         addStatusRow(statusContainer, "Notifications", notifications);
         addStatusRow(statusContainer, "Notification access", notificationAccess);
         addStatusRow(statusContainer, "Accessibility monitor", accessibility);
+        if (dndRuleConfigured) {
+            addStatusRow(statusContainer, "DND access", dndAccess);
+        }
         if (hiddenWifiMonitorNeedsAccessibility) {
             addStatusRow(statusContainer, "Hidden Wi-Fi monitor", false);
         }
 
         refreshNotificationHistory();
         logView.setText(colorizeLog(LogStore.readTail(this, Math.min(config.logMaxLines(), 300))));
+    }
+
+    private boolean volumeRulesNeedDndAccess(List<Config.VolumeRule> rules) {
+        if (rules == null) {
+            return false;
+        }
+        for (Config.VolumeRule rule : rules) {
+            if (rule.dndMode == Config.DND_ENABLE || rule.dndMode == Config.DND_DISABLE) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void setRemoteLinkPill(boolean connected) {
@@ -2008,6 +2097,7 @@ public final class MainActivity extends Activity {
         try {
             Config config = Config.get(this);
             serverBaseUrlField.setText(config.serverBaseUrl());
+            clearNotificationsOnOpenSwitch.setChecked(config.clearNotificationsOnOpen());
             trackPathField.setText(config.trackPath());
             ssidPatternField.setText(config.ssidPattern());
             highBatteryIntervalField.setText(Integer.toString(config.highBatteryIntervalMinutes()));
@@ -2111,6 +2201,17 @@ public final class MainActivity extends Activity {
         bindSaveRemoteLinkConfig(remoteLinkEnabledSwitch);
         bindSaveRemoteLinkConfig(remoteLinkAcceptAnySslCertSwitch);
         bindSaveRemoteLinkConfig(remoteLinkShowNotificationSwitch);
+
+        clearNotificationsOnOpenSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (loadingConfig) {
+                    return;
+                }
+                Config.get(MainActivity.this).saveNotificationHistoryConfig(isChecked);
+                refreshStatusAndLog();
+            }
+        });
 
         logEnabledSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
@@ -2258,6 +2359,8 @@ public final class MainActivity extends Activity {
         Config.get(this).saveLogConfig(
                 logEnabledSwitch.isChecked(),
                 text(logMaxLinesField));
+        Config.get(this).saveNotificationHistoryConfig(
+                clearNotificationsOnOpenSwitch.isChecked());
         LogStore.append(this, "ui", "Configuration saved");
         NetworkMonitorService.sync(this);
         BatteryAlertManager.sync(this, "config-save");
@@ -2361,7 +2464,8 @@ public final class MainActivity extends Activity {
                     volumeInputValue(volumeRuleMediaInput),
                     volumeInputValue(volumeRuleRingInput),
                     volumeInputValue(volumeRuleNotificationInput),
-                    volumeInputValue(volumeRuleAlarmInput));
+                    volumeInputValue(volumeRuleAlarmInput),
+                    volumeRuleDndMode);
             resetVolumeRuleInputs();
             LogStore.append(this, "volume", "Volume rule added time=" + rule.displayTime());
             VolumeControlManager.sync(this, "rule-added");
@@ -2499,6 +2603,10 @@ public final class MainActivity extends Activity {
             }
         }
         openIntent(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+    }
+
+    private void openDndAccessSettings() {
+        openIntent(new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS));
     }
 
     private void openAccessibilitySettings() {
@@ -2789,6 +2897,8 @@ public final class MainActivity extends Activity {
                     openLocationSettings();
                 } else if ("notification_access".equals(command)) {
                     openNotificationListenerSettings();
+                } else if ("dnd_access".equals(command)) {
+                    openDndAccessSettings();
                 } else if ("accessibility_settings".equals(command)) {
                     openAccessibilitySettings();
                 } else if ("test_high_priority_alert".equals(command)) {

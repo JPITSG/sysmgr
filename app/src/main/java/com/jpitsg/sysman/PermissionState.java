@@ -73,6 +73,11 @@ final class PermissionState {
         return enabled != null && enabled.contains(component.flattenToString());
     }
 
+    static boolean notificationPolicyAccessGranted(Context context) {
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        return manager != null && manager.isNotificationPolicyAccessGranted();
+    }
+
     static boolean accessibilityServiceEnabled(Context context) {
         ComponentName component = new ComponentName(context, SystemManagerAccessibilityService.class);
         String enabled = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);

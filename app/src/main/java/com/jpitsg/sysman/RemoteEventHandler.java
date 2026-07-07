@@ -14,7 +14,7 @@ import android.util.Base64;
 import org.json.JSONObject;
 
 final class RemoteEventHandler {
-    private static final String CHANNEL_ID = "remote_notifications";
+    static final String CHANNEL_ID = "remote_notifications";
 
     private RemoteEventHandler() {
     }
@@ -115,8 +115,15 @@ final class RemoteEventHandler {
                 "remote-link:" + id,
                 new HighPriorityAlertPlayer.StartCallback() {
                     @Override
-                    public void onResult(boolean ok, String reason) {
-                        sendAck(context, client, id, ok, reason);
+                    public void onResult(final boolean ok, final String reason) {
+                        // Callback runs on the main thread; socket writes there throw
+                        // NetworkOnMainThreadException, so ack from a worker thread.
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                sendAck(context, client, id, ok, reason);
+                            }
+                        }, "RemoteAlarmAck").start();
                     }
                 });
     }

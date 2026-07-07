@@ -58,6 +58,7 @@ final class Config {
     private static final String KEY_CASE_SENSITIVE_SSID = "case_sensitive_ssid";
     private static final String KEY_LOG_MAX_LINES = "log_max_lines";
     private static final String KEY_LOG_ENABLED = "log_enabled";
+    private static final String KEY_CLEAR_NOTIFICATIONS_ON_OPEN = "clear_notifications_on_open";
     private static final String KEY_HIGH_PRIORITY_ENABLED = "high_priority_enabled";
     private static final String KEY_HIGH_PRIORITY_PACKAGE = "high_priority_package";
     private static final String KEY_HIGH_PRIORITY_TEXT_FILTER = "high_priority_text_filter";
@@ -103,6 +104,9 @@ final class Config {
     private final SharedPreferences prefs;
 
     static final int VOLUME_UNCHANGED = -1;
+    static final int DND_UNCHANGED = 0;
+    static final int DND_ENABLE = 1;
+    static final int DND_DISABLE = 2;
 
     static final class VolumeRule {
         final String id;
@@ -112,6 +116,7 @@ final class Config {
         final int ringPercent;
         final int notificationPercent;
         final int alarmPercent;
+        final int dndMode;
 
         VolumeRule(
                 String id,
@@ -120,7 +125,8 @@ final class Config {
                 int mediaPercent,
                 int ringPercent,
                 int notificationPercent,
-                int alarmPercent) {
+                int alarmPercent,
+                int dndMode) {
             this.id = id;
             this.hour = hour;
             this.minute = minute;
@@ -128,6 +134,7 @@ final class Config {
             this.ringPercent = ringPercent;
             this.notificationPercent = notificationPercent;
             this.alarmPercent = alarmPercent;
+            this.dndMode = dndMode;
         }
 
         int minuteOfDay() {
@@ -286,6 +293,10 @@ final class Config {
         return prefs.getBoolean(KEY_LOG_ENABLED, true);
     }
 
+    boolean clearNotificationsOnOpen() {
+        return prefs.getBoolean(KEY_CLEAR_NOTIFICATIONS_ON_OPEN, true);
+    }
+
     boolean highPriorityEnabled() {
         return prefs.getBoolean(KEY_HIGH_PRIORITY_ENABLED, true);
     }
@@ -380,7 +391,8 @@ final class Config {
                         clampVolume(object.optInt("media", VOLUME_UNCHANGED)),
                         clampVolume(object.optInt("ring", VOLUME_UNCHANGED)),
                         clampVolume(object.optInt("notification", VOLUME_UNCHANGED)),
-                        clampVolume(object.optInt("alarm", VOLUME_UNCHANGED))));
+                        clampVolume(object.optInt("alarm", VOLUME_UNCHANGED)),
+                        clampDndMode(object.optInt("dnd", DND_UNCHANGED))));
             }
         } catch (Exception ignored) {
             return new ArrayList<>();
@@ -402,7 +414,8 @@ final class Config {
                 parseVolumePercent(mediaPercent),
                 parseVolumePercent(ringPercent),
                 parseVolumePercent(notificationPercent),
-                parseVolumePercent(alarmPercent));
+                parseVolumePercent(alarmPercent),
+                DND_UNCHANGED);
     }
 
     VolumeRule addVolumeRule(
@@ -411,7 +424,8 @@ final class Config {
             int mediaPercent,
             int ringPercent,
             int notificationPercent,
-            int alarmPercent) {
+            int alarmPercent,
+            int dndMode) {
         if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
             throw new IllegalArgumentException("Pick a valid 24-hour time");
         }
@@ -422,12 +436,14 @@ final class Config {
                 clampVolume(mediaPercent),
                 clampVolume(ringPercent),
                 clampVolume(notificationPercent),
-                clampVolume(alarmPercent));
+                clampVolume(alarmPercent),
+                clampDndMode(dndMode));
         if (rule.mediaPercent == VOLUME_UNCHANGED
                 && rule.ringPercent == VOLUME_UNCHANGED
                 && rule.notificationPercent == VOLUME_UNCHANGED
-                && rule.alarmPercent == VOLUME_UNCHANGED) {
-            throw new IllegalArgumentException("Set at least one volume level");
+                && rule.alarmPercent == VOLUME_UNCHANGED
+                && rule.dndMode == DND_UNCHANGED) {
+            throw new IllegalArgumentException("Set at least one volume level or DND action");
         }
         List<VolumeRule> rules = volumeRules();
         rules.add(rule);
@@ -664,6 +680,7 @@ final class Config {
                 object.put("ring", rule.ringPercent);
                 object.put("notification", rule.notificationPercent);
                 object.put("alarm", rule.alarmPercent);
+                object.put("dnd", rule.dndMode);
                 array.put(object);
             } catch (Exception ignored) {
             }
@@ -694,6 +711,12 @@ final class Config {
         prefs.edit()
                 .putBoolean(KEY_LOG_ENABLED, enabled)
                 .putInt(KEY_LOG_MAX_LINES, parseInt(logMaxLines, 500, 50, 5000))
+                .apply();
+    }
+
+    void saveNotificationHistoryConfig(boolean clearNotificationsOnOpen) {
+        prefs.edit()
+                .putBoolean(KEY_CLEAR_NOTIFICATIONS_ON_OPEN, clearNotificationsOnOpen)
                 .apply();
     }
 
@@ -997,11 +1020,28 @@ final class Config {
         return percent == VOLUME_UNCHANGED ? "Unchanged" : percent + "%";
     }
 
+    static String dndDisplay(int mode) {
+        if (mode == DND_ENABLE) {
+            return "Enable";
+        }
+        if (mode == DND_DISABLE) {
+            return "Disable";
+        }
+        return "Unchanged";
+    }
+
     private static int clampVolume(int percent) {
         if (percent == VOLUME_UNCHANGED) {
             return VOLUME_UNCHANGED;
         }
         return clamp(percent, 0, 100);
+    }
+
+    private static int clampDndMode(int mode) {
+        if (mode == DND_ENABLE || mode == DND_DISABLE) {
+            return mode;
+        }
+        return DND_UNCHANGED;
     }
 
     private static void sortVolumeRules(List<VolumeRule> rules) {

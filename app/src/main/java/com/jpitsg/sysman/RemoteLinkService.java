@@ -7,6 +7,9 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.SystemClock;
@@ -22,22 +25,35 @@ public final class RemoteLinkService extends Service {
     private static final String CHANNEL_ID = "system_manager_remote_link";
     private static final int NOTIFICATION_ID = 0x5303;
     private static final long GPS_ACK_TIMEOUT_MILLIS = 10_000L;
+    private static final long LIVENESS_PROBE_TIMEOUT_MILLIS = 5_000L;
+    // Connections that die younger than this count toward reconnect backoff;
+    // longer-lived ones reset it (distinguishes churn from a healthy link dropping).
+    private static final long STABLE_CONNECTION_MILLIS = 30_000L;
+    private static final long[] BACKOFF_STEP_SECONDS = {1L, 2L, 5L, 10L, 30L};
     private static volatile RemoteLinkService activeService;
 
     private final AtomicBoolean workerRunning = new AtomicBoolean(false);
     private final ConcurrentLinkedQueue<String> pendingManualPingReasons = new ConcurrentLinkedQueue<>();
     private final Object gpsAckLock = new Object();
     private final java.util.Map<String, PendingGpsAck> pendingGpsAcks = new java.util.HashMap<>();
+    private final AtomicBoolean livenessProbeRequested = new AtomicBoolean(false);
+    private volatile String livenessProbeReason = "";
+    private volatile boolean reconnectWakeRequested;
+    private volatile Network connectedNetwork;
+    private volatile boolean defaultValidated = true;
     private volatile boolean stopRequested;
     private volatile RemoteWebSocketClient client;
     private volatile long heartbeatResetAtMillis;
     private Thread worker;
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     @Override
     public void onCreate() {
         super.onCreate();
         activeService = this;
         ensureNotificationChannel();
+        registerNetworkCallback();
     }
 
     @Override
@@ -84,6 +100,7 @@ public final class RemoteLinkService extends Service {
     @Override
     public void onDestroy() {
         stopRequested = true;
+        unregisterNetworkCallback();
         RemoteLinkStateStore.setConnected(this, false);
         closeClient();
         if (worker != null) {
@@ -128,7 +145,7 @@ public final class RemoteLinkService extends Service {
     }
 
     private void runRemoteLinkLoop(String initialReason) {
-        int failedConnectsSinceSuccess = 0;
+        int consecutiveFailures = 0;
         LogStore.append(this, "remote", "Remote Link worker started reason=" + initialReason);
         try {
             while (!stopRequested && Config.get(this).remoteLinkEnabled()) {
@@ -140,35 +157,46 @@ public final class RemoteLinkService extends Service {
                         config.remoteLinkAcceptAnySslCert());
                 client = current;
                 boolean connected = false;
+                long connectedAtMillis = 0L;
                 try {
                     LogStore.append(this, "remote", "Connecting to " + config.remoteLinkEndpoint());
                     current.connect();
                     connected = true;
-                    failedConnectsSinceSuccess = 0;
+                    connectedAtMillis = SystemClock.elapsedRealtime();
+                    connectedNetwork = currentDefaultNetwork();
                     RemoteLinkStateStore.setConnected(this, true);
                     LogStore.append(this, "remote", "Remote Link connected");
                     sendHello(current, config);
                     runConnectedLoop(current);
                     RemoteLinkStateStore.setConnected(this, false);
                     LogStore.append(this, "remote", "Remote Link disconnected");
+                    consecutiveFailures = 0;
                 } catch (Exception e) {
                     RemoteLinkStateStore.setConnected(this, false);
+                    long delayMillis;
                     if (connected) {
-                        failedConnectsSinceSuccess = 0;
-                        LogStore.append(this, "remote", "Remote Link lost: "
+                        long lifetimeMillis = SystemClock.elapsedRealtime() - connectedAtMillis;
+                        consecutiveFailures = lifetimeMillis >= STABLE_CONNECTION_MILLIS
+                                ? 0
+                                : consecutiveFailures + 1;
+                        delayMillis = backoffDelayMillis(consecutiveFailures);
+                        LogStore.append(this, "remote", "Remote Link lost after "
+                                + (lifetimeMillis / 1000L) + "s; retry in " + (delayMillis / 1000L) + "s: "
                                 + e.getClass().getSimpleName() + ": " + e.getMessage());
                     } else {
-                        long delayMillis = failedConnectsSinceSuccess == 0
-                                ? 1000L
-                                : Config.get(this).remoteLinkReconnectSeconds() * 1000L;
-                        failedConnectsSinceSuccess++;
+                        consecutiveFailures++;
+                        delayMillis = backoffDelayMillis(consecutiveFailures);
                         LogStore.append(this, "remote", "Remote Link connect failed; retry in "
                                 + (delayMillis / 1000L) + "s: "
                                 + e.getClass().getSimpleName() + ": " + e.getMessage());
-                        sleepInterruptibly(delayMillis);
+                    }
+                    if (sleepUnlessWoken(delayMillis)) {
+                        consecutiveFailures = 0;
+                        LogStore.append(this, "remote", "Remote Link retry resumed early by network change");
                     }
                 } finally {
                     current.close();
+                    connectedNetwork = null;
                     if (client == current) {
                         client = null;
                     }
@@ -191,6 +219,9 @@ public final class RemoteLinkService extends Service {
         long nextHeartbeatAt = 0L;
         long lastInboundAt = current.lastInboundAtMillis();
         long lastHeartbeatResetAt = heartbeatResetAtMillis;
+        long probeSentAt = 0L;
+        long probeDeadlineAt = 0L;
+        livenessProbeRequested.set(false);
         while (!stopRequested && Config.get(this).remoteLinkEnabled() && current.isOpen()) {
             Config config = Config.get(this);
             sendQueuedPings(current);
@@ -205,6 +236,21 @@ public final class RemoteLinkService extends Service {
             if (message != null) {
                 if (!handleServiceMessage(message)) {
                     RemoteEventHandler.handle(this, current, message);
+                }
+            }
+            if (livenessProbeRequested.compareAndSet(true, false)) {
+                sendManualPing(current, "liveness:" + livenessProbeReason);
+                probeSentAt = SystemClock.elapsedRealtime();
+                probeDeadlineAt = probeSentAt + LIVENESS_PROBE_TIMEOUT_MILLIS;
+            }
+            if (probeDeadlineAt > 0L) {
+                if (current.lastInboundAtMillis() >= probeSentAt) {
+                    probeDeadlineAt = 0L;
+                    LogStore.append(this, "remote", "Liveness probe satisfied by inbound traffic");
+                } else if (SystemClock.elapsedRealtime() >= probeDeadlineAt) {
+                    LogStore.append(this, "remote", "Liveness probe timed out after "
+                            + (LIVENESS_PROBE_TIMEOUT_MILLIS / 1000L) + "s; forcing reconnect");
+                    throw new IOException("liveness probe timeout");
                 }
             }
             long heartbeatResetAt = heartbeatResetAtMillis;
@@ -388,19 +434,165 @@ public final class RemoteLinkService extends Service {
         }
     }
 
-    private void sleepInterruptibly(long delayMillis) {
+    private boolean sleepUnlessWoken(long delayMillis) {
         long endAt = SystemClock.elapsedRealtime() + Math.max(0L, delayMillis);
         while (!stopRequested) {
+            if (reconnectWakeRequested) {
+                reconnectWakeRequested = false;
+                return true;
+            }
             long remaining = endAt - SystemClock.elapsedRealtime();
             if (remaining <= 0L) {
-                return;
+                return false;
             }
             try {
-                Thread.sleep(Math.min(remaining, 1000L));
+                Thread.sleep(Math.min(remaining, 250L));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return;
+                return false;
             }
+        }
+        return false;
+    }
+
+    private long backoffDelayMillis(int consecutiveFailures) {
+        long capSeconds = Math.max(1L, Config.get(this).remoteLinkReconnectSeconds());
+        long seconds;
+        if (consecutiveFailures <= 0) {
+            seconds = BACKOFF_STEP_SECONDS[0];
+        } else if (consecutiveFailures - 1 < BACKOFF_STEP_SECONDS.length) {
+            seconds = BACKOFF_STEP_SECONDS[consecutiveFailures - 1];
+        } else {
+            seconds = capSeconds;
+        }
+        return Math.min(seconds, capSeconds) * 1000L;
+    }
+
+    private Network currentDefaultNetwork() {
+        ConnectivityManager manager = connectivityManager;
+        if (manager == null) {
+            return null;
+        }
+        try {
+            return manager.getActiveNetwork();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private void registerNetworkCallback() {
+        connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivityManager == null) {
+            LogStore.append(this, "remote", "Remote Link network callback unavailable; ConnectivityManager missing");
+            return;
+        }
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                handleDefaultNetworkAvailable(network);
+            }
+
+            @Override
+            public void onLost(Network network) {
+                handleDefaultNetworkLost(network);
+            }
+
+            @Override
+            public void onCapabilitiesChanged(Network network, NetworkCapabilities networkCapabilities) {
+                handleDefaultNetworkCapabilities(network, networkCapabilities);
+            }
+        };
+        try {
+            connectivityManager.registerDefaultNetworkCallback(networkCallback);
+            LogStore.append(this, "remote", "Remote Link network callback registered");
+        } catch (RuntimeException e) {
+            networkCallback = null;
+            LogStore.append(this, "remote", "Remote Link network callback registration failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
+
+    private void unregisterNetworkCallback() {
+        if (connectivityManager == null || networkCallback == null) {
+            networkCallback = null;
+            return;
+        }
+        try {
+            connectivityManager.unregisterNetworkCallback(networkCallback);
+        } catch (RuntimeException ignored) {
+        }
+        networkCallback = null;
+    }
+
+    private void handleDefaultNetworkAvailable(Network network) {
+        RemoteWebSocketClient current = client;
+        Network linkNetwork = connectedNetwork;
+        if (current == null || !current.isOpen()) {
+            requestReconnectWake("default-available");
+            return;
+        }
+        if (linkNetwork == null) {
+            requestLivenessProbe("default-available-unknown-link");
+            return;
+        }
+        if (!network.equals(linkNetwork)) {
+            LogStore.append(this, "remote", "Default network changed; reconnecting Remote Link");
+            reconnectWakeRequested = true;
+            current.close();
+        }
+    }
+
+    private void handleDefaultNetworkLost(Network network) {
+        RemoteWebSocketClient current = client;
+        Network linkNetwork = connectedNetwork;
+        if (current == null || !current.isOpen()) {
+            return;
+        }
+        if (linkNetwork == null || network.equals(linkNetwork)) {
+            LogStore.append(this, "remote", "Default network lost; closing Remote Link socket");
+            current.close();
+        }
+    }
+
+    private void handleDefaultNetworkCapabilities(Network network, NetworkCapabilities capabilities) {
+        boolean validated = capabilities != null
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+        boolean wasValidated = defaultValidated;
+        defaultValidated = validated;
+        if (wasValidated == validated) {
+            return;
+        }
+        if (!validated) {
+            RemoteWebSocketClient current = client;
+            Network linkNetwork = connectedNetwork;
+            if (current != null && current.isOpen()
+                    && (linkNetwork == null || network.equals(linkNetwork))) {
+                requestLivenessProbe("validated-lost");
+            }
+        } else {
+            requestReconnectWake("validated-restored");
+        }
+    }
+
+    private void requestReconnectWake(String reason) {
+        RemoteWebSocketClient current = client;
+        if (current != null && current.isOpen()) {
+            return;
+        }
+        if (!reconnectWakeRequested) {
+            reconnectWakeRequested = true;
+            LogStore.append(this, "remote", "Remote Link reconnect wake requested reason=" + reason);
+        }
+    }
+
+    private void requestLivenessProbe(String reason) {
+        RemoteWebSocketClient current = client;
+        if (current == null || !current.isOpen()) {
+            return;
+        }
+        livenessProbeReason = reason == null ? "unknown" : reason;
+        if (livenessProbeRequested.compareAndSet(false, true)) {
+            LogStore.append(this, "remote", "Remote Link liveness probe requested reason=" + livenessProbeReason);
         }
     }
 

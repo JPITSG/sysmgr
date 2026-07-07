@@ -1,5 +1,6 @@
 package com.jpitsg.sysman;
 
+import android.app.NotificationManager;
 import android.content.Context;
 import android.media.AudioManager;
 import android.os.Build;
@@ -95,23 +96,51 @@ final class VolumeControlManager {
 
     private static void applyRule(Context context, Config.VolumeRule rule, String reason) {
         AudioManager audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        int applied = 0;
         if (audioManager == null) {
             LogStore.append(context, "volume", "AudioManager unavailable rule=" + rule.displayTime() + " reason=" + reason);
-            return;
+        } else {
+            applied += applyStream(context, audioManager, AudioManager.STREAM_MUSIC, "media", rule.mediaPercent);
+            applied += applyStream(context, audioManager, AudioManager.STREAM_RING, "ring", rule.ringPercent);
+            applied += applyStream(context, audioManager, AudioManager.STREAM_NOTIFICATION, "notification", rule.notificationPercent);
+            applied += applyStream(context, audioManager, AudioManager.STREAM_ALARM, "alarm", rule.alarmPercent);
         }
-
-        int applied = 0;
-        applied += applyStream(context, audioManager, AudioManager.STREAM_MUSIC, "media", rule.mediaPercent);
-        applied += applyStream(context, audioManager, AudioManager.STREAM_RING, "ring", rule.ringPercent);
-        applied += applyStream(context, audioManager, AudioManager.STREAM_NOTIFICATION, "notification", rule.notificationPercent);
-        applied += applyStream(context, audioManager, AudioManager.STREAM_ALARM, "alarm", rule.alarmPercent);
+        boolean dndApplied = applyDndMode(context, rule.dndMode);
         LogStore.append(context, "volume", "Applied volume rule time=" + rule.displayTime()
                 + " applied=" + applied
                 + " media=" + Config.volumeDisplay(rule.mediaPercent)
                 + " ring=" + Config.volumeDisplay(rule.ringPercent)
                 + " notification=" + Config.volumeDisplay(rule.notificationPercent)
                 + " alarm=" + Config.volumeDisplay(rule.alarmPercent)
+                + " dnd=" + Config.dndDisplay(rule.dndMode)
+                + " dnd_applied=" + dndApplied
                 + " reason=" + reason);
+    }
+
+    private static boolean applyDndMode(Context context, int mode) {
+        if (mode == Config.DND_UNCHANGED) {
+            return false;
+        }
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) {
+            LogStore.append(context, "volume", "NotificationManager unavailable for DND change");
+            return false;
+        }
+        if (!manager.isNotificationPolicyAccessGranted()) {
+            LogStore.append(context, "volume", "DND change skipped; notification policy access is not granted");
+            return false;
+        }
+        int filter = mode == Config.DND_ENABLE
+                ? NotificationManager.INTERRUPTION_FILTER_NONE
+                : NotificationManager.INTERRUPTION_FILTER_ALL;
+        try {
+            manager.setInterruptionFilter(filter);
+            return true;
+        } catch (RuntimeException e) {
+            LogStore.append(context, "volume", "DND change failed mode=" + Config.dndDisplay(mode)
+                    + " error=" + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return false;
+        }
     }
 
     private static int applyStream(

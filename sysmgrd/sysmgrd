@@ -9,7 +9,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 
-const CONTROL_SOCKET_PATH = '/tmp/syslogd.sock';
+const CONTROL_SOCKET_PATH = '/tmp/sysmgrd.sock';
 const DELIVERY_ACK_TIMEOUT_MS = 10000;
 const PING_TIMEOUT_MS = 10000;
 const PING_RECONNECT_GRACE_MS = 5000;

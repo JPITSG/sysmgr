@@ -32,6 +32,10 @@ final class HighPriorityAlertPlayer {
     private static int originalAlarmVolume = -1;
     private static BroadcastReceiver unlockReceiver;
     private static boolean unlockReceiverRegistered;
+    private static BroadcastReceiver screenOnReceiver;
+    private static boolean screenOnReceiverRegistered;
+    private static Runnable screenOnPollRunnable;
+    private static boolean screenOnPollSawNonInteractive;
 
     interface StartCallback {
         void onResult(boolean ok, String reason);
@@ -224,9 +228,11 @@ final class HighPriorityAlertPlayer {
             vibrate(app, reason + ":remote-alarm", maxPlayMillis);
         }
         scheduleTimeoutStop(app, maxPlayMillis);
+        registerScreenOnStop(app);
         LogStore.append(app, "alert", "Playing remote alarm tone=" + safeText(toneTitle)
                 + " reason=" + reason
                 + " vibrateWithTone=" + vibrateWithTone
+                + " stopOnScreenOn=true"
                 + " duration=" + safeSeconds + "s");
         return new StartResult(true, "started");
     }
@@ -303,6 +309,7 @@ final class HighPriorityAlertPlayer {
             stopRunnable = null;
         }
         unregisterUnlockStop(app);
+        unregisterScreenOnStop(app);
         cancelVibration(app);
 
         if (currentRingtone != null) {
@@ -371,6 +378,86 @@ final class HighPriorityAlertPlayer {
             }
         };
         MAIN.postDelayed(unlockPollRunnable, 500L);
+    }
+
+    private static void registerScreenOnStop(final Context app) {
+        if (!screenOnReceiverRegistered) {
+            screenOnReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    if (intent != null && Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
+                        LogStore.append(app, "alert", "Display turned on; stopping remote alarm");
+                        stop(app, "screen-on");
+                    }
+                }
+            };
+
+            IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_ON);
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    app.registerReceiver(screenOnReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+                } else {
+                    app.registerReceiver(screenOnReceiver, filter);
+                }
+                screenOnReceiverRegistered = true;
+                LogStore.append(app, "alert", "Registered screen-on stop receiver");
+            } catch (RuntimeException e) {
+                screenOnReceiver = null;
+                screenOnReceiverRegistered = false;
+                LogStore.append(app, "alert", "Could not register screen-on receiver: " + e.getMessage());
+            }
+        }
+        scheduleScreenOnPoll(app);
+    }
+
+    private static void scheduleScreenOnPoll(final Context app) {
+        if (screenOnPollRunnable != null) {
+            return;
+        }
+        // Only a transition to interactive should stop the alarm; if the display
+        // is already on when the alarm starts, keep playing until it goes off and
+        // back on (or the timeout fires).
+        screenOnPollSawNonInteractive = !DeviceState.read(app).interactive;
+        screenOnPollRunnable = new Runnable() {
+            @Override
+            public void run() {
+                synchronized (LOCK) {
+                    if (currentRingtone == null) {
+                        screenOnPollRunnable = null;
+                        return;
+                    }
+                    if (!DeviceState.read(app).interactive) {
+                        screenOnPollSawNonInteractive = true;
+                    } else if (screenOnPollSawNonInteractive) {
+                        LogStore.append(app, "alert", "Display turn-on detected by poll; stopping remote alarm");
+                        stopLocked(app, "screen-on");
+                        return;
+                    }
+                    MAIN.postDelayed(this, 500L);
+                }
+            }
+        };
+        MAIN.postDelayed(screenOnPollRunnable, 500L);
+    }
+
+    private static void unregisterScreenOnStop(Context app) {
+        if (screenOnPollRunnable != null) {
+            MAIN.removeCallbacks(screenOnPollRunnable);
+            screenOnPollRunnable = null;
+        }
+        if (!screenOnReceiverRegistered || screenOnReceiver == null) {
+            screenOnReceiver = null;
+            screenOnReceiverRegistered = false;
+            return;
+        }
+        try {
+            app.unregisterReceiver(screenOnReceiver);
+        } catch (RuntimeException e) {
+            LogStore.append(app, "alert", "Could not unregister screen-on receiver: " + e.getMessage());
+        } finally {
+            screenOnReceiver = null;
+            screenOnReceiverRegistered = false;
+        }
     }
 
     private static void unregisterUnlockStop(Context app) {
