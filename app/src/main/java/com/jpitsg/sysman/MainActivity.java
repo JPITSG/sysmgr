@@ -12,6 +12,7 @@ import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -32,6 +33,7 @@ import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.method.ScrollingMovementMethod;
 import android.text.style.ForegroundColorSpan;
+import android.util.LruCache;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -84,6 +86,7 @@ public final class MainActivity extends Activity {
     private static final int CHEVRON_SIZE = 32;
     private static final int STATUS_DOT_SIZE = 8;
     private static final int LOG_VISIBLE_LINES = 16;
+    private static final int MAX_VISIBLE_NOTIFICATION_HISTORY = 30;
 
     private static final int COLOR_BG = 0xFFF4F7F4;
     private static final int COLOR_SURFACE = 0xFFFFFFFF;
@@ -219,6 +222,14 @@ public final class MainActivity extends Activity {
     private BroadcastReceiver remoteLinkStateReceiver;
     private BroadcastReceiver notificationHistoryReceiver;
     private boolean loadingConfig;
+    private String renderedNotificationHistoryKey;
+    private final LruCache<String, Bitmap> notificationImageCache =
+            new LruCache<String, Bitmap>(notificationImageCacheSizeKb()) {
+                @Override
+                protected int sizeOf(String key, Bitmap bitmap) {
+                    return Math.max(1, bitmap.getAllocationByteCount() / 1024);
+                }
+            };
 
     private static final class Panel {
         final LinearLayout content;
@@ -294,7 +305,6 @@ public final class MainActivity extends Activity {
         buildUi();
         loadConfigIntoFields();
         wireLiveSettings();
-        refreshStatusAndLog();
         LogStore.append(this, "ui", "MainActivity opened");
     }
 
@@ -303,10 +313,9 @@ public final class MainActivity extends Activity {
         super.onResume();
         registerRemoteLinkStateReceiver();
         registerNotificationHistoryReceiver();
-        collapseAllPanels();
-        expandPanel(notificationHistoryPanel);
         NotificationCleaner.clearOnAppOpen(this);
         refreshStatusAndLog();
+        refreshNotificationHistory();
     }
 
     @Override
@@ -314,6 +323,15 @@ public final class MainActivity extends Activity {
         unregisterNotificationHistoryReceiver();
         unregisterRemoteLinkStateReceiver();
         super.onPause();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        configureSystemBars();
+        View decor = getWindow().getDecorView();
+        decor.requestApplyInsets();
+        decor.requestLayout();
     }
 
     // ============================================================
@@ -381,6 +399,7 @@ public final class MainActivity extends Activity {
         buildSettingsTransferPanel(root);
         buildPermissionsPanel(root);
         buildLogPanel(root);
+        expandPanel(notificationHistoryPanel);
 
         setContentView(scrollView);
         BatteryAlertManager.sync(this, "activity-open");
@@ -748,10 +767,15 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshNotificationHistory() {
+        refreshNotificationHistory(false);
+    }
+
+    private void refreshNotificationHistory(boolean forceRender) {
         if (notificationHistoryPill == null) {
             return;
         }
-        int count = NotificationHistoryStore.count(this);
+        List<NotificationHistoryStore.Entry> allEntries = NotificationHistoryStore.read(this, 0);
+        int count = allEntries.size();
         setPillState(
                 notificationHistoryPill,
                 Integer.toString(count),
@@ -761,10 +785,17 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        int visibleCount = Math.min(count, MAX_VISIBLE_NOTIFICATION_HISTORY);
+        List<NotificationHistoryStore.Entry> entries = allEntries.subList(0, visibleCount);
+        String renderKey = notificationHistoryRenderKey(entries, count);
+        if (!forceRender && renderKey.equals(renderedNotificationHistoryKey)) {
+            return;
+        }
+
         notificationHistoryList.removeAllViews();
-        List<NotificationHistoryStore.Entry> entries = NotificationHistoryStore.read(this, 30);
         if (entries.isEmpty()) {
             addHistoryEmptyRow("No notifications yet");
+            renderedNotificationHistoryKey = renderKey;
             return;
         }
 
@@ -778,6 +809,26 @@ public final class MainActivity extends Activity {
             addHistorySeparator();
             addHistoryEmptyRow("Showing newest " + entries.size() + " of " + count);
         }
+        renderedNotificationHistoryKey = renderKey;
+    }
+
+    private String notificationHistoryRenderKey(
+            List<NotificationHistoryStore.Entry> entries, int totalCount) {
+        StringBuilder key = new StringBuilder(16 + entries.size() * 64);
+        key.append(totalCount);
+        for (NotificationHistoryStore.Entry entry : entries) {
+            key.append('|')
+                    .append(entry.id.length())
+                    .append(':')
+                    .append(entry.id)
+                    .append(':')
+                    .append(entry.timestampMillis)
+                    .append(':')
+                    .append(entry.highPriority ? '1' : '0')
+                    .append(':')
+                    .append(entry.imageFileName);
+        }
+        return key.toString();
     }
 
     private void refreshVolumeControlPanel() {
@@ -972,6 +1023,14 @@ public final class MainActivity extends Activity {
             return null;
         }
 
+        Bitmap cached = notificationImageCache.get(entry.imageFileName);
+        if (cached != null && !cached.isRecycled()) {
+            return cached;
+        }
+        if (cached != null) {
+            notificationImageCache.remove(entry.imageFileName);
+        }
+
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
         BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
@@ -982,7 +1041,11 @@ public final class MainActivity extends Activity {
         int targetWidth = Math.max(dp(160), getResources().getDisplayMetrics().widthPixels - dp(GAP * 6));
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inSampleSize = sampleSize(bounds.outWidth, targetWidth);
-        return BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+        Bitmap decoded = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+        if (decoded != null) {
+            notificationImageCache.put(entry.imageFileName, decoded);
+        }
+        return decoded;
     }
 
     private void saveNotificationImage(NotificationHistoryStore.Entry entry) {
@@ -1045,6 +1108,11 @@ public final class MainActivity extends Activity {
         String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
                 .format(new Date(entry.timestampMillis > 0L ? entry.timestampMillis : System.currentTimeMillis()));
         return "system-manager-" + timestamp + "-" + label + ".jpg";
+    }
+
+    private static int notificationImageCacheSizeKb() {
+        long suggestedKb = Runtime.getRuntime().maxMemory() / (16L * 1024L);
+        return (int) Math.max(4L * 1024L, Math.min(16L * 1024L, suggestedKb));
     }
 
     private int sampleSize(int width, int targetWidth) {
@@ -1110,6 +1178,7 @@ public final class MainActivity extends Activity {
                                 .withEndAction(new Runnable() {
                                     @Override
                                     public void run() {
+                                        notificationImageCache.remove(entry.imageFileName);
                                         NotificationHistoryStore.remove(MainActivity.this, entry);
                                         refreshNotificationHistory();
                                     }
@@ -1227,20 +1296,6 @@ public final class MainActivity extends Activity {
         }
         panel.indicator.animate().cancel();
         panel.indicator.setRotation(0f);
-    }
-
-    private void collapseAllPanels() {
-        for (Panel panel : panels) {
-            panel.content.animate().cancel();
-            panel.content.setVisibility(View.GONE);
-            ViewGroup.LayoutParams lp = panel.content.getLayoutParams();
-            if (lp != null) {
-                lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                panel.content.setLayoutParams(lp);
-            }
-            panel.indicator.animate().cancel();
-            panel.indicator.setRotation(-90f);
-        }
     }
 
     private void animatePanel(final View content, boolean expand) {
@@ -1977,7 +2032,6 @@ public final class MainActivity extends Activity {
             addStatusRow(statusContainer, "Hidden Wi-Fi monitor", false);
         }
 
-        refreshNotificationHistory();
         logView.setText(colorizeLog(LogStore.readTail(this, Math.min(config.logMaxLines(), 300))));
     }
 
@@ -2823,6 +2877,8 @@ public final class MainActivity extends Activity {
     }
 
     private void clearNotificationHistory() {
+        notificationImageCache.evictAll();
+        renderedNotificationHistoryKey = null;
         NotificationHistoryStore.clear(this);
         LogStore.append(this, "ui", "Notification history cleared");
         Toast.makeText(this, "Notification history cleared", Toast.LENGTH_SHORT).show();
@@ -2918,7 +2974,7 @@ public final class MainActivity extends Activity {
                 } else if ("notifications".equals(command)) {
                     requestNotificationPermission();
                 } else if ("refresh_notification_history".equals(command)) {
-                    refreshNotificationHistory();
+                    refreshNotificationHistory(true);
                 } else if ("clear_notification_history".equals(command)) {
                     clearNotificationHistory();
                 } else if ("refresh_log".equals(command)) {
