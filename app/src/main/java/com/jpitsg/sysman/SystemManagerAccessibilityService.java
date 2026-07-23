@@ -1,22 +1,24 @@
 package com.jpitsg.sysman;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Path;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.util.DisplayMetrics;
+import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
 public final class SystemManagerAccessibilityService extends AccessibilityService {
     private static volatile SystemManagerAccessibilityService instance;
-    private static final String[] RESTART_TEXTS = new String[]{
-            "Restart",
-            "Reboot",
-            "Restart phone",
-            "Restart device"
-    };
+    // On this device the power menu no longer has a Restart button; rebooting is
+    // triggered by a press-and-hold at screen center swiped up to the top.
+    private static final long REBOOT_SWIPE_HOLD_MILLIS = 400L;
+    private static final long REBOOT_SWIPE_MOVE_MILLIS = 500L;
     private static final String[] PIN_CONFIRM_TEXTS = new String[]{
             "OK",
             "Enter",
@@ -143,31 +145,94 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
-                clickRestart(1);
+                swipeToReboot();
             }
         }, Config.get(this).rebootPowerDialogWaitMs());
     }
 
-    private void clickRestart(final int step) {
-        wakeScreen("restart-click-" + step, SCREEN_WAKE_MILLIS);
-        boolean clicked = clickAnyText(RESTART_TEXTS, true);
-        LogStore.append(this, "reboot", "Restart click step=" + step + " result=" + clicked);
-        if (step < 2) {
-            handler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    clickRestart(step + 1);
-                }
-            }, Config.get(SystemManagerAccessibilityService.this).rebootStepWaitMs());
-            return;
-        }
+    /**
+     * Reboot gesture for the current device: press and hold at the exact centre
+     * of the screen, then (holding) swipe straight up to the top. Dispatched as
+     * two continued strokes so the touch stays down for the whole motion.
+     */
+    private void swipeToReboot() {
+        wakeScreen("reboot-swipe", SCREEN_WAKE_MILLIS);
+        DisplayMetrics metrics = realMetrics();
+        final int centerX = metrics.widthPixels / 2;
+        final int centerY = metrics.heightPixels / 2;
+        final int topY = Math.max(2, Math.round(metrics.heightPixels * 0.02f));
+        LogStore.append(this, "reboot", "Reboot swipe center=(" + centerX + "," + centerY + ") -> topY=" + topY);
 
+        Path holdPath = new Path();
+        holdPath.moveTo(centerX, centerY);
+        holdPath.lineTo(centerX, centerY - 1); // 1px so the stroke has positive length
+        final GestureDescription.StrokeDescription hold =
+                new GestureDescription.StrokeDescription(holdPath, 0L, REBOOT_SWIPE_HOLD_MILLIS, true);
+        GestureDescription holdGesture = new GestureDescription.Builder().addStroke(hold).build();
+
+        boolean dispatched = dispatchGesture(holdGesture, new GestureResultCallback() {
+            @Override
+            public void onCompleted(GestureDescription gesture) {
+                dispatchRebootSwipe(hold, centerX, centerY, topY);
+            }
+
+            @Override
+            public void onCancelled(GestureDescription gesture) {
+                LogStore.append(SystemManagerAccessibilityService.this, "reboot", "Reboot hold cancelled; continuing to swipe");
+                dispatchRebootSwipe(hold, centerX, centerY, topY);
+            }
+        }, handler);
+        if (!dispatched) {
+            LogStore.append(this, "reboot", "Reboot hold gesture dispatch failed; skipping to PIN step");
+            afterRebootSwipe();
+        }
+    }
+
+    private void dispatchRebootSwipe(GestureDescription.StrokeDescription hold, int centerX, int centerY, int topY) {
+        Path swipePath = new Path();
+        swipePath.moveTo(centerX, centerY - 1);
+        swipePath.lineTo(centerX, topY);
+        GestureDescription.StrokeDescription swipe = hold.continueStroke(swipePath, 0L, REBOOT_SWIPE_MOVE_MILLIS, false);
+        GestureDescription swipeGesture = new GestureDescription.Builder().addStroke(swipe).build();
+
+        boolean dispatched = dispatchGesture(swipeGesture, new GestureResultCallback() {
+            @Override
+            public void onCompleted(GestureDescription gesture) {
+                LogStore.append(SystemManagerAccessibilityService.this, "reboot", "Reboot swipe completed");
+                afterRebootSwipe();
+            }
+
+            @Override
+            public void onCancelled(GestureDescription gesture) {
+                LogStore.append(SystemManagerAccessibilityService.this, "reboot", "Reboot swipe cancelled");
+                afterRebootSwipe();
+            }
+        }, handler);
+        if (!dispatched) {
+            LogStore.append(this, "reboot", "Reboot swipe gesture dispatch failed; skipping to PIN step");
+            afterRebootSwipe();
+        }
+    }
+
+    private void afterRebootSwipe() {
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
                 enterPinSequence();
             }
         }, Config.get(SystemManagerAccessibilityService.this).rebootStepWaitMs());
+    }
+
+    @SuppressWarnings("deprecation")
+    private DisplayMetrics realMetrics() {
+        DisplayMetrics metrics = new DisplayMetrics();
+        WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        if (windowManager != null && windowManager.getDefaultDisplay() != null) {
+            windowManager.getDefaultDisplay().getRealMetrics(metrics);
+        } else {
+            metrics.setTo(getResources().getDisplayMetrics());
+        }
+        return metrics;
     }
 
     private void enterPinSequence() {
