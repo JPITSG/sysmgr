@@ -13,8 +13,11 @@ import android.util.Base64;
 
 import org.json.JSONObject;
 
+import java.util.Locale;
+
 final class RemoteEventHandler {
     static final String CHANNEL_ID = "remote_notifications";
+    private static final long VPN_REMOTE_VERDICT_TIMEOUT_MILLIS = 35_000L;
 
     private RemoteEventHandler() {
     }
@@ -69,11 +72,15 @@ final class RemoteEventHandler {
         String imageBase64 = json.optString("image_base64", "");
         boolean rebootAction = "reboot".equalsIgnoreCase(action);
         boolean alarmAction = "alarm".equalsIgnoreCase(action);
+        boolean vpnAction = "vpn".equalsIgnoreCase(action);
         if (rebootAction && body.isEmpty()) {
             body = "Remote reboot requested";
         }
         if (alarmAction && body.isEmpty()) {
             body = "Remote alarm requested";
+        }
+        if (vpnAction && body.isEmpty()) {
+            body = "Remote VPN command";
         }
         if (id.isEmpty() || body.isEmpty()) {
             LogStore.append(context, "remote", "Notification message missing id or body");
@@ -82,6 +89,11 @@ final class RemoteEventHandler {
 
         if (alarmAction) {
             handleAlarmAction(context, client, id, json);
+            return;
+        }
+
+        if (vpnAction) {
+            handleVpnAction(context, client, id, json);
             return;
         }
 
@@ -126,6 +138,67 @@ final class RemoteEventHandler {
                         }, "RemoteAlarmAck").start();
                     }
                 });
+    }
+
+    private static void handleVpnAction(final Context context, final RemoteWebSocketClient client,
+                                        final String id, JSONObject json) {
+        final Context app = context.getApplicationContext();
+        String cmd = json.optString("vpn", "").trim().toLowerCase(Locale.US);
+        if (!Config.get(app).vpnRemoteCommandEnabled()) {
+            LogStore.append(app, "vpn", "Remote VPN command ignored; remote control disabled id=" + id);
+            sendVpnAck(context, client, id, false, OpenVpnStateStore.simpleState(app), "vpn remote control disabled");
+            return;
+        }
+        if ("status".equals(cmd)) {
+            sendVpnAck(context, client, id, true, OpenVpnStateStore.simpleState(app), "state report");
+            return;
+        }
+        if (!"connect".equals(cmd) && !"disconnect".equals(cmd)) {
+            sendVpnAck(context, client, id, false, OpenVpnStateStore.simpleState(app), "unknown vpn command: " + cmd);
+            return;
+        }
+        LogStore.append(app, "vpn", "Remote VPN command accepted id=" + id + " cmd=" + cmd);
+        NotificationHistoryStore.add(app, "VPN", "Remote VPN command", "cmd=" + cmd + " id=" + id, "remote", false);
+        // executeRemoteCommand returns immediately (does the work on its own
+        // thread) so the Remote Link socket loop is never blocked; the verdict
+        // arrives via the callback and is acked from a worker thread.
+        OpenVpnManager.executeRemoteCommand(app, cmd, "remote:" + id, VPN_REMOTE_VERDICT_TIMEOUT_MILLIS,
+                new OpenVpnManager.ResultCallback() {
+                    @Override
+                    public void onResult(final boolean ok, final String state, final String reason) {
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                sendVpnAck(context, client, id, ok, state, reason);
+                            }
+                        }, "RemoteVpnAck").start();
+                    }
+                });
+    }
+
+    private static boolean sendVpnAck(Context context, RemoteWebSocketClient client, String id,
+                                      boolean ok, String state, String reason) {
+        try {
+            JSONObject ack = new JSONObject();
+            ack.put("type", "ack");
+            ack.put("id", id);
+            ack.put("ok", ok);
+            ack.put("state", state);
+            if (reason != null && !reason.trim().isEmpty()) {
+                ack.put("reason", reason);
+            }
+            if ("state report".equals(reason) || OpenVpnStateStore.SIMPLE_CONNECTED.equals(state)) {
+                ack.put("rx", OpenVpnStateStore.rxBytes(context.getApplicationContext()));
+                ack.put("tx", OpenVpnStateStore.txBytes(context.getApplicationContext()));
+            }
+            client.sendText(ack.toString());
+            LogStore.append(context, "vpn", "Acked remote VPN command id=" + id
+                    + " ok=" + ok + " state=" + state);
+            return true;
+        } catch (Exception e) {
+            LogStore.append(context, "vpn", "Remote VPN ack failed id=" + id + ": " + e.getMessage());
+            return false;
+        }
     }
 
     private static boolean sendAck(Context context, RemoteWebSocketClient client, String id, boolean ok, String reason) {

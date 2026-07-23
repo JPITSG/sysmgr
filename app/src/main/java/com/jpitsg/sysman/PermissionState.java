@@ -38,6 +38,15 @@ final class PermissionState {
         return context.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED;
     }
 
+    /** True when the app already holds VpnService consent (prepare returns null). */
+    static boolean vpnConsentGranted(Context context) {
+        try {
+            return android.net.VpnService.prepare(context) == null;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     static boolean locationServicesEnabled(Context context) {
         LocationManager manager = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
         if (manager == null) {

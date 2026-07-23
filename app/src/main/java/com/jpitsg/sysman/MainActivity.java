@@ -24,6 +24,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
+import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -68,6 +69,9 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_EXPORT_SETTINGS = 20;
     private static final int REQUEST_IMPORT_SETTINGS = 21;
     private static final int REQUEST_SAVE_NOTIFICATION_IMAGE = 22;
+    private static final int REQUEST_IMPORT_VPN_PROFILE = 23;
+    private static final int REQUEST_IMPORT_VPN_CERT = 24;
+    private static final int REQUEST_VPN_CONSENT = 25;
 
     /** Single spacing unit used for every margin and every padding in the UI. */
     private static final int GAP = 12;
@@ -188,6 +192,29 @@ public final class MainActivity extends Activity {
     private EditText remoteLinkUsernameField;
     private EditText remoteLinkPasswordField;
     private EditText remoteLinkHeartbeatSecondsField;
+    private TextView openVpnPill;
+    private Panel openVpnPanel;
+    private LinearLayout openVpnProfileSummary;
+    private LinearLayout openVpnSlotList;
+    private LinearLayout vpnAuthSection;
+    private LinearLayout vpnUserPassBlock;
+    private LinearLayout vpnPassphraseBlock;
+    private LinearLayout vpnTapSection;
+    private TextView openVpnStatusText;
+    private TextView openVpnEngineVersionText;
+    private Button vpnConnectButton;
+    private Button vpnDisconnectButton;
+    private EditText vpnUsernameField;
+    private EditText vpnPasswordField;
+    private EditText vpnKeyPassphraseField;
+    private EditText vpnTapStaticIpField;
+    private EditText vpnTapNetmaskField;
+    private EditText vpnTapGatewayField;
+    private Switch vpnRemoteCommandEnabledSwitch;
+    private String pendingVpnCertSlot;
+    private boolean pendingVpnConnectAfterConsent;
+    private BroadcastReceiver openVpnStateReceiver;
+    private static volatile String cachedVpnEngineVersion;
 
     private Switch useExactAlarmsSwitch;
     private Switch allowIdleAlarmsSwitch;
@@ -313,7 +340,9 @@ public final class MainActivity extends Activity {
         super.onResume();
         registerRemoteLinkStateReceiver();
         registerNotificationHistoryReceiver();
+        registerOpenVpnStateReceiver();
         NotificationCleaner.clearOnAppOpen(this);
+        OpenVpnManager.syncStateOnLaunch(this);
         refreshStatusAndLog();
         refreshNotificationHistory();
     }
@@ -322,6 +351,7 @@ public final class MainActivity extends Activity {
     protected void onPause() {
         unregisterNotificationHistoryReceiver();
         unregisterRemoteLinkStateReceiver();
+        unregisterOpenVpnStateReceiver();
         super.onPause();
     }
 
@@ -395,6 +425,7 @@ public final class MainActivity extends Activity {
         buildHighPriorityPanel(root);
         buildBatteryAlertPanel(root);
         buildVolumeControlPanel(root);
+        buildOpenVpnPanel(root);
         buildRebootPanel(root);
         buildSettingsTransferPanel(root);
         buildPermissionsPanel(root);
@@ -405,6 +436,7 @@ public final class MainActivity extends Activity {
         BatteryAlertManager.sync(this, "activity-open");
         RemoteLinkManager.sync(this, "activity-open");
         VolumeControlManager.sync(this, "activity-open");
+        OpenVpnManager.sync(this, "activity-open");
     }
 
     private void buildGpsLoggerControls(LinearLayout panel) {
@@ -587,6 +619,71 @@ public final class MainActivity extends Activity {
         volumeRuleList = newColumn();
         volumeRuleList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
         frame.content.addView(volumeRuleList, stack(frame.content));
+    }
+
+    private void buildOpenVpnPanel(LinearLayout root) {
+        Panel frame = addExpandablePanel(root, "OpenVPN", true);
+        openVpnPanel = frame;
+        openVpnPill = frame.pill;
+
+        addSubsectionLabel(frame.content, "Profile");
+        openVpnProfileSummary = newColumn();
+        openVpnProfileSummary.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        frame.content.addView(openVpnProfileSummary, stack(frame.content));
+
+        LinearLayout importRow = newRow();
+        frame.content.addView(importRow, stack(frame.content));
+        addRowButton(importRow, tonalButton("Import Profile", action("vpn_import_profile")));
+        addRowButton(importRow, neutralButton("Clear Profile", action("vpn_clear_profile")));
+
+        addSubsectionLabel(frame.content, "Files");
+        openVpnSlotList = newColumn();
+        openVpnSlotList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        frame.content.addView(openVpnSlotList, stack(frame.content));
+
+        vpnAuthSection = newColumn();
+        frame.content.addView(vpnAuthSection, stack(frame.content));
+        addSubsectionLabel(vpnAuthSection, "Authentication");
+        vpnUserPassBlock = newColumn();
+        vpnAuthSection.addView(vpnUserPassBlock, stack(vpnAuthSection));
+        vpnUsernameField = addField(vpnUserPassBlock, "Username", InputType.TYPE_CLASS_TEXT);
+        vpnPasswordField = addField(vpnUserPassBlock, "Password",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        vpnPassphraseBlock = newColumn();
+        vpnAuthSection.addView(vpnPassphraseBlock, stack(vpnAuthSection));
+        vpnKeyPassphraseField = addField(vpnPassphraseBlock, "Private key passphrase",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+
+        vpnTapSection = newColumn();
+        frame.content.addView(vpnTapSection, stack(frame.content));
+        addSubsectionLabel(vpnTapSection, "TAP Addressing");
+        vpnTapStaticIpField = addField(vpnTapSection, "Static IP (blank = server-assigned)", InputType.TYPE_CLASS_TEXT);
+        vpnTapNetmaskField = addField(vpnTapSection, "Netmask", InputType.TYPE_CLASS_TEXT);
+        vpnTapGatewayField = addField(vpnTapSection, "Gateway (optional)", InputType.TYPE_CLASS_TEXT);
+
+        addSubsectionLabel(frame.content, "Remote Control");
+        LinearLayout remoteGroup = addToggleGroup(frame.content);
+        vpnRemoteCommandEnabledSwitch = addGroupedToggle(remoteGroup, "Allow VPN control from Remote Link");
+
+        addSubsectionLabel(frame.content, "Status");
+        openVpnStatusText = historyText("Off", 13, COLOR_TEXT_DIM, false);
+        openVpnStatusText.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        openVpnStatusText.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        frame.content.addView(openVpnStatusText, stack(frame.content));
+
+        LinearLayout controlRow = newRow();
+        frame.content.addView(controlRow, stack(frame.content));
+        vpnConnectButton = primaryButton("Connect", action("vpn_connect"));
+        vpnDisconnectButton = neutralButton("Disconnect", action("vpn_disconnect"));
+        addRowButton(controlRow, vpnConnectButton);
+        addRowButton(controlRow, vpnDisconnectButton);
+
+        LinearLayout saveRow = newRow();
+        frame.content.addView(saveRow, stack(frame.content));
+        addRowButton(saveRow, tonalButton("Save VPN Settings", action("save_vpn")));
+
+        openVpnEngineVersionText = historyText("OpenVPN engine: resolving…", 11, COLOR_TEXT_FAINT, false);
+        frame.content.addView(openVpnEngineVersionText, stack(frame.content));
     }
 
     private void buildRebootPanel(LinearLayout root) {
@@ -903,6 +1000,513 @@ public final class MainActivity extends Activity {
                 + "\nNotification " + Config.volumeDisplay(rule.notificationPercent)
                 + "   Alarm " + Config.volumeDisplay(rule.alarmPercent)
                 + "\nDo Not Disturb " + Config.dndDisplay(rule.dndMode);
+    }
+
+    // ============================================================
+    //  OpenVPN panel
+    // ============================================================
+
+    private void refreshOpenVpnPanel() {
+        if (openVpnPill == null) {
+            return;
+        }
+        boolean hasProfile = OpenVpnProfileStore.hasProfile(this);
+        OpenVpnProfileStore.Meta meta = hasProfile ? OpenVpnProfileStore.readMeta(this) : null;
+        String simpleState = OpenVpnStateStore.simpleState(this);
+        boolean connectedOrConnecting = OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)
+                || OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState);
+
+        setOpenVpnPill(hasProfile, simpleState);
+        renderOpenVpnSummary(meta);
+        renderOpenVpnSlots(meta);
+
+        boolean showAuth = meta != null && (meta.authUserPass || meta.keyEncrypted);
+        vpnAuthSection.setVisibility(showAuth ? View.VISIBLE : View.GONE);
+        if (showAuth) {
+            vpnUserPassBlock.setVisibility(meta.authUserPass ? View.VISIBLE : View.GONE);
+            vpnPassphraseBlock.setVisibility(meta.keyEncrypted ? View.VISIBLE : View.GONE);
+        }
+        vpnTapSection.setVisibility(meta != null && meta.isTap() ? View.VISIBLE : View.GONE);
+
+        openVpnStatusText.setText(openVpnStatusLine(simpleState));
+
+        boolean profileReady = hasProfile && meta != null && meta.allSlotsSatisfied();
+        applyButtonState(vpnConnectButton, profileReady && !connectedOrConnecting, COLOR_PRIMARY, Color.WHITE);
+        applyButtonState(vpnDisconnectButton, connectedOrConnecting, COLOR_DANGER, Color.WHITE);
+
+        resolveVpnEngineVersion();
+    }
+
+    private void setOpenVpnPill(boolean hasProfile, String simpleState) {
+        if (!hasProfile) {
+            setPillState(openVpnPill, "DISABLED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+        } else if (OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)) {
+            setPillState(openVpnPill, "CONNECTED", COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+        } else if (OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState)) {
+            setPillState(openVpnPill, "CONNECTING", COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+        } else if (OpenVpnStateStore.SIMPLE_ERROR.equals(simpleState)) {
+            setPillState(openVpnPill, "ERROR", COLOR_DANGER_CONTAINER, COLOR_DANGER_ON_CONTAINER);
+        } else {
+            setPillState(openVpnPill, "OFF", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+        }
+    }
+
+    private void renderOpenVpnSummary(final OpenVpnProfileStore.Meta meta) {
+        openVpnProfileSummary.removeAllViews();
+        openVpnProfileSummary.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        if (meta == null || !meta.hasProfile()) {
+            TextView empty = historyText("No profile imported", 13, COLOR_TEXT_DIM, false);
+            empty.setGravity(Gravity.CENTER);
+            openVpnProfileSummary.addView(empty, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            return;
+        }
+        openVpnProfileSummary.addView(
+                historyText(meta.remoteHost + ":" + meta.remotePort + "  " + meta.remoteProto, 16, COLOR_TEXT, true),
+                matchWrapParams());
+        openVpnProfileSummary.addView(
+                historyText("dev " + meta.devType + "   " + meta.cipherSummary, 12, COLOR_TEXT_DIM, false),
+                topMarginParams(4));
+
+        long now = System.currentTimeMillis();
+        if (meta.certNotAfterMillis > 0L) {
+            boolean bad = meta.certNotAfterMillis < now
+                    || meta.certNotAfterMillis - now < 30L * 24 * 60 * 60 * 1000;
+            TextView cert = historyText("Client cert expires " + formatBackupDate(meta.certNotAfterMillis),
+                    11, bad ? COLOR_BAD : COLOR_TEXT_DIM, false);
+            openVpnProfileSummary.addView(cert, topMarginParams(4));
+        }
+        if (!meta.warnings.isEmpty()) {
+            TextView warn = historyText(meta.warnings.size() + " warning(s) — tap to view", 11, COLOR_TEXT_DIM, false);
+            warn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    OpenVpnImportDialog.showReport(MainActivity.this, meta);
+                }
+            });
+            openVpnProfileSummary.addView(warn, topMarginParams(4));
+        }
+        String validation;
+        if (!meta.validatedWithVersion.isEmpty()) {
+            validation = "Validated with " + meta.validatedWithVersion + " · imported " + formatBackupDate(meta.importedAtMillis);
+        } else if (!meta.validationFailure.isEmpty()) {
+            validation = "Validation FAILED: " + meta.validationFailure;
+        } else if (!meta.allSlotsSatisfied()) {
+            validation = "Validation pending — import the missing files";
+        } else {
+            validation = "Validation pending";
+        }
+        openVpnProfileSummary.addView(historyText(validation, 11, COLOR_TEXT_FAINT, false), topMarginParams(4));
+    }
+
+    private void renderOpenVpnSlots(OpenVpnProfileStore.Meta meta) {
+        openVpnSlotList.removeAllViews();
+        openVpnSlotList.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        if (meta == null || meta.requiredSlots.isEmpty()) {
+            TextView empty = historyText(meta == null ? "Import a profile to see its files"
+                    : "Profile references no external files", 13, COLOR_TEXT_DIM, false);
+            empty.setGravity(Gravity.CENTER);
+            openVpnSlotList.addView(empty, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            return;
+        }
+        boolean first = true;
+        for (String slot : meta.requiredSlots) {
+            if (!first) {
+                View hairline = new View(this);
+                hairline.setBackgroundColor(COLOR_FIELD_BORDER);
+                openVpnSlotList.addView(hairline, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+            }
+            first = false;
+            addVpnSlotRow(slot, meta.satisfiedSlots.get(slot));
+        }
+    }
+
+    private void addVpnSlotRow(final String slotId, String satisfiedBy) {
+        LinearLayout row = newRow();
+        row.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT));
+
+        boolean inline = "inline".equals(satisfiedBy);
+        boolean imported = "file".equals(satisfiedBy);
+        boolean satisfied = inline || imported;
+
+        View dot = new View(this);
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(satisfied ? COLOR_OK : COLOR_BAD);
+        dot.setBackground(d);
+        row.addView(dot, inRow(row, dp(STATUS_DOT_SIZE), dp(STATUS_DOT_SIZE), 0f));
+
+        TextView label = new TextView(this);
+        label.setText(vpnSlotLabel(slotId));
+        label.setTextColor(COLOR_TEXT);
+        label.setTextSize(13);
+        label.setIncludeFontPadding(false);
+        row.addView(label, inRow(row, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView status = new TextView(this);
+        status.setText(inline ? "INLINE" : imported ? "IMPORTED ✓" : "MISSING — TAP TO IMPORT");
+        status.setTextColor(satisfied ? COLOR_OK : COLOR_BAD);
+        status.setTextSize(10);
+        status.setTypeface(Typeface.DEFAULT_BOLD);
+        status.setLetterSpacing(0.08f);
+        status.setIncludeFontPadding(false);
+        row.addView(status, inRow(row, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+
+        final boolean isInline = inline;
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (isInline) {
+                    Toast.makeText(MainActivity.this, "Provided inline by the profile", Toast.LENGTH_SHORT).show();
+                } else {
+                    importVpnCertSlot(slotId);
+                }
+            }
+        });
+        openVpnSlotList.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private String vpnSlotLabel(String slotId) {
+        switch (slotId) {
+            case "ca": return "CA certificate";
+            case "cert": return "Client certificate";
+            case "key": return "Private key";
+            case "tls-auth": return "TLS auth key";
+            case "tls-crypt": return "TLS crypt key";
+            case "tls-crypt-v2": return "TLS crypt v2 key";
+            case "pkcs12": return "PKCS#12 bundle";
+            case "crl-verify": return "Revocation list";
+            case "extra-certs": return "Extra certificates";
+            default: return slotId;
+        }
+    }
+
+    private String openVpnStatusLine(String simpleState) {
+        String lastError = OpenVpnStateStore.lastError(this);
+        if (OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)) {
+            return "Connected · ↓" + OpenVpnService.formatBytes(OpenVpnStateStore.rxBytes(this))
+                    + " ↑" + OpenVpnService.formatBytes(OpenVpnStateStore.txBytes(this));
+        }
+        if (OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState)) {
+            return "Connecting… (" + OpenVpnStateStore.state(this) + ")";
+        }
+        if (OpenVpnStateStore.SIMPLE_ERROR.equals(simpleState)) {
+            return "Error: " + (lastError.isEmpty() ? "unknown" : lastError);
+        }
+        return "Off";
+    }
+
+    private void resolveVpnEngineVersion() {
+        if (openVpnEngineVersionText == null) {
+            return;
+        }
+        String cached = cachedVpnEngineVersion;
+        if (cached != null) {
+            openVpnEngineVersionText.setText("Engine: " + cached);
+            return;
+        }
+        boolean expanded = openVpnPanel != null && openVpnPanel.content.getVisibility() == View.VISIBLE;
+        if (!expanded && !OpenVpnProfileStore.hasProfile(this)) {
+            return;
+        }
+        OpenVpnHoldTester.resolveVersionAsync(this, new OpenVpnHoldTester.VersionCallback() {
+            @Override
+            public void onVersion(final String version) {
+                cachedVpnEngineVersion = version;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (openVpnEngineVersionText != null) {
+                            openVpnEngineVersionText.setText("Engine: " + version);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    private LinearLayout.LayoutParams matchWrapParams() {
+        return new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    private void registerOpenVpnStateReceiver() {
+        if (openVpnStateReceiver != null) {
+            return;
+        }
+        openVpnStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                refreshStatusAndLog();
+            }
+        };
+        IntentFilter filter = new IntentFilter(OpenVpnStateStore.ACTION_STATE_CHANGED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(openVpnStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(openVpnStateReceiver, filter);
+        }
+    }
+
+    private void unregisterOpenVpnStateReceiver() {
+        if (openVpnStateReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(openVpnStateReceiver);
+        } catch (RuntimeException ignored) {
+        }
+        openVpnStateReceiver = null;
+    }
+
+    // ---- OpenVPN import / connect ------------------------------------------
+
+    private void importVpnProfile() {
+        String simpleState = OpenVpnStateStore.simpleState(this);
+        if (OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)
+                || OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState)) {
+            OpenVpnConfirmDialog.show(this, "Replace VPN profile?",
+                    "The VPN is currently active and will be disconnected before importing a new profile.",
+                    "Disconnect & Import", true, new OpenVpnConfirmDialog.Listener() {
+                        @Override
+                        public void onConfirm() {
+                            OpenVpnManager.disconnect(MainActivity.this, "reimport");
+                            launchVpnProfilePicker();
+                        }
+                    });
+        } else {
+            launchVpnProfilePicker();
+        }
+    }
+
+    private void launchVpnProfilePicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/octet-stream", "text/plain", "*/*"});
+        try {
+            startActivityForResult(intent, REQUEST_IMPORT_VPN_PROFILE);
+        } catch (RuntimeException e) {
+            LogStore.append(this, "vpn", "Profile import picker failed: " + e.getMessage());
+            Toast.makeText(this, "Could not open import picker", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void importVpnCertSlot(String slot) {
+        pendingVpnCertSlot = slot;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/octet-stream", "text/plain", "*/*"});
+        try {
+            startActivityForResult(intent, REQUEST_IMPORT_VPN_CERT);
+        } catch (RuntimeException e) {
+            pendingVpnCertSlot = null;
+            LogStore.append(this, "vpn", "Cert import picker failed: " + e.getMessage());
+            Toast.makeText(this, "Could not open import picker", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void handleVpnProfileImport(Uri uri) {
+        final byte[] bytes = readUriBytes(uri, 512 * 1024);
+        if (bytes == null) {
+            Toast.makeText(this, "Could not read profile", Toast.LENGTH_LONG).show();
+            return;
+        }
+        final String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                OpenVpnValidationResult parsed;
+                try {
+                    parsed = OpenVpnProfileValidator.validate(MainActivity.this, text);
+                } catch (RuntimeException e) {
+                    parsed = new OpenVpnValidationResult();
+                    parsed.error("Could not parse profile: " + e.getMessage());
+                }
+                final OpenVpnValidationResult result = parsed;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        presentVpnImportResult(result, bytes);
+                    }
+                });
+            }
+        }, "VpnImportParse").start();
+    }
+
+    private void presentVpnImportResult(final OpenVpnValidationResult result, final byte[] originalBytes) {
+        OpenVpnImportDialog.show(this, result, new OpenVpnImportDialog.Listener() {
+            @Override
+            public void onKeep() {
+                OpenVpnProfileStore.commitProfile(MainActivity.this, result, originalBytes);
+                LogStore.append(MainActivity.this, "vpn", "Profile imported dev=" + result.devType
+                        + " warnings=" + result.warnings.size());
+                Toast.makeText(MainActivity.this, "Profile imported", Toast.LENGTH_SHORT).show();
+                maybeRunHoldTest();
+                refreshStatusAndLog();
+            }
+
+            @Override
+            public void onDiscard() {
+                LogStore.append(MainActivity.this, "vpn", "Profile import discarded");
+            }
+        });
+    }
+
+    private void handleVpnCertImport(Uri uri) {
+        String slot = pendingVpnCertSlot;
+        pendingVpnCertSlot = null;
+        if (slot == null) {
+            return;
+        }
+        byte[] bytes = readUriBytes(uri, 512 * 1024);
+        if (bytes == null) {
+            Toast.makeText(this, "Could not read file", Toast.LENGTH_LONG).show();
+            return;
+        }
+        OpenVpnValidationResult check = new OpenVpnValidationResult();
+        OpenVpnProfileValidator.checkSlotMaterial(check, slot, bytes);
+        if (!check.ok()) {
+            LogStore.append(this, "vpn", "Cert import rejected slot=" + slot + ": " + check.errors.get(0));
+            Toast.makeText(this, check.errors.get(0), Toast.LENGTH_LONG).show();
+            return;
+        }
+        OpenVpnProfileStore.writeSlot(this, slot, bytes);
+        // If the key turned out encrypted, reflect that in prefs-driven UI via meta.
+        if ("key".equals(slot) && check.keyEncrypted) {
+            LogStore.append(this, "vpn", "Imported key is passphrase-protected");
+        }
+        LogStore.append(this, "vpn", "Imported cert slot=" + slot);
+        Toast.makeText(this, vpnSlotLabel(slot) + " imported", Toast.LENGTH_SHORT).show();
+        maybeRunHoldTest();
+        refreshStatusAndLog();
+    }
+
+    private void maybeRunHoldTest() {
+        if (!OpenVpnProfileStore.readMeta(this).allSlotsSatisfied()) {
+            return;
+        }
+        OpenVpnHoldTester.runHoldTestAsync(this, new OpenVpnHoldTester.HoldCallback() {
+            @Override
+            public void onResult(final boolean passed, final String version, final String openssl,
+                                 final String failureTail) {
+                OpenVpnProfileStore.updateAfterHoldTest(MainActivity.this, passed, version, openssl, failureTail);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (passed) {
+                            Toast.makeText(MainActivity.this, "Validated with " + version, Toast.LENGTH_SHORT).show();
+                        } else {
+                            Toast.makeText(MainActivity.this, "Validation failed: " + failureTail, Toast.LENGTH_LONG).show();
+                        }
+                        refreshStatusAndLog();
+                    }
+                });
+            }
+        });
+    }
+
+    private void vpnClearProfile() {
+        OpenVpnConfirmDialog.show(this, "Clear VPN profile?",
+                "This deletes the imported profile and all certificate files. Saved username/password are kept.",
+                "Clear", true, new OpenVpnConfirmDialog.Listener() {
+                    @Override
+                    public void onConfirm() {
+                        OpenVpnManager.disconnect(MainActivity.this, "clear-profile");
+                        OpenVpnProfileStore.clear(MainActivity.this);
+                        LogStore.append(MainActivity.this, "vpn", "Profile cleared");
+                        Toast.makeText(MainActivity.this, "Profile cleared", Toast.LENGTH_SHORT).show();
+                        refreshStatusAndLog();
+                    }
+                });
+    }
+
+    private void vpnConnect() {
+        saveVpnConfigOnly();
+        if (!OpenVpnProfileStore.hasProfile(this)) {
+            Toast.makeText(this, "Import a profile first", Toast.LENGTH_LONG).show();
+            return;
+        }
+        OpenVpnProfileStore.Meta meta = OpenVpnProfileStore.readMeta(this);
+        if (!meta.allSlotsSatisfied()) {
+            Toast.makeText(this, "Import the missing certificate files first", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (meta.keyEncrypted && Config.get(this).vpnKeyPassphrase().isEmpty()) {
+            Toast.makeText(this, "Enter the private key passphrase", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (meta.authUserPass && Config.get(this).vpnUsername().isEmpty()) {
+            Toast.makeText(this, "Enter the VPN username", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Intent consent = OpenVpnManager.consentIntentOrNull(this);
+        if (consent == null) {
+            OpenVpnManager.connect(this, "ui-connect");
+            Toast.makeText(this, "VPN connect requested", Toast.LENGTH_SHORT).show();
+            refreshStatusAndLog();
+            return;
+        }
+        pendingVpnConnectAfterConsent = true;
+        try {
+            startActivityForResult(consent, REQUEST_VPN_CONSENT);
+        } catch (RuntimeException e) {
+            pendingVpnConnectAfterConsent = false;
+            LogStore.append(this, "vpn", "VPN consent launch failed: " + e.getMessage());
+            Toast.makeText(this, "Could not request VPN permission", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void vpnDisconnect() {
+        OpenVpnManager.disconnect(this, "ui-disconnect");
+        Toast.makeText(this, "VPN disconnect requested", Toast.LENGTH_SHORT).show();
+        refreshStatusAndLog();
+    }
+
+    private void saveVpnConfigOnly() {
+        Config.get(this).saveVpnConfig(
+                text(vpnUsernameField),
+                text(vpnPasswordField),
+                text(vpnKeyPassphraseField),
+                text(vpnTapStaticIpField),
+                text(vpnTapNetmaskField),
+                text(vpnTapGatewayField),
+                vpnRemoteCommandEnabledSwitch.isChecked());
+        refreshStatusAndLog();
+    }
+
+    private void saveVpnSettings() {
+        saveVpnConfigOnly();
+        LogStore.append(this, "vpn", "VPN settings saved");
+        Toast.makeText(this, "VPN settings saved", Toast.LENGTH_SHORT).show();
+    }
+
+    private byte[] readUriBytes(Uri uri, int maxBytes) {
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            if (input == null) {
+                return null;
+            }
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int read;
+            int total = 0;
+            while ((read = input.read(buffer)) != -1) {
+                total += read;
+                if (total > maxBytes) {
+                    LogStore.append(this, "vpn", "Import aborted; file exceeds " + maxBytes + " bytes");
+                    return null;
+                }
+                out.write(buffer, 0, read);
+            }
+            return out.toByteArray();
+        } catch (Exception e) {
+            LogStore.append(this, "vpn", "Import read failed: " + e.getMessage());
+            return null;
+        }
     }
 
     private void addHistoryEntry(NotificationHistoryStore.Entry entry) {
@@ -1471,6 +2075,7 @@ public final class MainActivity extends Activity {
         if ("remote".equals(tag)) return 0xFF8BD3FF;
         if ("settings".equals(tag)) return 0xFFA7C7E7;
         if ("volume".equals(tag)) return 0xFFB8F2C2;
+        if ("vpn".equals(tag)) return 0xFFA8B4FF;
         return 0xFFE3EBD9;
     }
 
@@ -1943,6 +2548,7 @@ public final class MainActivity extends Activity {
                         || switchValue(highPriorityRemoteEnabledSwitch, config.highPriorityRemoteEnabled()));
         setEnabledPill(batteryAlertPill, switchValue(batteryAlertEnabledSwitch, config.batteryAlertEnabled()));
         refreshVolumeControlPanel();
+        refreshOpenVpnPanel();
         setEnabledPill(rebootPill, switchValue(rebootAutomationEnabledSwitch, config.rebootAutomationEnabled()));
         setRemoteLinkPill(RemoteLinkStateStore.isConnected(this));
         setEnabledPill(logPill, switchValue(logEnabledSwitch, config.logEnabled()));
@@ -1991,6 +2597,8 @@ public final class MainActivity extends Activity {
         boolean accessibility = PermissionState.accessibilityServiceEnabled(this);
         boolean dndRuleConfigured = volumeRulesNeedDndAccess(config.volumeRules());
         boolean dndAccess = !dndRuleConfigured || PermissionState.notificationPolicyAccessGranted(this);
+        boolean vpnProfileConfigured = OpenVpnProfileStore.hasProfile(this);
+        boolean vpnConsent = !vpnProfileConfigured || PermissionState.vpnConsentGranted(this);
         boolean hiddenWifiMonitorNeedsAccessibility = tracking
                 && switchValue(postOnWifiChangeSwitch, config.postOnWifiChange())
                 && !switchValue(showWifiMonitorNotificationSwitch, config.showWifiMonitorNotification())
@@ -2008,7 +2616,8 @@ public final class MainActivity extends Activity {
                 && notifications
                 && notificationAccess
                 && accessibility
-                && dndAccess;
+                && dndAccess
+                && vpnConsent;
         setPillState(
                 permissionsPill,
                 allPermissionsOk ? "ALL OK" : "ATTENTION",
@@ -2027,6 +2636,9 @@ public final class MainActivity extends Activity {
         addStatusRow(statusContainer, "Accessibility monitor", accessibility);
         if (dndRuleConfigured) {
             addStatusRow(statusContainer, "DND access", dndAccess);
+        }
+        if (vpnProfileConfigured) {
+            addStatusRow(statusContainer, "VPN consent", vpnConsent);
         }
         if (hiddenWifiMonitorNeedsAccessibility) {
             addStatusRow(statusContainer, "Hidden Wi-Fi monitor", false);
@@ -2206,6 +2818,13 @@ public final class MainActivity extends Activity {
             remoteLinkHeartbeatSecondsField.setText(Integer.toString(config.remoteLinkHeartbeatSeconds()));
             remoteLinkAcceptAnySslCertSwitch.setChecked(config.remoteLinkAcceptAnySslCert());
             remoteLinkShowNotificationSwitch.setChecked(config.remoteLinkShowNotification());
+            vpnUsernameField.setText(config.vpnUsername());
+            vpnPasswordField.setText(config.vpnPassword());
+            vpnKeyPassphraseField.setText(config.vpnKeyPassphrase());
+            vpnTapStaticIpField.setText(config.vpnTapStaticIp());
+            vpnTapNetmaskField.setText(config.vpnTapNetmask());
+            vpnTapGatewayField.setText(config.vpnTapGateway());
+            vpnRemoteCommandEnabledSwitch.setChecked(config.vpnRemoteCommandEnabled());
             useExactAlarmsSwitch.setChecked(config.useExactAlarms());
             allowIdleAlarmsSwitch.setChecked(config.allowIdleAlarms());
             postOnStartupSwitch.setChecked(config.postOnStartup());
@@ -2255,6 +2874,8 @@ public final class MainActivity extends Activity {
         bindSaveRemoteLinkConfig(remoteLinkEnabledSwitch);
         bindSaveRemoteLinkConfig(remoteLinkAcceptAnySslCertSwitch);
         bindSaveRemoteLinkConfig(remoteLinkShowNotificationSwitch);
+
+        bindSaveVpnConfig(vpnRemoteCommandEnabledSwitch);
 
         clearNotificationsOnOpenSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
@@ -2335,6 +2956,18 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 saveRemoteLinkConfigLive();
+            }
+        });
+    }
+
+    private void bindSaveVpnConfig(Switch sw) {
+        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (loadingConfig) {
+                    return;
+                }
+                saveVpnConfigOnly();
             }
         });
     }
@@ -2851,6 +3484,9 @@ public final class MainActivity extends Activity {
         VolumeControlManager.sync(this, "settings-import");
         RebootManager.sync(this, "settings-import");
         RemoteLinkManager.restart(this, "settings-import");
+        // VPN prefs round-trip through Settings XML; profile files do not, so
+        // the pill stays DISABLED until a profile is re-imported.
+        OpenVpnManager.sync(this, "settings-import");
     }
 
     private void openIntent(Intent intent) {
@@ -2888,9 +3524,29 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_VPN_CONSENT) {
+            // Consent returns RESULT_OK with a null data intent, so it must be
+            // handled before the data-null guard below.
+            boolean resume = pendingVpnConnectAfterConsent;
+            pendingVpnConnectAfterConsent = false;
+            if (resultCode == RESULT_OK) {
+                LogStore.append(this, "vpn", "VPN consent granted");
+                if (resume) {
+                    OpenVpnManager.connect(this, "consent-granted");
+                }
+            } else {
+                LogStore.append(this, "vpn", "VPN consent declined");
+                Toast.makeText(this, "VPN permission was not granted", Toast.LENGTH_LONG).show();
+            }
+            refreshStatusAndLog();
+            return;
+        }
         if (resultCode != RESULT_OK || data == null || data.getData() == null) {
             if (requestCode == REQUEST_SAVE_NOTIFICATION_IMAGE) {
                 pendingImageSaveEntry = null;
+            }
+            if (requestCode == REQUEST_IMPORT_VPN_CERT) {
+                pendingVpnCertSlot = null;
             }
             return;
         }
@@ -2901,6 +3557,10 @@ public final class MainActivity extends Activity {
             handleSettingsImport(uri);
         } else if (requestCode == REQUEST_SAVE_NOTIFICATION_IMAGE) {
             handleNotificationImageSave(uri);
+        } else if (requestCode == REQUEST_IMPORT_VPN_PROFILE) {
+            handleVpnProfileImport(uri);
+        } else if (requestCode == REQUEST_IMPORT_VPN_CERT) {
+            handleVpnCertImport(uri);
         }
     }
 
@@ -2971,6 +3631,16 @@ public final class MainActivity extends Activity {
                     reconnectRemoteLink();
                 } else if ("remote_link_ping".equals(command)) {
                     pingRemoteLink();
+                } else if ("vpn_import_profile".equals(command)) {
+                    importVpnProfile();
+                } else if ("vpn_clear_profile".equals(command)) {
+                    vpnClearProfile();
+                } else if ("vpn_connect".equals(command)) {
+                    vpnConnect();
+                } else if ("vpn_disconnect".equals(command)) {
+                    vpnDisconnect();
+                } else if ("save_vpn".equals(command)) {
+                    saveVpnSettings();
                 } else if ("notifications".equals(command)) {
                     requestNotificationPermission();
                 } else if ("refresh_notification_history".equals(command)) {

@@ -11,6 +11,9 @@ const path = require('path');
 
 const CONTROL_SOCKET_PATH = '/tmp/sysmgrd.sock';
 const DELIVERY_ACK_TIMEOUT_MS = 10000;
+// A VPN connect verdict can take ~35s on the app side; the default ack window
+// is far too short for it, so vpn deliveries get their own longer timeout.
+const VPN_ACK_TIMEOUT_MS = 60000;
 const PING_TIMEOUT_MS = 10000;
 const PING_RECONNECT_GRACE_MS = 5000;
 const PROXY_V2_SIGNATURE = Buffer.from('\r\n\r\n\0\r\nQUIT\n', 'binary');
@@ -488,7 +491,7 @@ function handleTextMessage(connectionId, socket, text) {
     return;
   }
   if (parsed.type === 'ack' && parsed.id) {
-    handleAck(connectionId, String(parsed.id), parsed.ok, parsed.reason);
+    handleAck(connectionId, String(parsed.id), parsed.ok, parsed.reason, parsed.state);
     return;
   }
   if (parsed.type === 'ping') {
@@ -658,7 +661,7 @@ function insertGpsMessage(connectionId, message) {
   }
 }
 
-function handleAck(connectionId, messageId, okValue, reasonValue) {
+function handleAck(connectionId, messageId, okValue, reasonValue, stateValue) {
   const pending = pendingDeliveries.get(messageId);
   if (!pending) {
     log(`ack ignored connection=${connectionId} id=${messageId}`);
@@ -668,8 +671,10 @@ function handleAck(connectionId, messageId, okValue, reasonValue) {
   pendingDeliveries.delete(messageId);
   const ok = okValue !== false;
   const reason = reasonValue ? String(reasonValue) : '';
-  log(`message ${ok ? 'acked' : 'rejected'} id=${messageId} connection=${connectionId}${reason ? ` reason=${logValue(reason)}` : ''}`);
-  pending.resolve(ok, reason);
+  const state = stateValue ? String(stateValue) : '';
+  log(`message ${ok ? 'acked' : 'rejected'} id=${messageId} connection=${connectionId}`
+    + `${state ? ` state=${logValue(state)}` : ''}${reason ? ` reason=${logValue(reason)}` : ''}`);
+  pending.resolve(ok, reason, state);
 }
 
 function handlePong(connectionId, pingId) {
@@ -908,6 +913,9 @@ async function deliverNotification(notification) {
     payload.length = notification.lengthSeconds || 10;
     payload.vibrate = notification.vibrate !== false;
   }
+  if (action === 'vpn') {
+    payload.vpn = notification.vpnCommand || 'status';
+  }
   if (availableClients.length === 0) {
     log(`message delivery failed id=${id} action=${action} reason=no-connected-clients`);
     return Promise.resolve({id, ok: false, reason: 'no connected clients'});
@@ -929,15 +937,21 @@ async function deliverNotification(notification) {
   }
 
   log(`message sent id=${id} action=${action} clients=${sentCount}`);
+  const ackTimeoutMs = action === 'vpn' ? VPN_ACK_TIMEOUT_MS : DELIVERY_ACK_TIMEOUT_MS;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pendingDeliveries.delete(id);
-      log(`message delivery failed id=${id} action=${action} reason=no-ack timeout_ms=${DELIVERY_ACK_TIMEOUT_MS}`);
-      resolve({id, ok: false, reason: 'no ack'});
-    }, DELIVERY_ACK_TIMEOUT_MS);
+      log(`message delivery failed id=${id} action=${action} reason=no-ack timeout_ms=${ackTimeoutMs}`);
+      resolve({id, ok: false, reason: 'no ack', state: ''});
+    }, ackTimeoutMs);
     pendingDeliveries.set(id, {
       timer,
-      resolve: (ok, reason) => resolve({id, ok, reason: ok ? 'acked' : (reason || 'failed')})
+      resolve: (ok, reason, state) => resolve({
+        id,
+        ok,
+        state: state || '',
+        reason: reason || (ok ? 'acked' : 'failed')
+      })
     });
   });
 }
@@ -1130,10 +1144,19 @@ function startControlSocket() {
     socket.on('end', async () => {
       const request = parseControlMessage(buffer);
       request.action = String(request.action || '').trim().toLowerCase();
-      if (!['message', 'reboot', 'ping', 'alarm'].includes(request.action) || (request.action === 'message' && !request.message)) {
+      if (!['message', 'reboot', 'ping', 'alarm', 'vpn'].includes(request.action) || (request.action === 'message' && !request.message)) {
         log(`control request rejected reason=invalid body=${JSON.stringify(request)}`);
         socket.end('error invalid request\n');
         return;
+      }
+      if (request.action === 'vpn') {
+        request.cmd = String(request.cmd || '').trim().toLowerCase();
+        if (!['connect', 'disconnect', 'status'].includes(request.cmd)) {
+          log(`control vpn rejected reason=invalid-cmd cmd=${logValue(request.cmd)}`);
+          socket.end('error invalid request\n');
+          return;
+        }
+        request.message = request.message || `Remote VPN ${request.cmd} requested`;
       }
       if (request.action === 'ping') {
         log('control ping requested');
@@ -1156,6 +1179,8 @@ function startControlSocket() {
       const imageBytes = imageBase64 ? Buffer.byteLength(imageBase64, 'base64') : 0;
       if (request.action === 'alarm') {
         log(`control alarm requested tone=${logValue(request.tone)} length=${request.length} vibrate=${request.vibrate}`);
+      } else if (request.action === 'vpn') {
+        log(`control vpn requested cmd=${logValue(request.cmd)}`);
       } else {
         log(`control notification requested action=${request.action} title=${request.title || ''} image_bytes=${imageBytes} message=${request.message}`);
       }
@@ -1167,9 +1192,16 @@ function startControlSocket() {
         imageBase64,
         tone: request.tone || '',
         lengthSeconds: request.length,
-        vibrate: request.vibrate
+        vibrate: request.vibrate,
+        vpnCommand: request.cmd
       });
-      socket.end(result.ok ? `ok id=${result.id}\n` : `error id=${result.id} reason=${result.reason}\n`);
+      if (request.action === 'vpn') {
+        socket.end(result.ok
+          ? `ok id=${result.id} state=${result.state || 'unknown'}\n`
+          : `error id=${result.id} reason=${result.reason}\n`);
+      } else {
+        socket.end(result.ok ? `ok id=${result.id}\n` : `error id=${result.id} reason=${result.reason}\n`);
+      }
     });
     socket.on('error', (err) => {
       log(`control socket client error ${err.message}`);

@@ -100,6 +100,13 @@ final class Config {
     private static final String KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT = "remote_link_accept_any_ssl_cert";
     private static final String KEY_REMOTE_LINK_SHOW_NOTIFICATION = "remote_link_show_notification";
     private static final String KEY_SETTINGS_LAST_EXPORT_MILLIS = "settings_last_export_millis";
+    private static final String KEY_VPN_USERNAME = "vpn_username";
+    private static final String KEY_VPN_PASSWORD = "vpn_password";
+    private static final String KEY_VPN_KEY_PASSPHRASE = "vpn_key_passphrase";
+    private static final String KEY_VPN_TAP_STATIC_IP = "vpn_tap_static_ip";
+    private static final String KEY_VPN_TAP_NETMASK = "vpn_tap_netmask";
+    private static final String KEY_VPN_TAP_GATEWAY = "vpn_tap_gateway";
+    private static final String KEY_VPN_REMOTE_COMMAND_ENABLED = "vpn_remote_command_enabled";
 
     private final SharedPreferences prefs;
 
@@ -557,6 +564,34 @@ final class Config {
         return 60;
     }
 
+    String vpnUsername() {
+        return string(KEY_VPN_USERNAME, "");
+    }
+
+    String vpnPassword() {
+        return string(KEY_VPN_PASSWORD, "");
+    }
+
+    String vpnKeyPassphrase() {
+        return string(KEY_VPN_KEY_PASSPHRASE, "");
+    }
+
+    String vpnTapStaticIp() {
+        return string(KEY_VPN_TAP_STATIC_IP, "");
+    }
+
+    String vpnTapNetmask() {
+        return string(KEY_VPN_TAP_NETMASK, "255.255.255.0");
+    }
+
+    String vpnTapGateway() {
+        return string(KEY_VPN_TAP_GATEWAY, "");
+    }
+
+    boolean vpnRemoteCommandEnabled() {
+        return prefs.getBoolean(KEY_VPN_REMOTE_COMMAND_ENABLED, false);
+    }
+
     long settingsLastExportMillis() {
         return prefs.getLong(KEY_SETTINGS_LAST_EXPORT_MILLIS, 0L);
     }
@@ -704,6 +739,25 @@ final class Config {
                 .putInt(KEY_REMOTE_LINK_HEARTBEAT_SECONDS, parseInt(heartbeatSeconds, 60, 10, 3600))
                 .putBoolean(KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT, acceptAnySslCert)
                 .putBoolean(KEY_REMOTE_LINK_SHOW_NOTIFICATION, showNotification)
+                .apply();
+    }
+
+    void saveVpnConfig(
+            String username,
+            String password,
+            String keyPassphrase,
+            String tapStaticIp,
+            String tapNetmask,
+            String tapGateway,
+            boolean remoteCommandEnabled) {
+        prefs.edit()
+                .putString(KEY_VPN_USERNAME, clean(username, ""))
+                .putString(KEY_VPN_PASSWORD, clean(password, ""))
+                .putString(KEY_VPN_KEY_PASSPHRASE, clean(keyPassphrase, ""))
+                .putString(KEY_VPN_TAP_STATIC_IP, clean(tapStaticIp, ""))
+                .putString(KEY_VPN_TAP_NETMASK, clean(tapNetmask, "255.255.255.0"))
+                .putString(KEY_VPN_TAP_GATEWAY, clean(tapGateway, ""))
+                .putBoolean(KEY_VPN_REMOTE_COMMAND_ENABLED, remoteCommandEnabled)
                 .apply();
     }
 

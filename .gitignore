@@ -7,3 +7,10 @@
 
 # Local build helper with machine-specific SDK defaults.
 /build.sh
+
+# Native (OpenVPN) build: tarball cache, build trees, install prefix and the
+# produced binary. native/build-openvpn.sh is the reproducible producer.
+/native/.cache/
+/native/build/
+/native/prefix/
+/app/src/main/jniLibs/
