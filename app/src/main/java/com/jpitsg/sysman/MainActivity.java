@@ -135,7 +135,6 @@ public final class MainActivity extends Activity {
     private TextView wifiMonitorWarning;
     private LinearLayout notificationHistoryList;
     private LinearLayout volumeRuleList;
-    private Panel notificationHistoryPanel;
     private NotificationHistoryStore.Entry pendingImageSaveEntry;
     private TextView logView;
     private Button startTrackingButton;
@@ -430,7 +429,6 @@ public final class MainActivity extends Activity {
         buildSettingsTransferPanel(root);
         buildPermissionsPanel(root);
         buildLogPanel(root);
-        expandPanel(notificationHistoryPanel);
 
         setContentView(scrollView);
         BatteryAlertManager.sync(this, "activity-open");
@@ -459,7 +457,6 @@ public final class MainActivity extends Activity {
 
     private void buildNotificationHistoryPanel(LinearLayout root) {
         Panel frame = addExpandablePanel(root, "Notification History", true);
-        notificationHistoryPanel = frame;
         notificationHistoryPill = frame.pill;
 
         notificationHistoryList = newColumn();
@@ -1885,21 +1882,6 @@ public final class MainActivity extends Activity {
         Panel panel = new Panel(content, panelPill, indicator);
         panels.add(panel);
         return panel;
-    }
-
-    private void expandPanel(Panel panel) {
-        if (panel == null) {
-            return;
-        }
-        panel.content.animate().cancel();
-        panel.content.setVisibility(View.VISIBLE);
-        ViewGroup.LayoutParams lp = panel.content.getLayoutParams();
-        if (lp != null) {
-            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-            panel.content.setLayoutParams(lp);
-        }
-        panel.indicator.animate().cancel();
-        panel.indicator.setRotation(0f);
     }
 
     private void animatePanel(final View content, boolean expand) {
