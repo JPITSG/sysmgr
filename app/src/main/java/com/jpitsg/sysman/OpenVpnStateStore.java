@@ -86,6 +86,27 @@ final class OpenVpnStateStore {
         return SIMPLE_OFF;
     }
 
+    /** Human-readable label for a detailed state, e.g. "Connected" for CONNECTED. */
+    static String label(String state) {
+        if (state == null) {
+            return "";
+        }
+        switch (state) {
+            case STATE_IDLE: return "Idle";
+            case STATE_STARTING: return "Starting";
+            case STATE_CONNECTING: return "Connecting";
+            case STATE_AUTH: return "Authenticating";
+            case STATE_GET_CONFIG: return "Getting config";
+            case STATE_ASSIGN_IP: return "Assigning IP";
+            case STATE_CONNECTED: return "Connected";
+            case STATE_RECONNECTING: return "Reconnecting";
+            case STATE_EXITING: return "Exiting";
+            case STATE_DISCONNECTED: return "Disconnected";
+            case STATE_ERROR: return "Error";
+            default: return state;
+        }
+    }
+
     static boolean isLiveState(String state) {
         return STATE_STARTING.equals(state) || STATE_CONNECTING.equals(state) || STATE_AUTH.equals(state)
                 || STATE_GET_CONFIG.equals(state) || STATE_ASSIGN_IP.equals(state)

@@ -553,7 +553,7 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
 
     private Notification buildNotification() {
         String state = OpenVpnStateStore.state(this);
-        StringBuilder text = new StringBuilder(state);
+        StringBuilder text = new StringBuilder(OpenVpnStateStore.label(state));
         if (!remote.isEmpty()) {
             text.append(" · ").append(remote);
         }
