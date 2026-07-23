@@ -9,6 +9,8 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
@@ -265,19 +267,33 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
         if (connectivityManager == null || networkCallback != null) {
             return;
         }
+        // Watch the best UNDERLYING (non-VPN) network. A plain default-network
+        // callback would report our own tun once connected and reconnect in an
+        // endless loop; requiring NOT_VPN excludes it, and best-matching tracks
+        // the single network openvpn's protected socket actually transits.
+        // (registerBestMatchingNetworkCallback is API 31+; below that we rely on
+        // openvpn's own keepalive/ping-restart to recover.)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            LogStore.append(this, "vpn", "underlying-network monitoring unavailable (<API 31); relying on keepalive");
+            return;
+        }
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
-            public void onAvailable(Network network) {
+            public void onAvailable(final Network network) {
                 mainHandler.post(new Runnable() {
                     @Override
                     public void run() {
-                        handleDefaultNetworkChanged(network);
+                        handleUnderlyingNetwork(network);
                     }
                 });
             }
         };
+        NetworkRequest request = new NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build();
         try {
-            connectivityManager.registerDefaultNetworkCallback(networkCallback);
+            connectivityManager.registerBestMatchingNetworkCallback(request, networkCallback, mainHandler);
         } catch (RuntimeException e) {
             networkCallback = null;
             LogStore.append(this, "vpn", "network callback registration failed: " + e.getMessage());
@@ -295,30 +311,24 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
         networkCallback = null;
     }
 
-    private void handleDefaultNetworkChanged(Network network) {
-        OpenVpnManagementThread mgmt = managementThread;
-        if (mgmt == null || stopping || !reachedConnected || network == null) {
+    /**
+     * The best underlying (non-VPN) network changed — nudge openvpn to rebind
+     * its protected socket. The first callback after a connect only records the
+     * baseline, so establishing the tunnel never self-triggers a reconnect.
+     */
+    private void handleUnderlyingNetwork(Network network) {
+        if (network == null) {
             return;
         }
+        OpenVpnManagementThread mgmt = managementThread;
         Network previous = sessionNetwork;
-        if (previous != null && previous.equals(network)) {
-            return; // same network, nothing to do
-        }
         sessionNetwork = network;
-        LogStore.append(this, "vpn", "default network changed; reconnecting VPN");
+        if (mgmt == null || stopping || !reachedConnected || previous == null || previous.equals(network)) {
+            return; // not connected yet, tearing down, first baseline, or unchanged
+        }
+        LogStore.append(this, "vpn", "underlying network changed; reconnecting VPN");
         OpenVpnStateStore.setState(this, OpenVpnStateStore.STATE_RECONNECTING, null);
         mgmt.sendNetworkChange();
-    }
-
-    private Network currentDefaultNetwork() {
-        if (connectivityManager == null) {
-            return null;
-        }
-        try {
-            return connectivityManager.getActiveNetwork();
-        } catch (RuntimeException e) {
-            return null;
-        }
     }
 
     // ---- Host callbacks (management thread) --------------------------------
@@ -475,7 +485,6 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
         }
         if (OpenVpnStateStore.STATE_CONNECTED.equals(detailedState)) {
             reachedConnected = true;
-            sessionNetwork = currentDefaultNetwork();
         }
         OpenVpnStateStore.setState(this, detailedState, null);
         updateNotification(false);
