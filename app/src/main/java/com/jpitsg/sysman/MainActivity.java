@@ -248,6 +248,9 @@ public final class MainActivity extends Activity {
     private BroadcastReceiver remoteLinkStateReceiver;
     private BroadcastReceiver notificationHistoryReceiver;
     private boolean loadingConfig;
+    private volatile WifiSnapshot cachedWifi;
+    private volatile boolean statusIoInFlight;
+    private volatile boolean statusIoRequested;
     private String renderedNotificationHistoryKey;
     private final LruCache<String, Bitmap> notificationImageCache =
             new LruCache<String, Bitmap>(notificationImageCacheSizeKb()) {
@@ -2516,9 +2519,6 @@ public final class MainActivity extends Activity {
             return;
         }
         Config config = Config.get(this);
-        WifiSnapshot wifi = WifiInfoReader.read(this);
-        boolean ssidMatches = PatternMatcher.simpleMatch(config.ssidPattern(), wifi.ssid, config.caseSensitiveSsid());
-
         boolean tracking = config.isTrackingEnabled();
         setPillState(
                 statusPill,
@@ -2538,33 +2538,7 @@ public final class MainActivity extends Activity {
         applyButtonState(startTrackingButton, !tracking, COLOR_PRIMARY, Color.WHITE);
         applyButtonState(stopTrackingButton, tracking, COLOR_DANGER, Color.WHITE);
 
-        if (wifiBadge != null) {
-            if (wifi.connected) {
-                setPillState(
-                        wifiBadge,
-                        ssidMatches ? "SSID MATCH" : "NO MATCH",
-                        ssidMatches ? COLOR_PRIMARY_CONTAINER : COLOR_DANGER_CONTAINER,
-                        ssidMatches ? COLOR_PRIMARY_ON_CONTAINER : COLOR_DANGER_ON_CONTAINER);
-            } else {
-                setPillState(wifiBadge, "NO WI-FI", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
-            }
-        }
-
-        if (wifiSummary != null) {
-            StringBuilder summary = new StringBuilder();
-            if (wifi.connected) {
-                summary.append("SSID   ").append(wifi.displaySsid);
-                if (!wifi.displayBssid.isEmpty()) {
-                    summary.append('\n').append("BSSID  ").append(wifi.displayBssid);
-                }
-            } else {
-                summary.append("Not connected to Wi-Fi");
-            }
-            if (!wifi.detail.isEmpty()) {
-                summary.append('\n').append(wifi.detail);
-            }
-            wifiSummary.setText(summary.toString());
-        }
+        renderWifi(config, cachedWifi);
 
         boolean fineLocation = PermissionState.hasFineLocation(this);
         boolean backgroundLocation = PermissionState.hasBackgroundLocation(this);
@@ -2626,7 +2600,93 @@ public final class MainActivity extends Activity {
             addStatusRow(statusContainer, "Hidden Wi-Fi monitor", false);
         }
 
-        logView.setText(colorizeLog(LogStore.readTail(this, Math.min(config.logMaxLines(), 300))));
+        // Wi-Fi identity and the log file are read off the main thread and
+        // applied when ready. The Wi-Fi lookup can block ~1.2s while identity
+        // is resolving (e.g. right after a network change), which would freeze
+        // the UI if done inline — this method is called on every state-change
+        // broadcast.
+        scheduleStatusIo();
+    }
+
+    private void renderWifi(Config config, WifiSnapshot wifi) {
+        if (wifi == null) {
+            wifi = WifiSnapshot.disconnected("reading Wi-Fi…");
+        }
+        boolean ssidMatches = PatternMatcher.simpleMatch(config.ssidPattern(), wifi.ssid, config.caseSensitiveSsid());
+        if (wifiBadge != null) {
+            if (wifi.connected) {
+                setPillState(
+                        wifiBadge,
+                        ssidMatches ? "SSID MATCH" : "NO MATCH",
+                        ssidMatches ? COLOR_PRIMARY_CONTAINER : COLOR_DANGER_CONTAINER,
+                        ssidMatches ? COLOR_PRIMARY_ON_CONTAINER : COLOR_DANGER_ON_CONTAINER);
+            } else {
+                setPillState(wifiBadge, "NO WI-FI", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+            }
+        }
+        if (wifiSummary != null) {
+            StringBuilder summary = new StringBuilder();
+            if (wifi.connected) {
+                summary.append("SSID   ").append(wifi.displaySsid);
+                if (!wifi.displayBssid.isEmpty()) {
+                    summary.append('\n').append("BSSID  ").append(wifi.displayBssid);
+                }
+            } else {
+                summary.append("Not connected to Wi-Fi");
+            }
+            if (!wifi.detail.isEmpty()) {
+                summary.append('\n').append(wifi.detail);
+            }
+            wifiSummary.setText(summary.toString());
+        }
+    }
+
+    /**
+     * Reads the Wi-Fi snapshot and log tail off the main thread and applies
+     * them when done. Coalesces bursts via an in-flight guard; a refresh
+     * requested mid-read triggers exactly one more read so the display stays
+     * eventually consistent without a tight loop.
+     */
+    private void scheduleStatusIo() {
+        if (statusIoInFlight) {
+            statusIoRequested = true;
+            return;
+        }
+        statusIoInFlight = true;
+        statusIoRequested = false;
+        final Config config = Config.get(this);
+        final int maxLines = Math.min(config.logMaxLines(), 300);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final WifiSnapshot wifi = WifiInfoReader.read(MainActivity.this);
+                final CharSequence log = colorizeLog(LogStore.readTail(MainActivity.this, maxLines));
+                cachedWifi = wifi;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        statusIoInFlight = false;
+                        if (statusContainer != null && logView != null) {
+                            renderWifi(config, wifi);
+                            logView.setText(log);
+                        }
+                        if (statusIoRequested) {
+                            statusIoRequested = false;
+                            scheduleStatusIo();
+                        }
+                    }
+                });
+            }
+        }, "SystemManagerStatusIo").start();
+    }
+
+    private void seedWifiStateAsync(final String reason) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                NetworkStateStore.seedIfMissing(MainActivity.this, WifiInfoReader.read(MainActivity.this), reason);
+            }
+        }, "SystemManagerSeedWifi").start();
     }
 
     private boolean volumeRulesNeedDndAccess(List<Config.VolumeRule> rules) {
@@ -3158,7 +3218,7 @@ public final class MainActivity extends Activity {
         saveConfig(false);
         Config config = Config.get(this);
         config.setTrackingEnabled(true);
-        NetworkStateStore.seedIfMissing(this, WifiInfoReader.read(this), "manual-start");
+        seedWifiStateAsync("manual-start");
         NetworkMonitorService.sync(this);
         LogStore.append(this, "ui", "Tracking enabled");
         try {
@@ -3456,7 +3516,7 @@ public final class MainActivity extends Activity {
     private void syncAfterSettingsImport() {
         Config config = Config.get(this);
         if (config.isTrackingEnabled()) {
-            NetworkStateStore.seedIfMissing(this, WifiInfoReader.read(this), "settings-import");
+            seedWifiStateAsync("settings-import");
             AlarmScheduler.scheduleGpsPost(this, "settings-import");
         } else {
             AlarmScheduler.cancelGpsPost(this);
