@@ -67,6 +67,7 @@ final class OpenVpnProfileValidator {
         boolean serverMode = false;
         boolean hasDataCiphers = false;
         boolean hasCipher = false;
+        boolean hasKeepalive = false;
         int tlsKeyVariants = 0;
         String globalProto = "";
 
@@ -147,6 +148,20 @@ final class OpenVpnProfileValidator {
                 result.warn("askpass file stripped; the app supplies the passphrase");
                 continue;
             }
+            if ("auth-retry".equals(name)) {
+                // Dropped so it can't loop on bad credentials; the launch args
+                // pin auth-retry to none.
+                if (!"none".equalsIgnoreCase(d.arg(0))) {
+                    result.warn("auth-retry " + d.arg(0) + " removed; the app supplies credentials once");
+                }
+                continue;
+            }
+            if ("keepalive".equals(name) || "ping".equals(name) || "ping-restart".equals(name)
+                    || "ping-exit".equals(name)) {
+                hasKeepalive = true;
+                emitVerbatim(conf, d);
+                continue;
+            }
             if ("key-direction".equals(name)) {
                 result.keyDirection = parseIntOr(d.arg(0), result.keyDirection);
                 emitVerbatim(conf, d);
@@ -225,6 +240,13 @@ final class OpenVpnProfileValidator {
         }
         if (hasCipher && !hasDataCiphers) {
             result.warn("cipher without data-ciphers; negotiation may override it");
+        }
+        if (!hasKeepalive) {
+            // No dead-peer detection in the profile (and the server may not push
+            // any). Inject a sane default so a silently-dropped link is detected
+            // and openvpn triggers its own reconnect. A server push overrides it.
+            conf.append("ping 10\n").append("ping-restart 60\n");
+            result.warn("no keepalive/ping-restart; added ping 10 / ping-restart 60 for dead-peer detection");
         }
 
         result.normalizedConf = conf.toString();

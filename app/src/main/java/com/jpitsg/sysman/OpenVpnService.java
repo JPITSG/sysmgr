@@ -7,6 +7,8 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
@@ -32,6 +34,7 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
     private static final int NOTIFICATION_ID = 0x5304;
     private static final long NOTIFICATION_MIN_INTERVAL_MS = 2_000L;
     private static final long ACCEPT_WATCHDOG_MS = 10_000L;
+    private static final long CONNECT_TIMEOUT_MS = 60_000L;
 
     private static volatile OpenVpnService activeService;
 
@@ -48,6 +51,10 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
     private volatile long txBytes;
     private volatile long lastNotificationAt;
     private volatile boolean stopping;
+    private volatile boolean reachedConnected;
+    private volatile Network sessionNetwork;
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     static boolean isActive() {
         return activeService != null;
@@ -57,6 +64,7 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
     public void onCreate() {
         super.onCreate();
         activeService = this;
+        connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         ensureNotificationChannel();
     }
 
@@ -102,6 +110,7 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
 
     @Override
     public void onDestroy() {
+        unregisterNetworkCallback();
         if (activeService == this) {
             activeService = null;
         }
@@ -113,11 +122,14 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
     private void startSession() {
         final int generation = ++sessionId;
         stopping = false;
+        reachedConnected = false;
+        sessionNetwork = null;
         rxBytes = 0L;
         txBytes = 0L;
         remote = OpenVpnProfileStore.readMeta(this).remoteSummary();
         OpenVpnStateStore.setRemote(this, remote);
         OpenVpnStateStore.setState(this, OpenVpnStateStore.STATE_CONNECTING, "");
+        registerNetworkCallback();
 
         File socketFile = new File(getCacheDir(), "vpn-mgmt.sock");
         final OpenVpnManagementThread mgmt = new OpenVpnManagementThread(this, socketFile.getAbsolutePath(), this);
@@ -162,6 +174,19 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
                 }
             }
         }, ACCEPT_WATCHDOG_MS);
+
+        // Connect deadline: if the tunnel never reaches CONNECTED (unreachable
+        // or unresponsive server), stop instead of spinning on connect-retry.
+        mainHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (generation == sessionId && !stopping && !reachedConnected) {
+                    LogStore.append(OpenVpnService.this, "vpn", "VPN connect timed out after "
+                            + (CONNECT_TIMEOUT_MS / 1000L) + "s");
+                    teardown(OpenVpnStateStore.STATE_ERROR, "connect timed out");
+                }
+            }
+        }, CONNECT_TIMEOUT_MS);
     }
 
     private void handleProcessExit(int generation, int exitCode, boolean requested, String lastFatal) {
@@ -184,6 +209,7 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
         }
         stopping = true;
         sessionId++; // invalidate any in-flight callbacks
+        unregisterNetworkCallback();
         OpenVpnManagementThread mgmt = managementThread;
         final OpenVpnProcessThread proc = processThread;
         managementThread = null;
@@ -230,6 +256,68 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
                 pfd.close();
             } catch (Exception ignored) {
             }
+        }
+    }
+
+    // ---- network-change reconnect ------------------------------------------
+
+    private void registerNetworkCallback() {
+        if (connectivityManager == null || networkCallback != null) {
+            return;
+        }
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        handleDefaultNetworkChanged(network);
+                    }
+                });
+            }
+        };
+        try {
+            connectivityManager.registerDefaultNetworkCallback(networkCallback);
+        } catch (RuntimeException e) {
+            networkCallback = null;
+            LogStore.append(this, "vpn", "network callback registration failed: " + e.getMessage());
+        }
+    }
+
+    private void unregisterNetworkCallback() {
+        if (connectivityManager == null || networkCallback == null) {
+            return;
+        }
+        try {
+            connectivityManager.unregisterNetworkCallback(networkCallback);
+        } catch (RuntimeException ignored) {
+        }
+        networkCallback = null;
+    }
+
+    private void handleDefaultNetworkChanged(Network network) {
+        OpenVpnManagementThread mgmt = managementThread;
+        if (mgmt == null || stopping || !reachedConnected || network == null) {
+            return;
+        }
+        Network previous = sessionNetwork;
+        if (previous != null && previous.equals(network)) {
+            return; // same network, nothing to do
+        }
+        sessionNetwork = network;
+        LogStore.append(this, "vpn", "default network changed; reconnecting VPN");
+        OpenVpnStateStore.setState(this, OpenVpnStateStore.STATE_RECONNECTING, null);
+        mgmt.sendNetworkChange();
+    }
+
+    private Network currentDefaultNetwork() {
+        if (connectivityManager == null) {
+            return null;
+        }
+        try {
+            return connectivityManager.getActiveNetwork();
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 
@@ -384,6 +472,10 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
         if (stateRemote != null && !stateRemote.isEmpty()) {
             remote = stateRemote;
             OpenVpnStateStore.setRemote(this, remote);
+        }
+        if (OpenVpnStateStore.STATE_CONNECTED.equals(detailedState)) {
+            reachedConnected = true;
+            sessionNetwork = currentDefaultNetwork();
         }
         OpenVpnStateStore.setState(this, detailedState, null);
         updateNotification(false);

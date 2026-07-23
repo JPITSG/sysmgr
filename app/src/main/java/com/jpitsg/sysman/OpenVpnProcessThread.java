@@ -188,6 +188,10 @@ final class OpenVpnProcessThread implements Runnable {
         argv.add("--machine-readable-output");
         argv.add("--suppress-timestamps");
         argv.add("--auth-nocache");
+        // Fail fast on bad credentials instead of re-prompting in a loop; this
+        // overrides any auth-retry in the profile (later arg wins over --config).
+        argv.add("--auth-retry");
+        argv.add("none");
         return argv;
     }
 }

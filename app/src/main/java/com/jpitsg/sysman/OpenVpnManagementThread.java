@@ -397,6 +397,15 @@ final class OpenVpnManagementThread implements Runnable {
         managementCommand("signal SIGINT");
     }
 
+    /**
+     * Tell openvpn the underlying network changed so it rebinds its transport
+     * socket (and re-runs PROTECTFD) on the new default network. Omitting
+     * "samenetwork" requests a full reconnect rather than a float.
+     */
+    void sendNetworkChange() {
+        managementCommand("network-change");
+    }
+
     void requestStop() {
         stopRequested = true;
     }
