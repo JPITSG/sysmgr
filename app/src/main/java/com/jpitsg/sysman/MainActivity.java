@@ -142,6 +142,7 @@ public final class MainActivity extends Activity {
     private volatile boolean notificationRefreshInFlight;
     private volatile boolean pendingNotificationRefresh;
     private volatile boolean pendingNotificationForce;
+    private ScrollView contentScrollView;
     private LinearLayout volumeRuleList;
     private NotificationHistoryStore.Entry pendingImageSaveEntry;
     private TextView logView;
@@ -418,6 +419,7 @@ public final class MainActivity extends Activity {
 
     private void buildUi() {
         ScrollView scrollView = new ScrollView(this);
+        contentScrollView = scrollView;
         scrollView.setBackgroundColor(COLOR_BG);
         scrollView.setFillViewport(false);
         scrollView.setClipToPadding(false);
@@ -994,6 +996,21 @@ public final class MainActivity extends Activity {
                 COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
         applyButtonState(notificationHistoryNextButton, notificationHistoryPage < totalPages - 1,
                 COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+    }
+
+    private void scrollNotificationHistoryToTop() {
+        final ScrollView sv = contentScrollView;
+        if (sv == null) {
+            return;
+        }
+        // The Notification History panel is the first panel, so the top of the
+        // scroll content is the top of that box.
+        sv.post(new Runnable() {
+            @Override
+            public void run() {
+                sv.smoothScrollTo(0, 0);
+            }
+        });
     }
 
     private String notificationHistoryRenderKey(
@@ -3819,9 +3836,11 @@ public final class MainActivity extends Activity {
                 } else if ("notification_history_prev".equals(command)) {
                     notificationHistoryPage--;
                     refreshNotificationHistory(true);
+                    scrollNotificationHistoryToTop();
                 } else if ("notification_history_next".equals(command)) {
                     notificationHistoryPage++;
                     refreshNotificationHistory(true);
+                    scrollNotificationHistoryToTop();
                 } else if ("clear_notification_history".equals(command)) {
                     clearNotificationHistory();
                 } else if ("refresh_log".equals(command)) {
