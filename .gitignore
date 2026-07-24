@@ -3,10 +3,8 @@
 /build/
 
 # Local debug signing key. Do not commit private keystores.
+# (build.sh regenerates one on first run.)
 /keystore/debug.keystore
-
-# Local build helper with machine-specific SDK defaults.
-/build.sh
 
 # Native (OpenVPN) build: tarball cache, build trees, install prefix and the
 # produced binary. native/build-openvpn.sh is the reproducible producer.
