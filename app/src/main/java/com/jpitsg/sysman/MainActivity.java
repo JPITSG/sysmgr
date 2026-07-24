@@ -194,12 +194,12 @@ public final class MainActivity extends Activity {
     private TextView openVpnPill;
     private Panel openVpnPanel;
     private LinearLayout openVpnProfileSummary;
+    private LinearLayout openVpnEditRow;
     private LinearLayout openVpnSlotList;
     private LinearLayout vpnAuthSection;
     private LinearLayout vpnUserPassBlock;
     private LinearLayout vpnPassphraseBlock;
     private LinearLayout vpnTapSection;
-    private TextView openVpnStatusText;
     private TextView openVpnEngineVersionText;
     private Button vpnConnectButton;
     private Button vpnDisconnectButton;
@@ -636,6 +636,10 @@ public final class MainActivity extends Activity {
         addRowButton(importRow, tonalButton("Import Profile", action("vpn_import_profile")));
         addRowButton(importRow, neutralButton("Clear Profile", action("vpn_clear_profile")));
 
+        openVpnEditRow = newRow();
+        frame.content.addView(openVpnEditRow, stack(frame.content));
+        addRowButton(openVpnEditRow, tonalButton("Edit Profile", action("vpn_edit_profile")));
+
         addSubsectionLabel(frame.content, "Files");
         openVpnSlotList = newColumn();
         openVpnSlotList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
@@ -665,12 +669,7 @@ public final class MainActivity extends Activity {
         LinearLayout remoteGroup = addToggleGroup(frame.content);
         vpnRemoteCommandEnabledSwitch = addGroupedToggle(remoteGroup, "Allow VPN control from Remote Link");
 
-        addSubsectionLabel(frame.content, "Status");
-        openVpnStatusText = historyText("Off", 13, COLOR_TEXT_DIM, false);
-        openVpnStatusText.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        openVpnStatusText.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        frame.content.addView(openVpnStatusText, stack(frame.content));
-
+        addSubsectionLabel(frame.content, "Connection");
         LinearLayout controlRow = newRow();
         frame.content.addView(controlRow, stack(frame.content));
         vpnConnectButton = primaryButton("Connect", action("vpn_connect"));
@@ -1019,6 +1018,7 @@ public final class MainActivity extends Activity {
         setOpenVpnPill(hasProfile, simpleState);
         renderOpenVpnSummary(meta);
         renderOpenVpnSlots(meta);
+        openVpnEditRow.setVisibility(hasProfile ? View.VISIBLE : View.GONE);
 
         boolean showAuth = meta != null && (meta.authUserPass || meta.keyEncrypted);
         vpnAuthSection.setVisibility(showAuth ? View.VISIBLE : View.GONE);
@@ -1028,8 +1028,6 @@ public final class MainActivity extends Activity {
         }
         vpnTapSection.setVisibility(meta != null && meta.isTap() ? View.VISIBLE : View.GONE);
 
-        openVpnStatusText.setText(openVpnStatusLine(simpleState));
-
         boolean profileReady = hasProfile && meta != null && meta.allSlotsSatisfied();
         applyButtonState(vpnConnectButton, profileReady && !connectedOrConnecting, COLOR_PRIMARY, Color.WHITE);
         applyButtonState(vpnDisconnectButton, connectedOrConnecting, COLOR_DANGER, Color.WHITE);
@@ -1038,16 +1036,14 @@ public final class MainActivity extends Activity {
     }
 
     private void setOpenVpnPill(boolean hasProfile, String simpleState) {
-        if (!hasProfile) {
-            setPillState(openVpnPill, "DISABLED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
-        } else if (OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)) {
-            setPillState(openVpnPill, "CONNECTED", COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
-        } else if (OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState)) {
+        if (hasProfile && OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)) {
+            setPillState(openVpnPill, "ENABLED", COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+        } else if (hasProfile && OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState)) {
             setPillState(openVpnPill, "CONNECTING", COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
-        } else if (OpenVpnStateStore.SIMPLE_ERROR.equals(simpleState)) {
+        } else if (hasProfile && OpenVpnStateStore.SIMPLE_ERROR.equals(simpleState)) {
             setPillState(openVpnPill, "ERROR", COLOR_DANGER_CONTAINER, COLOR_DANGER_ON_CONTAINER);
         } else {
-            setPillState(openVpnPill, "OFF", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+            setPillState(openVpnPill, "DISABLED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
         }
     }
 
@@ -1182,21 +1178,6 @@ public final class MainActivity extends Activity {
             case "extra-certs": return "Extra certificates";
             default: return slotId;
         }
-    }
-
-    private String openVpnStatusLine(String simpleState) {
-        String lastError = OpenVpnStateStore.lastError(this);
-        if (OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)) {
-            return "Connected · ↓" + OpenVpnService.formatBytes(OpenVpnStateStore.rxBytes(this))
-                    + " ↑" + OpenVpnService.formatBytes(OpenVpnStateStore.txBytes(this));
-        }
-        if (OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState)) {
-            return "Connecting… (" + OpenVpnStateStore.state(this) + ")";
-        }
-        if (OpenVpnStateStore.SIMPLE_ERROR.equals(simpleState)) {
-            return "Error: " + (lastError.isEmpty() ? "unknown" : lastError);
-        }
-        return "Off";
     }
 
     private void resolveVpnEngineVersion() {
@@ -1408,6 +1389,47 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private void editVpnProfile() {
+        if (!OpenVpnProfileStore.hasProfile(this)) {
+            return;
+        }
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String text = OpenVpnProfileStore.readProfileText(MainActivity.this);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        OpenVpnEditDialog.show(MainActivity.this, text, new OpenVpnEditDialog.Listener() {
+                            @Override
+                            public void onSave(String edited) {
+                                saveEditedVpnProfile(edited);
+                            }
+                        });
+                    }
+                });
+            }
+        }, "VpnProfileRead").start();
+    }
+
+    private void saveEditedVpnProfile(final String edited) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                OpenVpnProfileStore.writeProfileText(MainActivity.this, edited);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        LogStore.append(MainActivity.this, "vpn", "Profile edited manually");
+                        Toast.makeText(MainActivity.this, "Profile saved", Toast.LENGTH_SHORT).show();
+                        maybeRunHoldTest();
+                        refreshStatusAndLog();
+                    }
+                });
+            }
+        }, "VpnProfileWrite").start();
     }
 
     private void vpnClearProfile() {
@@ -3675,6 +3697,8 @@ public final class MainActivity extends Activity {
                     pingRemoteLink();
                 } else if ("vpn_import_profile".equals(command)) {
                     importVpnProfile();
+                } else if ("vpn_edit_profile".equals(command)) {
+                    editVpnProfile();
                 } else if ("vpn_clear_profile".equals(command)) {
                     vpnClearProfile();
                 } else if ("vpn_connect".equals(command)) {

@@ -67,6 +67,28 @@ final class OpenVpnProfileStore {
         return name == null ? null : new File(dir(context), name);
     }
 
+    /** The effective (normalized) profile.conf text, for the in-app editor. */
+    static String readProfileText(Context context) {
+        synchronized (LOCK) {
+            File file = profileConf(context);
+            if (!file.exists()) {
+                return "";
+            }
+            try {
+                return new String(readFile(file), StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                return "";
+            }
+        }
+    }
+
+    /** Overwrites profile.conf with hand-edited text (atomic); slots/meta untouched. */
+    static void writeProfileText(Context context, String text) {
+        synchronized (LOCK) {
+            writeAtomically(context, profileConf(context), text.getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
     static String slotFileName(String slotId) {
         return SLOT_FILES.get(slotId);
     }
