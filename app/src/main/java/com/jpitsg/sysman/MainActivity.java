@@ -200,6 +200,7 @@ public final class MainActivity extends Activity {
     private LinearLayout vpnUserPassBlock;
     private LinearLayout vpnPassphraseBlock;
     private LinearLayout vpnTapSection;
+    private TextView openVpnStatusText;
     private TextView openVpnEngineVersionText;
     private Button vpnConnectButton;
     private Button vpnDisconnectButton;
@@ -669,7 +670,12 @@ public final class MainActivity extends Activity {
         LinearLayout remoteGroup = addToggleGroup(frame.content);
         vpnRemoteCommandEnabledSwitch = addGroupedToggle(remoteGroup, "Allow VPN control from Remote Link");
 
-        addSubsectionLabel(frame.content, "Connection");
+        addSubsectionLabel(frame.content, "Status");
+        openVpnStatusText = historyText("Off", 13, COLOR_TEXT_DIM, false);
+        openVpnStatusText.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        openVpnStatusText.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        frame.content.addView(openVpnStatusText, stack(frame.content));
+
         LinearLayout controlRow = newRow();
         frame.content.addView(controlRow, stack(frame.content));
         vpnConnectButton = primaryButton("Connect", action("vpn_connect"));
@@ -1028,6 +1034,8 @@ public final class MainActivity extends Activity {
         }
         vpnTapSection.setVisibility(meta != null && meta.isTap() ? View.VISIBLE : View.GONE);
 
+        openVpnStatusText.setText(openVpnStatusLine(simpleState));
+
         boolean profileReady = hasProfile && meta != null && meta.allSlotsSatisfied();
         applyButtonState(vpnConnectButton, profileReady && !connectedOrConnecting, COLOR_PRIMARY, Color.WHITE);
         applyButtonState(vpnDisconnectButton, connectedOrConnecting, COLOR_DANGER, Color.WHITE);
@@ -1045,6 +1053,21 @@ public final class MainActivity extends Activity {
         } else {
             setPillState(openVpnPill, "DISABLED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
         }
+    }
+
+    private String openVpnStatusLine(String simpleState) {
+        if (OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)) {
+            return "Connected · ↓" + OpenVpnService.formatBytes(OpenVpnStateStore.rxBytes(this))
+                    + " ↑" + OpenVpnService.formatBytes(OpenVpnStateStore.txBytes(this));
+        }
+        if (OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState)) {
+            return "Connecting… (" + OpenVpnStateStore.label(OpenVpnStateStore.state(this)) + ")";
+        }
+        if (OpenVpnStateStore.SIMPLE_ERROR.equals(simpleState)) {
+            String lastError = OpenVpnStateStore.lastError(this);
+            return "Error: " + (lastError.isEmpty() ? "unknown" : lastError);
+        }
+        return "Off";
     }
 
     private void renderOpenVpnSummary(final OpenVpnProfileStore.Meta meta) {
