@@ -111,6 +111,12 @@
             android:name=".NotificationActionReceiver"
             android:exported="false" />
 
+        <provider
+            android:name=".NotificationImageProvider"
+            android:authorities="com.jpitsg.sysman.notificationimages"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">

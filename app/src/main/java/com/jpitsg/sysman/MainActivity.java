@@ -488,8 +488,9 @@ public final class MainActivity extends Activity {
         notificationHistoryPageLabel.setTextSize(12);
         notificationHistoryPageLabel.setTextColor(COLOR_TEXT_DIM);
         notificationHistoryPageLabel.setIncludeFontPadding(false);
+        notificationHistoryPageLabel.setLineSpacing(0, 1.1f);
         notificationHistoryPageRow.addView(notificationHistoryPageLabel,
-                inRow(notificationHistoryPageRow, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.6f));
+                inRow(notificationHistoryPageRow, 0, dp(BUTTON_MIN_HEIGHT), 1.6f));
         notificationHistoryNextButton = neutralButton("Next", action("notification_history_next"));
         notificationHistoryPageRow.addView(notificationHistoryNextButton,
                 inRow(notificationHistoryPageRow, 0, dp(BUTTON_MIN_HEIGHT), 1f));
@@ -991,7 +992,7 @@ public final class MainActivity extends Activity {
         int start = notificationHistoryPage * NOTIFICATION_HISTORY_PAGE_SIZE + 1;
         int end = Math.min(start + NOTIFICATION_HISTORY_PAGE_SIZE - 1, count);
         notificationHistoryPageLabel.setText("Page " + (notificationHistoryPage + 1) + " of " + totalPages
-                + "  ·  " + start + "–" + end + " of " + count);
+                + "\n" + start + "–" + end + " of " + count);
         applyButtonState(notificationHistoryPrevButton, notificationHistoryPage > 0,
                 COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
         applyButtonState(notificationHistoryNextButton, notificationHistoryPage < totalPages - 1,
@@ -1697,10 +1698,16 @@ public final class MainActivity extends Activity {
 
             LinearLayout imageActions = newRow();
             item.addView(imageActions, topMarginParams(8));
-            addRowButton(imageActions, tonalButton("Save Image", new View.OnClickListener() {
+            addRowButton(imageActions, tonalButton("Save", new View.OnClickListener() {
                 @Override
                 public void onClick(View view) {
                     saveNotificationImage(entry);
+                }
+            }));
+            addRowButton(imageActions, tonalButton("Share", new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    shareNotificationImage(entry);
                 }
             }));
         }
@@ -1794,6 +1801,26 @@ public final class MainActivity extends Activity {
             notificationImageCache.put(entry.imageFileName, decoded);
         }
         return decoded;
+    }
+
+    private void shareNotificationImage(NotificationHistoryStore.Entry entry) {
+        File file = NotificationHistoryStore.imageFile(this, entry);
+        if (file == null) {
+            Toast.makeText(this, "Image is no longer available", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Uri uri = NotificationImageProvider.uriFor(entry.imageFileName);
+        Intent share = new Intent(Intent.ACTION_SEND);
+        share.setType(NotificationImageProvider.mimeOf(file));
+        share.putExtra(Intent.EXTRA_STREAM, uri);
+        share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(Intent.createChooser(share, "Share image"));
+            LogStore.append(this, "history", "Notification image shared source=" + entry.source);
+        } catch (RuntimeException e) {
+            LogStore.append(this, "history", "Notification image share failed: " + e.getMessage());
+            Toast.makeText(this, "Could not share image", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void saveNotificationImage(NotificationHistoryStore.Entry entry) {
