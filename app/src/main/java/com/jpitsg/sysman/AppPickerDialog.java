@@ -39,13 +39,13 @@ final class AppPickerDialog {
         void onAppSelected(String packageName, String label);
     }
 
-    private static final int COLOR_SURFACE = 0xFFFFFFFF;
-    private static final int COLOR_BORDER = 0xFFE1E8E5;
-    private static final int COLOR_FIELD_BG = 0xFFF1F5F3;
-    private static final int COLOR_FIELD_BORDER = 0xFFDBE3DF;
-    private static final int COLOR_TEXT = 0xFF15201C;
-    private static final int COLOR_TEXT_DIM = 0xFF5B6B66;
-    private static final int COLOR_PRIMARY = 0xFF1F6F4F;
+    private static final int COLOR_SURFACE = Ui.COLOR_SURFACE;
+    private static final int COLOR_BORDER = Ui.COLOR_BORDER;
+    private static final int COLOR_FIELD_BG = Ui.COLOR_FIELD_BG;
+    private static final int COLOR_FIELD_BORDER = Ui.COLOR_FIELD_BORDER;
+    private static final int COLOR_TEXT = Ui.COLOR_TEXT;
+    private static final int COLOR_TEXT_DIM = Ui.COLOR_TEXT_DIM;
+    private static final int COLOR_PRIMARY = Ui.COLOR_PRIMARY;
     private static final Object CACHE_LOCK = new Object();
     private static List<AppEntry> cachedApps;
 
@@ -74,7 +74,7 @@ final class AppPickerDialog {
             LinearLayout root = new LinearLayout(getContext());
             root.setOrientation(LinearLayout.VERTICAL);
             root.setPadding(dp(getContext(), 18), dp(getContext(), 16), dp(getContext(), 18), dp(getContext(), 18));
-            root.setBackground(roundedFill(COLOR_SURFACE, dp(getContext(), 18), dp(getContext(), 1), COLOR_BORDER));
+            root.setBackground(roundedFill(COLOR_SURFACE, dp(getContext(), Ui.DIALOG_CORNER), dp(getContext(), 1), COLOR_BORDER));
 
             LinearLayout header = new LinearLayout(getContext());
             header.setOrientation(LinearLayout.HORIZONTAL);
@@ -88,8 +88,8 @@ final class AppPickerDialog {
             search.setHint("Search apps");
             search.setTextSize(15);
             search.setTextColor(COLOR_TEXT);
-            search.setHintTextColor(0xFF8C9A95);
-            search.setBackground(roundedFill(COLOR_FIELD_BG, dp(getContext(), 12), dp(getContext(), 1), COLOR_FIELD_BORDER));
+            search.setHintTextColor(Ui.COLOR_TEXT_FAINT);
+            search.setBackground(roundedFill(COLOR_FIELD_BG, dp(getContext(), Ui.FIELD_CORNER), dp(getContext(), 1), COLOR_FIELD_BORDER));
             search.setGravity(Gravity.CENTER_VERTICAL);
             search.setMinHeight(dp(getContext(), 50));
             search.setPadding(dp(getContext(), 14), dp(getContext(), 10), dp(getContext(), 14), dp(getContext(), 10));
@@ -201,7 +201,7 @@ final class AppPickerDialog {
                 return;
             }
             window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            int width = (int) (getContext().getResources().getDisplayMetrics().widthPixels * 0.94f);
+            int width = (int) (getContext().getResources().getDisplayMetrics().widthPixels * Ui.DIALOG_WIDTH_FRACTION);
             int height = (int) (getContext().getResources().getDisplayMetrics().heightPixels * 0.86f);
             window.setLayout(width, height);
         }
@@ -437,22 +437,16 @@ final class AppPickerDialog {
         }
     }
 
-    private static GradientDrawable roundedFill(int color, int cornerDp, int strokeDp, int strokeColor) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(color);
-        d.setCornerRadius(cornerDp);
-        if (strokeDp > 0) {
-            d.setStroke(strokeDp, strokeColor);
-        }
-        return d;
+    private static GradientDrawable roundedFill(int color, int cornerPx, int strokePx, int strokeColor) {
+        return Ui.roundedFill(color, cornerPx, strokePx, strokeColor);
     }
 
     private static LinearLayout.LayoutParams matchWrap() {
-        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        return Ui.matchWrap();
     }
 
     private static int dp(Context context, int value) {
-        return Math.round(value * context.getResources().getDisplayMetrics().density);
+        return Ui.dp(context, value);
     }
 
 }

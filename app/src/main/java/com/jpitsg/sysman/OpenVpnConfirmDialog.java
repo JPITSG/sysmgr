@@ -2,8 +2,6 @@ package com.jpitsg.sysman;
 
 import android.app.Dialog;
 import android.content.Context;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
@@ -17,15 +15,6 @@ final class OpenVpnConfirmDialog {
     interface Listener {
         void onConfirm();
     }
-
-    private static final int COLOR_SURFACE = 0xFFFFFFFF;
-    private static final int COLOR_BORDER = 0xFFE1E8E5;
-    private static final int COLOR_TEXT = 0xFF15201C;
-    private static final int COLOR_TEXT_DIM = 0xFF5B6B66;
-    private static final int COLOR_NEUTRAL = 0xFFE9EDEA;
-    private static final int COLOR_NEUTRAL_ON = 0xFF15201C;
-    private static final int COLOR_PRIMARY = 0xFF1F6F4F;
-    private static final int COLOR_DANGER = 0xFFB94436;
 
     private OpenVpnConfirmDialog() {
     }
@@ -56,89 +45,50 @@ final class OpenVpnConfirmDialog {
         protected void onCreate(Bundle savedInstanceState) {
             super.onCreate(savedInstanceState);
             Context c = getContext();
-            LinearLayout root = new LinearLayout(c);
-            root.setOrientation(LinearLayout.VERTICAL);
-            root.setPadding(dp(c, 20), dp(c, 18), dp(c, 20), dp(c, 16));
-            root.setBackground(roundedFill(COLOR_SURFACE, dp(c, 18), dp(c, 1), COLOR_BORDER));
+            LinearLayout root = Ui.dialogCard(c);
 
-            TextView titleView = new TextView(c);
-            titleView.setText(title);
-            titleView.setTextSize(17);
-            titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-            titleView.setTextColor(COLOR_TEXT);
-            root.addView(titleView, matchWrap());
+            root.addView(Ui.dialogTitle(c, title), Ui.matchWrap());
 
-            TextView messageView = new TextView(c);
-            messageView.setText(message);
+            TextView messageView = Ui.dialogSubtitle(c, message);
             messageView.setTextSize(14);
-            messageView.setTextColor(COLOR_TEXT_DIM);
-            messageView.setLineSpacing(0, 1.2f);
-            messageView.setPadding(0, dp(c, 8), 0, dp(c, 16));
-            root.addView(messageView, matchWrap());
+            messageView.setPadding(0, Ui.dp(c, 8), 0, Ui.dp(c, Ui.GAP + 4));
+            root.addView(messageView, Ui.matchWrap());
 
             LinearLayout buttons = new LinearLayout(c);
             buttons.setOrientation(LinearLayout.HORIZONTAL);
             buttons.setGravity(Gravity.END);
 
-            buttons.addView(button(c, "Cancel", COLOR_NEUTRAL, COLOR_NEUTRAL_ON, new View.OnClickListener() {
+            buttons.addView(Ui.neutralButton(c, "Cancel", new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
                     dismiss();
                 }
-            }));
-            Button confirm = button(c, confirmLabel, danger ? COLOR_DANGER : COLOR_PRIMARY, 0xFFFFFFFF,
-                    new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            dismiss();
-                            listener.onConfirm();
-                        }
-                    });
-            LinearLayout.LayoutParams confirmLp = (LinearLayout.LayoutParams) confirm.getLayoutParams();
-            confirmLp.setMargins(dp(c, 10), 0, 0, 0);
-            buttons.addView(confirm);
+            }), buttonParams(c, false));
 
-            root.addView(buttons, matchWrap());
+            final View.OnClickListener confirmClick = new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    dismiss();
+                    listener.onConfirm();
+                }
+            };
+            Button confirm = danger
+                    ? Ui.dangerButton(c, confirmLabel, confirmClick)
+                    : Ui.primaryButton(c, confirmLabel, confirmClick);
+            buttons.addView(confirm, buttonParams(c, true));
+
+            root.addView(buttons, Ui.matchWrap());
             setContentView(root);
-            if (getWindow() != null) {
-                getWindow().setLayout(
-                        (int) (c.getResources().getDisplayMetrics().widthPixels * 0.9f),
-                        ViewGroup.LayoutParams.WRAP_CONTENT);
-            }
-        }
-
-        private Button button(Context c, String text, int bg, int fg, View.OnClickListener l) {
-            Button b = new Button(c);
-            b.setText(text);
-            b.setAllCaps(false);
-            b.setTextColor(fg);
-            b.setTextSize(14);
-            b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            b.setStateListAnimator(null);
-            b.setElevation(0);
-            b.setBackground(roundedFill(bg, dp(c, 12), 0, 0));
-            b.setPadding(dp(c, 18), dp(c, 8), dp(c, 18), dp(c, 8));
-            b.setOnClickListener(l);
-            b.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(c, 46)));
-            return b;
+            Ui.sizeDialogWindow(this, Ui.DIALOG_WIDTH_FRACTION, 0f);
         }
     }
 
-    private static GradientDrawable roundedFill(int color, int cornerDp, int strokeDp, int strokeColor) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(color);
-        d.setCornerRadius(cornerDp);
-        if (strokeDp > 0) {
-            d.setStroke(strokeDp, strokeColor);
+    private static LinearLayout.LayoutParams buttonParams(Context c, boolean leftMargin) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        if (leftMargin) {
+            lp.setMargins(Ui.dp(c, Ui.GAP), 0, 0, 0);
         }
-        return d;
-    }
-
-    private static LinearLayout.LayoutParams matchWrap() {
-        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    private static int dp(Context context, int value) {
-        return Math.round(value * context.getResources().getDisplayMetrics().density);
+        return lp;
     }
 }

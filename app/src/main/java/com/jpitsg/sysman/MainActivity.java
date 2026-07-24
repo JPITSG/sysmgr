@@ -75,15 +75,15 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_VPN_CONSENT = 25;
 
     /** Single spacing unit used for every margin and every padding in the UI. */
-    private static final int GAP = 12;
+    private static final int GAP = Ui.GAP;
 
-    private static final int CARD_CORNER = 22;
-    private static final int FIELD_CORNER = 14;
-    private static final int BUTTON_CORNER = 14;
-    private static final int GROUP_CORNER = 16;
-    private static final int PILL_CORNER = 999;
-    private static final int FIELD_MIN_HEIGHT = 48;
-    private static final int BUTTON_MIN_HEIGHT = 48;
+    private static final int CARD_CORNER = Ui.CARD_CORNER;
+    private static final int FIELD_CORNER = Ui.FIELD_CORNER;
+    private static final int BUTTON_CORNER = Ui.BUTTON_CORNER;
+    private static final int GROUP_CORNER = Ui.GROUP_CORNER;
+    private static final int PILL_CORNER = Ui.PILL_CORNER;
+    private static final int FIELD_MIN_HEIGHT = Ui.FIELD_MIN_HEIGHT;
+    private static final int BUTTON_MIN_HEIGHT = Ui.BUTTON_MIN_HEIGHT;
     private static final int TOGGLE_ROW_MIN_HEIGHT = 48;
     private static final int STATUS_ROW_MIN_HEIGHT = 36;
     private static final int PILL_WIDTH = 118;
@@ -93,30 +93,30 @@ public final class MainActivity extends Activity {
     private static final int LOG_VISIBLE_LINES = 16;
     private static final int NOTIFICATION_HISTORY_PAGE_SIZE = 25;
 
-    private static final int COLOR_BG = 0xFFF4F7F4;
-    private static final int COLOR_SURFACE = 0xFFFFFFFF;
-    private static final int COLOR_GROUPED = 0xFFFAFCFA;
-    private static final int COLOR_BORDER = 0xFFE2E8E2;
-    private static final int COLOR_PRIMARY = 0xFF1E6F4F;
-    private static final int COLOR_PRIMARY_CONTAINER = 0xFFDDEEE5;
-    private static final int COLOR_PRIMARY_ON_CONTAINER = 0xFF0D3E2C;
-    private static final int COLOR_NEUTRAL_CONTAINER = 0xFFE9EDEA;
-    private static final int COLOR_NEUTRAL_ON_CONTAINER = 0xFF15201C;
-    private static final int COLOR_DANGER = 0xFFB94436;
-    private static final int COLOR_DANGER_CONTAINER = 0xFFFCE5E0;
-    private static final int COLOR_DANGER_ON_CONTAINER = 0xFF7E2B23;
-    private static final int COLOR_FIELD_BG = 0xFFF2F5F2;
-    private static final int COLOR_FIELD_BORDER = 0xFFDDE4DE;
-    private static final int COLOR_TEXT = 0xFF131D1A;
-    private static final int COLOR_TEXT_DIM = 0xFF5D6E68;
-    private static final int COLOR_TEXT_FAINT = 0xFF8C9A95;
-    private static final int COLOR_LABEL = 0xFF6A7770;
-    private static final int COLOR_OK = 0xFF1E6F4F;
-    private static final int COLOR_BAD = 0xFFB94436;
+    private static final int COLOR_BG = Ui.COLOR_BG;
+    private static final int COLOR_SURFACE = Ui.COLOR_SURFACE;
+    private static final int COLOR_GROUPED = Ui.COLOR_GROUPED;
+    private static final int COLOR_BORDER = Ui.COLOR_BORDER;
+    private static final int COLOR_PRIMARY = Ui.COLOR_PRIMARY;
+    private static final int COLOR_PRIMARY_CONTAINER = Ui.COLOR_PRIMARY_CONTAINER;
+    private static final int COLOR_PRIMARY_ON_CONTAINER = Ui.COLOR_PRIMARY_ON_CONTAINER;
+    private static final int COLOR_NEUTRAL_CONTAINER = Ui.COLOR_NEUTRAL_CONTAINER;
+    private static final int COLOR_NEUTRAL_ON_CONTAINER = Ui.COLOR_NEUTRAL_ON_CONTAINER;
+    private static final int COLOR_DANGER = Ui.COLOR_DANGER;
+    private static final int COLOR_DANGER_CONTAINER = Ui.COLOR_DANGER_CONTAINER;
+    private static final int COLOR_DANGER_ON_CONTAINER = Ui.COLOR_DANGER_ON_CONTAINER;
+    private static final int COLOR_FIELD_BG = Ui.COLOR_FIELD_BG;
+    private static final int COLOR_FIELD_BORDER = Ui.COLOR_FIELD_BORDER;
+    private static final int COLOR_TEXT = Ui.COLOR_TEXT;
+    private static final int COLOR_TEXT_DIM = Ui.COLOR_TEXT_DIM;
+    private static final int COLOR_TEXT_FAINT = Ui.COLOR_TEXT_FAINT;
+    private static final int COLOR_LABEL = Ui.COLOR_LABEL;
+    private static final int COLOR_OK = Ui.COLOR_OK;
+    private static final int COLOR_BAD = Ui.COLOR_BAD;
     private static final int COLOR_LOG_BG = 0xFF14201D;
     private static final int COLOR_LOG_FG = 0xFFBFE0CB;
-    private static final int COLOR_RIPPLE_DARK = 0x33FFFFFF;
-    private static final int COLOR_RIPPLE_LIGHT = 0x22000000;
+    private static final int COLOR_RIPPLE_DARK = Ui.COLOR_RIPPLE_DARK;
+    private static final int COLOR_RIPPLE_LIGHT = Ui.COLOR_RIPPLE_LIGHT;
     private static final int COLOR_SWITCH_TRACK_OFF = 0xFFCED4D2;
     private static final int COLOR_SWITCH_TRACK_ON = 0x991E6F4F;
 
@@ -2119,13 +2119,7 @@ public final class MainActivity extends Activity {
     }
 
     private GradientDrawable roundedFill(int color, int cornerDp, int strokeDp, int strokeColor) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(color);
-        d.setCornerRadius(dp(cornerDp));
-        if (strokeDp > 0) {
-            d.setStroke(dp(strokeDp), strokeColor);
-        }
-        return d;
+        return Ui.roundedFill(color, dp(cornerDp), strokeDp > 0 ? dp(strokeDp) : 0, strokeColor);
     }
 
     // ============================================================
@@ -2163,27 +2157,7 @@ public final class MainActivity extends Activity {
     }
 
     private Button styledButton(String text, View.OnClickListener listener, int bg, int fg, int ripple) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setAllCaps(false);
-        b.setTextColor(fg);
-        b.setTextSize(14);
-        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        b.setGravity(Gravity.CENTER);
-        b.setSingleLine(true);
-        b.setEllipsize(TextUtils.TruncateAt.END);
-        b.setMinHeight(dp(BUTTON_MIN_HEIGHT));
-        b.setMinimumHeight(dp(BUTTON_MIN_HEIGHT));
-        b.setIncludeFontPadding(false);
-        b.setStateListAnimator(null);
-        b.setElevation(0);
-        b.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        b.setBackground(new RippleDrawable(
-                ColorStateList.valueOf(ripple),
-                roundedFill(bg, BUTTON_CORNER, 0, 0),
-                null));
-        b.setOnClickListener(listener);
-        return b;
+        return Ui.button(this, text, bg, fg, ripple, listener);
     }
 
     // ============================================================
@@ -3884,7 +3858,7 @@ public final class MainActivity extends Activity {
     }
 
     private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return Ui.dp(this, value);
     }
 
     private static int clamp(int value, int min, int max) {
