@@ -5,6 +5,7 @@ import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.TimePickerDialog;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -1813,6 +1814,9 @@ public final class MainActivity extends Activity {
         Intent share = new Intent(Intent.ACTION_SEND);
         share.setType(NotificationImageProvider.mimeOf(file));
         share.putExtra(Intent.EXTRA_STREAM, uri);
+        // ClipData (with the read grant) lets the system share sheet render the
+        // image preview; without it some OEM sheets show a placeholder "?".
+        share.setClipData(ClipData.newUri(getContentResolver(), "Notification image", uri));
         share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
             startActivity(Intent.createChooser(share, "Share image"));
