@@ -553,7 +553,9 @@ final class Config {
     }
 
     boolean remoteLinkAcceptAnySslCert() {
-        return prefs.getBoolean(KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT, true);
+        // Secure by default: require a valid certificate. Users on a trusted LAN
+        // with a self-signed server can opt in to accepting any certificate.
+        return prefs.getBoolean(KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT, false);
     }
 
     boolean remoteLinkShowNotification() {
