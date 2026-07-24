@@ -90,7 +90,7 @@ public final class MainActivity extends Activity {
     private static final int CHEVRON_SIZE = 32;
     private static final int STATUS_DOT_SIZE = 8;
     private static final int LOG_VISIBLE_LINES = 16;
-    private static final int MAX_VISIBLE_NOTIFICATION_HISTORY = 30;
+    private static final int NOTIFICATION_HISTORY_PAGE_SIZE = 25;
 
     private static final int COLOR_BG = 0xFFF4F7F4;
     private static final int COLOR_SURFACE = 0xFFFFFFFF;
@@ -134,6 +134,14 @@ public final class MainActivity extends Activity {
     private TextView wifiSummary;
     private TextView wifiMonitorWarning;
     private LinearLayout notificationHistoryList;
+    private LinearLayout notificationHistoryPageRow;
+    private Button notificationHistoryPrevButton;
+    private Button notificationHistoryNextButton;
+    private TextView notificationHistoryPageLabel;
+    private int notificationHistoryPage;
+    private volatile boolean notificationRefreshInFlight;
+    private volatile boolean pendingNotificationRefresh;
+    private volatile boolean pendingNotificationForce;
     private LinearLayout volumeRuleList;
     private NotificationHistoryStore.Entry pendingImageSaveEntry;
     private TextView logView;
@@ -467,6 +475,22 @@ public final class MainActivity extends Activity {
         notificationHistoryList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
         notificationHistoryList.setClipToOutline(true);
         frame.content.addView(notificationHistoryList, stack(frame.content));
+
+        notificationHistoryPageRow = newRow();
+        frame.content.addView(notificationHistoryPageRow, stack(frame.content));
+        notificationHistoryPrevButton = neutralButton("Prev", action("notification_history_prev"));
+        notificationHistoryPageRow.addView(notificationHistoryPrevButton,
+                inRow(notificationHistoryPageRow, 0, dp(BUTTON_MIN_HEIGHT), 1f));
+        notificationHistoryPageLabel = new TextView(this);
+        notificationHistoryPageLabel.setGravity(Gravity.CENTER);
+        notificationHistoryPageLabel.setTextSize(12);
+        notificationHistoryPageLabel.setTextColor(COLOR_TEXT_DIM);
+        notificationHistoryPageLabel.setIncludeFontPadding(false);
+        notificationHistoryPageRow.addView(notificationHistoryPageLabel,
+                inRow(notificationHistoryPageRow, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.6f));
+        notificationHistoryNextButton = neutralButton("Next", action("notification_history_next"));
+        notificationHistoryPageRow.addView(notificationHistoryNextButton,
+                inRow(notificationHistoryPageRow, 0, dp(BUTTON_MIN_HEIGHT), 1f));
 
         LinearLayout optionsGroup = addToggleGroup(frame.content);
         clearNotificationsOnOpenSwitch = addGroupedToggle(optionsGroup, "Clear Android notifications on app open");
@@ -876,7 +900,38 @@ public final class MainActivity extends Activity {
         if (notificationHistoryPill == null) {
             return;
         }
-        List<NotificationHistoryStore.Entry> allEntries = NotificationHistoryStore.read(this, 0);
+        if (forceRender) {
+            pendingNotificationForce = true;
+        }
+        if (notificationRefreshInFlight) {
+            pendingNotificationRefresh = true;
+            return;
+        }
+        notificationRefreshInFlight = true;
+        final boolean force = pendingNotificationForce;
+        pendingNotificationForce = false;
+        // The history JSON can now grow without bound, so parse it off the main
+        // thread; only the paged (<=25) render happens on the UI thread.
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final List<NotificationHistoryStore.Entry> all = NotificationHistoryStore.read(MainActivity.this, 0);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        notificationRefreshInFlight = false;
+                        applyNotificationHistory(all, force);
+                        if (pendingNotificationRefresh) {
+                            pendingNotificationRefresh = false;
+                            refreshNotificationHistory(false);
+                        }
+                    }
+                });
+            }
+        }, "SystemManagerNotifHistory").start();
+    }
+
+    private void applyNotificationHistory(List<NotificationHistoryStore.Entry> allEntries, boolean forceRender) {
         int count = allEntries.size();
         setPillState(
                 notificationHistoryPill,
@@ -887,9 +942,21 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        int visibleCount = Math.min(count, MAX_VISIBLE_NOTIFICATION_HISTORY);
-        List<NotificationHistoryStore.Entry> entries = allEntries.subList(0, visibleCount);
-        String renderKey = notificationHistoryRenderKey(entries, count);
+        int totalPages = Math.max(1, (count + NOTIFICATION_HISTORY_PAGE_SIZE - 1) / NOTIFICATION_HISTORY_PAGE_SIZE);
+        if (notificationHistoryPage > totalPages - 1) {
+            notificationHistoryPage = totalPages - 1;
+        }
+        if (notificationHistoryPage < 0) {
+            notificationHistoryPage = 0;
+        }
+        int start = notificationHistoryPage * NOTIFICATION_HISTORY_PAGE_SIZE;
+        int end = Math.min(start + NOTIFICATION_HISTORY_PAGE_SIZE, count);
+        List<NotificationHistoryStore.Entry> entries = start < end
+                ? allEntries.subList(start, end)
+                : new ArrayList<NotificationHistoryStore.Entry>();
+        updateNotificationPagination(count, totalPages);
+
+        String renderKey = notificationHistoryPage + "@" + notificationHistoryRenderKey(entries, count);
         if (!forceRender && renderKey.equals(renderedNotificationHistoryKey)) {
             return;
         }
@@ -907,11 +974,26 @@ public final class MainActivity extends Activity {
             }
             addHistoryEntry(entries.get(i));
         }
-        if (count > entries.size()) {
-            addHistorySeparator();
-            addHistoryEmptyRow("Showing newest " + entries.size() + " of " + count);
-        }
         renderedNotificationHistoryKey = renderKey;
+    }
+
+    private void updateNotificationPagination(int count, int totalPages) {
+        if (notificationHistoryPageRow == null) {
+            return;
+        }
+        if (totalPages <= 1) {
+            notificationHistoryPageRow.setVisibility(View.GONE);
+            return;
+        }
+        notificationHistoryPageRow.setVisibility(View.VISIBLE);
+        int start = notificationHistoryPage * NOTIFICATION_HISTORY_PAGE_SIZE + 1;
+        int end = Math.min(start + NOTIFICATION_HISTORY_PAGE_SIZE - 1, count);
+        notificationHistoryPageLabel.setText("Page " + (notificationHistoryPage + 1) + " of " + totalPages
+                + "  ·  " + start + "–" + end + " of " + count);
+        applyButtonState(notificationHistoryPrevButton, notificationHistoryPage > 0,
+                COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+        applyButtonState(notificationHistoryNextButton, notificationHistoryPage < totalPages - 1,
+                COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
     }
 
     private String notificationHistoryRenderKey(
@@ -3733,6 +3815,12 @@ public final class MainActivity extends Activity {
                 } else if ("notifications".equals(command)) {
                     requestNotificationPermission();
                 } else if ("refresh_notification_history".equals(command)) {
+                    refreshNotificationHistory(true);
+                } else if ("notification_history_prev".equals(command)) {
+                    notificationHistoryPage--;
+                    refreshNotificationHistory(true);
+                } else if ("notification_history_next".equals(command)) {
+                    notificationHistoryPage++;
                     refreshNotificationHistory(true);
                 } else if ("clear_notification_history".equals(command)) {
                     clearNotificationHistory();

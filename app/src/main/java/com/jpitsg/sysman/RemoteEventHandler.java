@@ -272,6 +272,17 @@ final class RemoteEventHandler {
                 deleteIntent,
                 flags);
 
+        // Clear dismisses the notification from the shade but keeps it in
+        // history (nudging the user to keep notifications rather than delete).
+        Intent clearIntent = new Intent(context, NotificationActionReceiver.class)
+                .setAction(NotificationActionReceiver.ACTION_CLEAR_NOTIFICATION)
+                .putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId);
+        PendingIntent clearPendingIntent = PendingIntent.getBroadcast(
+                context,
+                0x6800 + Math.abs(id.hashCode() % 10000),
+                clearIntent,
+                flags);
+
         Bitmap picture = decodeNotificationImage(imageBase64);
         boolean hasTitle = hasText(title);
         String contentTitle = hasTitle ? cleanTitle(title) : body;
@@ -289,7 +300,8 @@ final class RemoteEventHandler {
                 .setShowWhen(true)
                 .setCategory(Notification.CATEGORY_MESSAGE)
                 .setPriority(Notification.PRIORITY_HIGH)
-                .addAction(R.drawable.ic_stat_system_manager, "Delete", deletePendingIntent);
+                .addAction(R.drawable.ic_stat_system_manager, "Delete", deletePendingIntent)
+                .addAction(R.drawable.ic_stat_system_manager, "Clear", clearPendingIntent);
         if (picture != null) {
             Notification.BigPictureStyle style = new Notification.BigPictureStyle().bigPicture(picture);
             if (hasTitle) {

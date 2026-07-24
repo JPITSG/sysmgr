@@ -25,7 +25,6 @@ final class NotificationHistoryStore {
     private static final String HISTORY_FILE = "notification-history.json";
     private static final String HISTORY_TMP_FILE = "notification-history.json.tmp";
     private static final String IMAGE_DIR = "notification-history-images";
-    private static final int MAX_ENTRIES = 100;
     private static final int MAX_FIELD_CHARS = 1000;
     private static final Object LOCK = new Object();
 
@@ -91,10 +90,6 @@ final class NotificationHistoryStore {
         synchronized (LOCK) {
             List<Entry> entries = readLocked(app);
             entries.add(0, entry);
-            while (entries.size() > MAX_ENTRIES) {
-                Entry removed = entries.remove(entries.size() - 1);
-                deleteImage(app, removed.imageFileName);
-            }
             writeLocked(app, entries);
         }
         broadcastChanged(app);
@@ -181,7 +176,7 @@ final class NotificationHistoryStore {
                 }
             }
             JSONArray array = new JSONArray(raw.toString());
-            for (int i = 0; i < array.length() && entries.size() < MAX_ENTRIES; i++) {
+            for (int i = 0; i < array.length(); i++) {
                 JSONObject object = array.optJSONObject(i);
                 if (object == null) {
                     continue;
