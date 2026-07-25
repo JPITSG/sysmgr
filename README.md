@@ -28,7 +28,8 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
    ┌─────────────────────┐         WSS (Basic auth, TLS)       │  Basic auth      │
    │  Android phone       │ ◀───────────────────────────────▶ │  self-signed TLS │
    │  "System Manager" app│    notifications, alarms, reboot,  │  GPS → MySQL     │
-   │  (VpnService, etc.)  │    vpn commands, GPS reports+acks   │                  │
+   │  (VpnService, etc.)  │    vpn cmds, GPS + notification     │  notif → JSONL   │
+   │                      │    backups (with acks)             │                  │
    └─────────────────────┘                                     └──────────────────┘
 ```
 
@@ -52,6 +53,12 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
   alarm tone + vibration even in silent/DND.
 - **Notification history** — unlimited local history with images, pagination,
   and save/share, plus per-notification Delete/Clear actions.
+- **Notification backup** — optionally mirror every user-facing notification to
+  your server over the Remote Link. Each notification is hashed, queued in a
+  durable on-device outbox, and delivered with retry until the server
+  acknowledges it; the server appends it (with its own receive time) to a
+  JSON-lines store. Toggles for on/off and whether to include System Manager's
+  own notifications; the app tells you if the server isn't storing them.
 - **Reboot automation** — uses an Accessibility service to open the power menu
   and trigger a reboot (gesture + optional PIN), locally or remotely.
 - **Scheduled volume / DND rules** — set media/ring/notification/alarm volumes
@@ -142,6 +149,11 @@ sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pa
 Optional GPS→MySQL persistence is enabled by adding `--gps-mysql-*`
 (host/socket, database, table, user, password) and `--gps-home-lat/lon` args.
 All credentials are supplied at runtime — nothing is stored in the repository.
+
+Optional notification backup is enabled by adding `--notificationstore=<path>`;
+the daemon appends each backed-up notification as one JSON object per line
+(JSON Lines) to that file, created `0600`. Point it outside the repository. The
+file only grows — rotate or prune it yourself if needed.
 
 Push a command to the phone from the server by writing to the control socket,
 for example:

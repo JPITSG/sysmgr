@@ -130,6 +130,11 @@ public final class MainActivity extends Activity {
     private TextView permissionsPill;
     private TextView logPill;
     private TextView notificationHistoryPill;
+    private TextView notificationBackupPill;
+    private View notificationBackupStatusCard;
+    private View notificationBackupDot;
+    private TextView notificationBackupStatus;
+    private TextView notificationBackupCountPill;
     private TextView settingsBackupPill;
     private TextView wifiBadge;
     private TextView wifiSummary;
@@ -255,9 +260,12 @@ public final class MainActivity extends Activity {
     private Switch remoteLinkShowNotificationSwitch;
     private Switch logEnabledSwitch;
     private Switch clearNotificationsOnOpenSwitch;
+    private Switch notificationBackupEnabledSwitch;
+    private Switch notificationBackupIncludeSysmgrSwitch;
     private final List<Panel> panels = new ArrayList<>();
     private BroadcastReceiver remoteLinkStateReceiver;
     private BroadcastReceiver notificationHistoryReceiver;
+    private BroadcastReceiver notificationBackupReceiver;
     private boolean loadingConfig;
     private volatile WifiSnapshot cachedWifi;
     private volatile boolean statusIoInFlight;
@@ -353,16 +361,19 @@ public final class MainActivity extends Activity {
         super.onResume();
         registerRemoteLinkStateReceiver();
         registerNotificationHistoryReceiver();
+        registerNotificationBackupReceiver();
         registerOpenVpnStateReceiver();
         NotificationCleaner.clearOnAppOpen(this);
         OpenVpnManager.syncStateOnLaunch(this);
         refreshStatusAndLog();
         refreshNotificationHistory();
+        refreshNotificationBackupStatus();
     }
 
     @Override
     protected void onPause() {
         unregisterNotificationHistoryReceiver();
+        unregisterNotificationBackupReceiver();
         unregisterRemoteLinkStateReceiver();
         unregisterOpenVpnStateReceiver();
         super.onPause();
@@ -436,6 +447,7 @@ public final class MainActivity extends Activity {
         buildNotificationHistoryPanel(root);
         buildGpsLoggerPanel(root);
         buildRemoteLinkPanel(root);
+        buildNotificationBackupPanel(root);
         buildHighPriorityPanel(root);
         buildBatteryAlertPanel(root);
         buildVolumeControlPanel(root);
@@ -503,6 +515,48 @@ public final class MainActivity extends Activity {
         frame.content.addView(buttons, stack(frame.content));
         addRowButton(buttons, tonalButton("Refresh", action("refresh_notification_history")));
         addRowButton(buttons, neutralButton("Clear", action("clear_notification_history")));
+    }
+
+    private void buildNotificationBackupPanel(LinearLayout root) {
+        Panel frame = addExpandablePanel(root, "Notification Backup", true);
+        notificationBackupPill = frame.pill;
+
+        LinearLayout backupGroup = addToggleGroup(frame.content);
+        notificationBackupEnabledSwitch = addGroupedToggle(backupGroup, "Send to server");
+        notificationBackupIncludeSysmgrSwitch = addGroupedToggle(backupGroup, "Include own notifications");
+
+        LinearLayout statusCard = newRow();
+        statusCard.setGravity(Gravity.CENTER_VERTICAL);
+        statusCard.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        statusCard.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        statusCard.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT));
+        statusCard.setVisibility(View.GONE);
+        notificationBackupStatusCard = statusCard;
+
+        notificationBackupDot = new View(this);
+        setDotColor(notificationBackupDot, COLOR_TEXT_FAINT);
+        statusCard.addView(notificationBackupDot, inRow(statusCard, dp(STATUS_DOT_SIZE), dp(STATUS_DOT_SIZE), 0f));
+
+        notificationBackupStatus = new TextView(this);
+        notificationBackupStatus.setTextSize(13);
+        notificationBackupStatus.setTextColor(COLOR_TEXT);
+        notificationBackupStatus.setIncludeFontPadding(false);
+        notificationBackupStatus.setLineSpacing(0, 1.1f);
+        notificationBackupStatus.setPadding(dp(GAP), 0, dp(GAP), 0);
+        statusCard.addView(notificationBackupStatus, inRow(statusCard, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        notificationBackupCountPill = new TextView(this);
+        notificationBackupCountPill.setTextSize(11);
+        notificationBackupCountPill.setTypeface(Typeface.DEFAULT_BOLD);
+        notificationBackupCountPill.setLetterSpacing(0.06f);
+        notificationBackupCountPill.setSingleLine(true);
+        notificationBackupCountPill.setIncludeFontPadding(false);
+        notificationBackupCountPill.setPadding(dp(GAP), dp(4), dp(GAP), dp(4));
+        notificationBackupCountPill.setVisibility(View.GONE);
+        statusCard.addView(notificationBackupCountPill, inRow(statusCard,
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+
+        frame.content.addView(statusCard, stack(frame.content));
     }
 
     private void buildGpsLoggerPanel(LinearLayout root) {
@@ -2682,6 +2736,7 @@ public final class MainActivity extends Activity {
         refreshOpenVpnPanel();
         setEnabledPill(rebootPill, switchValue(rebootAutomationEnabledSwitch, config.rebootAutomationEnabled()));
         setRemoteLinkPill(RemoteLinkStateStore.isConnected(this));
+        refreshNotificationBackupStatus();
         setEnabledPill(logPill, switchValue(logEnabledSwitch, config.logEnabled()));
         setSettingsBackupPill(config.settingsLastExportMillis());
         applyButtonState(startTrackingButton, !tracking, COLOR_PRIMARY, Color.WHITE);
@@ -2916,6 +2971,36 @@ public final class MainActivity extends Activity {
         notificationHistoryReceiver = null;
     }
 
+    private void registerNotificationBackupReceiver() {
+        if (notificationBackupReceiver != null) {
+            return;
+        }
+        notificationBackupReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                refreshNotificationBackupStatus();
+            }
+        };
+        IntentFilter filter = new IntentFilter(NotificationBackupStateStore.ACTION_STATE_CHANGED);
+        filter.addAction(NotificationBackupStore.ACTION_CHANGED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(notificationBackupReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(notificationBackupReceiver, filter);
+        }
+    }
+
+    private void unregisterNotificationBackupReceiver() {
+        if (notificationBackupReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(notificationBackupReceiver);
+        } catch (RuntimeException ignored) {
+        }
+        notificationBackupReceiver = null;
+    }
+
     private void setEnabledPill(TextView target, boolean enabled) {
         setPillState(
                 target,
@@ -2955,6 +3040,8 @@ public final class MainActivity extends Activity {
             Config config = Config.get(this);
             serverBaseUrlField.setText(config.serverBaseUrl());
             clearNotificationsOnOpenSwitch.setChecked(config.clearNotificationsOnOpen());
+            notificationBackupEnabledSwitch.setChecked(config.notificationBackupEnabled());
+            notificationBackupIncludeSysmgrSwitch.setChecked(config.notificationBackupIncludeSysmgr());
             trackPathField.setText(config.trackPath());
             ssidPatternField.setText(config.ssidPattern());
             highBatteryIntervalField.setText(Integer.toString(config.highBatteryIntervalMinutes()));
@@ -3068,6 +3155,9 @@ public final class MainActivity extends Activity {
 
         bindSaveVpnConfig(vpnRemoteCommandEnabledSwitch);
 
+        bindSaveNotificationBackupConfig(notificationBackupEnabledSwitch);
+        bindSaveNotificationBackupConfig(notificationBackupIncludeSysmgrSwitch);
+
         clearNotificationsOnOpenSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
@@ -3101,6 +3191,133 @@ public final class MainActivity extends Activity {
                 saveGpsConfigOnly();
             }
         });
+    }
+
+    private void bindSaveNotificationBackupConfig(Switch sw) {
+        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (loadingConfig) {
+                    return;
+                }
+                boolean enabled = notificationBackupEnabledSwitch.isChecked();
+                Config.get(MainActivity.this).saveNotificationBackupConfig(
+                        enabled, notificationBackupIncludeSysmgrSwitch.isChecked());
+                LogStore.append(MainActivity.this, "ui", "Notification backup settings saved enabled=" + enabled);
+                if (enabled) {
+                    // Bring the Remote Link up (if enabled) and ask the server whether
+                    // it is storing notifications, so we can tell the user right away.
+                    RemoteLinkManager.sync(MainActivity.this, "notification-backup-enable");
+                    RemoteLinkManager.probeBackup(MainActivity.this, "backup-toggle");
+                }
+                refreshNotificationBackupStatus();
+            }
+        });
+    }
+
+    private void refreshNotificationBackupStatus() {
+        if (notificationBackupPill == null) {
+            return;
+        }
+        final Config config = Config.get(this);
+        final boolean enabled = switchValue(notificationBackupEnabledSwitch, config.notificationBackupEnabled());
+        final boolean linkEnabled = config.remoteLinkEnabled();
+        final boolean serverChecked = NotificationBackupStateStore.isChecked(this);
+        final boolean serverAvailable = NotificationBackupStateStore.isServerAvailable(this);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final int queued = NotificationBackupStore.count(MainActivity.this);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        applyNotificationBackupStatus(enabled, linkEnabled, serverChecked, serverAvailable, queued);
+                    }
+                });
+            }
+        }, "SystemManagerBackupStatus").start();
+    }
+
+    private void applyNotificationBackupStatus(boolean enabled, boolean linkEnabled,
+                                               boolean serverChecked, boolean serverAvailable, int queued) {
+        if (notificationBackupPill == null) {
+            return;
+        }
+        String pillText;
+        int pillBg;
+        int pillFg;
+        String message;
+        int dotColor;
+        if (!enabled) {
+            pillText = "DISABLED";
+            pillBg = COLOR_NEUTRAL_CONTAINER;
+            pillFg = COLOR_NEUTRAL_ON_CONTAINER;
+            message = "";
+            dotColor = COLOR_TEXT_FAINT;
+        } else if (!linkEnabled) {
+            pillText = "NO LINK";
+            pillBg = COLOR_DANGER_CONTAINER;
+            pillFg = COLOR_DANGER_ON_CONTAINER;
+            message = "Turn on the Remote Link to send backups.";
+            dotColor = COLOR_BAD;
+        } else if (serverChecked && !serverAvailable) {
+            pillText = "SERVER OFF";
+            pillBg = COLOR_DANGER_CONTAINER;
+            pillFg = COLOR_DANGER_ON_CONTAINER;
+            message = "The server isn't storing notifications. Held on this device.";
+            dotColor = COLOR_BAD;
+        } else if (!serverChecked) {
+            pillText = "CHECKING";
+            pillBg = COLOR_NEUTRAL_CONTAINER;
+            pillFg = COLOR_NEUTRAL_ON_CONTAINER;
+            message = "Checking the server…";
+            dotColor = COLOR_TEXT_FAINT;
+        } else if (queued == 0) {
+            pillText = "ACTIVE";
+            pillBg = COLOR_PRIMARY_CONTAINER;
+            pillFg = COLOR_PRIMARY_ON_CONTAINER;
+            message = "All notifications backed up.";
+            dotColor = COLOR_OK;
+        } else {
+            pillText = "ACTIVE";
+            pillBg = COLOR_PRIMARY_CONTAINER;
+            pillFg = COLOR_PRIMARY_ON_CONTAINER;
+            message = "Sending to the server…";
+            dotColor = COLOR_OK;
+        }
+
+        setPillState(notificationBackupPill, pillText, pillBg, pillFg);
+
+        if (notificationBackupStatusCard != null) {
+            notificationBackupStatusCard.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        }
+        if (!enabled) {
+            return;
+        }
+        setDotColor(notificationBackupDot, dotColor);
+        if (notificationBackupStatus != null) {
+            notificationBackupStatus.setText(message);
+        }
+        if (notificationBackupCountPill != null) {
+            if (queued > 0) {
+                setPillState(notificationBackupCountPill,
+                        queued == 1 ? "1 queued" : (queued + " queued"),
+                        COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+                notificationBackupCountPill.setVisibility(View.VISIBLE);
+            } else {
+                notificationBackupCountPill.setVisibility(View.GONE);
+            }
+        }
+    }
+
+    private void setDotColor(View dot, int color) {
+        if (dot == null) {
+            return;
+        }
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setShape(GradientDrawable.OVAL);
+        drawable.setColor(color);
+        dot.setBackground(drawable);
     }
 
     private void bindSaveHighPriorityConfig(Switch sw) {
@@ -3239,6 +3456,9 @@ public final class MainActivity extends Activity {
                 text(logMaxLinesField));
         Config.get(this).saveNotificationHistoryConfig(
                 clearNotificationsOnOpenSwitch.isChecked());
+        Config.get(this).saveNotificationBackupConfig(
+                notificationBackupEnabledSwitch.isChecked(),
+                notificationBackupIncludeSysmgrSwitch.isChecked());
         LogStore.append(this, "ui", "Configuration saved");
         NetworkMonitorService.sync(this);
         BatteryAlertManager.sync(this, "config-save");

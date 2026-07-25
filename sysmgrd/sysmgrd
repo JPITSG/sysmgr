@@ -19,6 +19,9 @@ const PING_RECONNECT_GRACE_MS = 5000;
 const PROXY_V2_SIGNATURE = Buffer.from('\r\n\r\n\0\r\nQUIT\n', 'binary');
 const PROXY_HEADER_TIMEOUT_MS = 5000;
 const MYSQL_DEFAULT_CLIENT = '/usr/bin/mysql';
+const NOTIF_STORE_MAX_FIELD = 4000;
+// How many recently-stored notification keys to remember for idempotent retries.
+const NOTIF_KEY_MEMORY = 5000;
 
 function parseArgs(argv) {
   const args = {};
@@ -52,6 +55,7 @@ if (users.size === 0) {
   process.exit(2);
 }
 const gpsMysql = parseGpsMysqlConfig(args);
+const notificationStore = createNotificationStore(args);
 let nextConnectionId = 1;
 let certDir = null;
 const clients = new Map();
@@ -328,6 +332,104 @@ function isSafeSqlIdentifier(value) {
   return /^[A-Za-z0-9_]+$/.test(String(value || ''));
 }
 
+function createNotificationStore(parsedArgs) {
+  const target = String(parsedArgs.notificationstore || '').trim();
+  if (!target) {
+    return {enabled: false, path: '', stream: null, recentKeys: new Set(), recentOrder: []};
+  }
+  try {
+    fs.mkdirSync(path.dirname(target), {recursive: true});
+  } catch (err) {
+    console.error(`could not create notification store directory: ${err.message}`);
+    process.exit(2);
+  }
+  let stream;
+  try {
+    stream = fs.createWriteStream(target, {flags: 'a', mode: 0o600});
+  } catch (err) {
+    console.error(`could not open notification store: ${err.message}`);
+    process.exit(2);
+  }
+  stream.on('error', (err) => log(`notification store write error ${err.message}`));
+  return {enabled: true, path: target, stream, recentKeys: new Set(), recentOrder: []};
+}
+
+function cleanNotifKey(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return /^[0-9a-f]{16,128}$/.test(key) ? key : '';
+}
+
+function notifString(value) {
+  return String(value === undefined || value === null ? '' : value).slice(0, NOTIF_STORE_MAX_FIELD);
+}
+
+function notifInteger(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.trunc(number) : null;
+}
+
+function notificationKeySeen(key) {
+  if (notificationStore.recentKeys.has(key)) {
+    return true;
+  }
+  notificationStore.recentKeys.add(key);
+  notificationStore.recentOrder.push(key);
+  while (notificationStore.recentOrder.length > NOTIF_KEY_MEMORY) {
+    notificationStore.recentKeys.delete(notificationStore.recentOrder.shift());
+  }
+  return false;
+}
+
+function storeNotification(connectionId, message) {
+  if (!notificationStore.enabled) {
+    return {ok: false, reason: 'store-not-configured'};
+  }
+  const key = cleanNotifKey(message.key);
+  if (!key) {
+    log(`notif backup rejected connection=${connectionId} reason=invalid-key`);
+    return {ok: false, reason: 'invalid-key'};
+  }
+  // The app's hash key makes retries idempotent: a duplicate (a re-sent record
+  // whose ack was lost) is acknowledged ok so the phone clears it, but not
+  // written a second time.
+  if (notificationKeySeen(key)) {
+    log(`notif backup duplicate connection=${connectionId} key=${key}`);
+    return {ok: true, reason: 'duplicate'};
+  }
+
+  const now = new Date();
+  const shownAtMs = notifInteger(message.shown_at);
+  const postedAtMs = notifInteger(message.posted_at);
+  const record = {
+    received_at: formatTimestamp(now),
+    received_at_ms: now.getTime(),
+    device_uuid: cleanUuid(message.uuid),
+    key,
+    shown_at: shownAtMs !== null ? formatTimestamp(new Date(shownAtMs)) : '',
+    shown_at_ms: shownAtMs,
+    posted_at_ms: postedAtMs,
+    package: notifString(message.package),
+    app_label: notifString(message.app_label),
+    category: notifString(message.category),
+    channel: notifString(message.channel),
+    priority: notifInteger(message.priority),
+    is_sysmgr: Boolean(message.is_sysmgr),
+    title: notifString(message.title),
+    text: notifString(message.text)
+  };
+
+  try {
+    notificationStore.stream.write(`${JSON.stringify(record)}\n`);
+  } catch (err) {
+    // Not actually stored; let the app retry instead of dropping it.
+    notificationStore.recentKeys.delete(key);
+    log(`notif backup write failed connection=${connectionId} key=${key} error=${logValue(err && err.message ? err.message : err)}`);
+    return {ok: false, reason: 'write-failed'};
+  }
+  log(`notif backup stored connection=${connectionId} key=${key} package=${logValue(record.package)} title=${logValue(record.title)}`);
+  return {ok: true, reason: 'stored'};
+}
+
 function basicCredentials(headerValue) {
   if (!headerValue || !headerValue.toLowerCase().startsWith('basic ')) {
     return null;
@@ -482,12 +584,32 @@ function handleTextMessage(connectionId, socket, text) {
 
   if (parsed.type === 'heartbeat') {
     log(`heartbeat received connection=${connectionId} ts=${parsed.ts || ''} battery=${parsed.battery}`);
-    sendJson(socket, {type: 'heartbeat_ack', ts: Math.floor(Date.now() / 1000)});
+    sendJson(socket, {type: 'heartbeat_ack', ts: Math.floor(Date.now() / 1000), notif_backup: notificationStore.enabled});
     return;
   }
   if (parsed.type === 'gps') {
     const result = handleGpsMessage(connectionId, parsed);
     sendGpsAck(connectionId, socket, parsed.id, result);
+    return;
+  }
+  if (parsed.type === 'notif_backup') {
+    const result = storeNotification(connectionId, parsed);
+    sendJson(socket, {
+      type: 'notif_backup_ack',
+      key: String(parsed.key || '').slice(0, 128),
+      ok: result.ok,
+      reason: result.reason,
+      ts: Math.floor(Date.now() / 1000)
+    });
+    return;
+  }
+  if (parsed.type === 'notif_backup_probe') {
+    sendJson(socket, {
+      type: 'notif_backup_status',
+      id: String(parsed.id || ''),
+      enabled: notificationStore.enabled,
+      ts: Math.floor(Date.now() / 1000)
+    });
     return;
   }
   if (parsed.type === 'ack' && parsed.id) {
@@ -513,7 +635,7 @@ function handleTextMessage(connectionId, socket, text) {
   if (parsed.type === 'hello') {
     const uuid = assignClientUuid(connectionId, socket, parsed.uuid || parsed.client_uuid || parsed.device_uuid);
     log(`hello received connection=${connectionId} app=${parsed.app || ''} version=${parsed.version || ''} uuid=${uuid || ''} heartbeat_seconds=${parsed.heartbeat_seconds || ''}`);
-    sendJson(socket, {type: 'hello_ack', ts: Math.floor(Date.now() / 1000)});
+    sendJson(socket, {type: 'hello_ack', ts: Math.floor(Date.now() / 1000), notif_backup: notificationStore.enabled});
     return;
   }
   log(`message received connection=${connectionId} type=${parsed.type || 'unknown'} body=${text}`);
@@ -1085,7 +1207,7 @@ tcpServer.on('error', (err) => {
   process.exitCode = 1;
 });
 tcpServer.listen(bindPort, bindIp, () => {
-  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'}`);
+  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'}`);
 });
 
 function parseControlMessage(text) {
@@ -1233,6 +1355,13 @@ function shutdown(signal) {
     }
   }
   tcpServer.close(() => {
+    if (notificationStore.stream) {
+      try {
+        notificationStore.stream.end();
+      } catch (err) {
+        // Ignore shutdown cleanup errors.
+      }
+    }
     logStream.end(() => process.exit(0));
   });
   setTimeout(() => process.exit(0), 3000).unref();

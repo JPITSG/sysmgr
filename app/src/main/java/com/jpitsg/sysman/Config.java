@@ -59,6 +59,8 @@ final class Config {
     private static final String KEY_LOG_MAX_LINES = "log_max_lines";
     private static final String KEY_LOG_ENABLED = "log_enabled";
     private static final String KEY_CLEAR_NOTIFICATIONS_ON_OPEN = "clear_notifications_on_open";
+    private static final String KEY_NOTIFICATION_BACKUP_ENABLED = "notification_backup_enabled";
+    private static final String KEY_NOTIFICATION_BACKUP_INCLUDE_SYSMGR = "notification_backup_include_sysmgr";
     private static final String KEY_HIGH_PRIORITY_ENABLED = "high_priority_enabled";
     private static final String KEY_HIGH_PRIORITY_PACKAGE = "high_priority_package";
     private static final String KEY_HIGH_PRIORITY_TEXT_FILTER = "high_priority_text_filter";
@@ -302,6 +304,14 @@ final class Config {
 
     boolean clearNotificationsOnOpen() {
         return prefs.getBoolean(KEY_CLEAR_NOTIFICATIONS_ON_OPEN, true);
+    }
+
+    boolean notificationBackupEnabled() {
+        return prefs.getBoolean(KEY_NOTIFICATION_BACKUP_ENABLED, false);
+    }
+
+    boolean notificationBackupIncludeSysmgr() {
+        return prefs.getBoolean(KEY_NOTIFICATION_BACKUP_INCLUDE_SYSMGR, false);
     }
 
     boolean highPriorityEnabled() {
@@ -773,6 +783,13 @@ final class Config {
     void saveNotificationHistoryConfig(boolean clearNotificationsOnOpen) {
         prefs.edit()
                 .putBoolean(KEY_CLEAR_NOTIFICATIONS_ON_OPEN, clearNotificationsOnOpen)
+                .apply();
+    }
+
+    void saveNotificationBackupConfig(boolean enabled, boolean includeSysmgr) {
+        prefs.edit()
+                .putBoolean(KEY_NOTIFICATION_BACKUP_ENABLED, enabled)
+                .putBoolean(KEY_NOTIFICATION_BACKUP_INCLUDE_SYSMGR, includeSysmgr)
                 .apply();
     }
 

@@ -17,6 +17,9 @@ import android.os.SystemClock;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -29,6 +32,10 @@ public final class RemoteLinkService extends Service {
     // Connections that die younger than this count toward reconnect backoff;
     // longer-lived ones reset it (distinguishes churn from a healthy link dropping).
     private static final long STABLE_CONNECTION_MILLIS = 30_000L;
+    // A backed-up notification that isn't acked within this window is resent.
+    private static final long BACKUP_RETRY_MILLIS = 60_000L;
+    // Cap how many notifications are outstanding (sent, awaiting ack) at once.
+    private static final int BACKUP_MAX_IN_FLIGHT = 100;
     private static final long[] BACKOFF_STEP_SECONDS = {1L, 2L, 5L, 10L, 30L};
     private static volatile RemoteLinkService activeService;
 
@@ -44,6 +51,13 @@ public final class RemoteLinkService extends Service {
     private volatile boolean stopRequested;
     private volatile RemoteWebSocketClient client;
     private volatile long heartbeatResetAtMillis;
+    // Notification Backup: keys sent and awaiting a server ack -> the time they
+    // were sent, so we can retry after BACKUP_RETRY_MILLIS. Touched only on the
+    // worker thread (drain + ack handling both run in the connected loop).
+    private final java.util.Map<String, Long> backupInFlight = new java.util.HashMap<>();
+    private final AtomicBoolean backupProbeRequested = new AtomicBoolean(false);
+    private volatile String backupProbeReason = "";
+    private volatile boolean backupOutboxDirty = true;
     private Thread worker;
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
@@ -88,6 +102,9 @@ public final class RemoteLinkService extends Service {
             LogStore.append(this, "remote", "Remote Link reconnect requested reason=" + reason);
             closeClient();
         }
+        // Any sync/nudge (e.g. a freshly queued notification backup) should make
+        // the worker re-check the outbox on its next pass.
+        backupOutboxDirty = true;
         startWorkerIfNeeded(reason);
         return START_STICKY;
     }
@@ -130,6 +147,17 @@ public final class RemoteLinkService extends Service {
         return service.sendGpsPayload(payload);
     }
 
+    static boolean sendBackupProbeIfRunning(Context context, String reason) {
+        RemoteLinkService service = activeService;
+        if (service == null) {
+            return false;
+        }
+        service.backupProbeReason = reason == null ? "unknown" : reason;
+        service.backupProbeRequested.set(true);
+        service.backupOutboxDirty = true;
+        return true;
+    }
+
     private void startWorkerIfNeeded(final String reason) {
         if (!workerRunning.compareAndSet(false, true)) {
             return;
@@ -166,6 +194,8 @@ public final class RemoteLinkService extends Service {
                     connectedNetwork = currentDefaultNetwork();
                     RemoteLinkStateStore.setConnected(this, true);
                     LogStore.append(this, "remote", "Remote Link connected");
+                    backupInFlight.clear();
+                    backupOutboxDirty = true;
                     sendHello(current, config);
                     runConnectedLoop(current);
                     RemoteLinkStateStore.setConnected(this, false);
@@ -225,6 +255,7 @@ public final class RemoteLinkService extends Service {
         while (!stopRequested && Config.get(this).remoteLinkEnabled() && current.isOpen()) {
             Config config = Config.get(this);
             sendQueuedPings(current);
+            sendBackupProbeIfRequested(current);
             String message = current.readTextFrame();
             long inboundAt = current.lastInboundAtMillis();
             if (inboundAt > lastInboundAt) {
@@ -238,6 +269,7 @@ public final class RemoteLinkService extends Service {
                     RemoteEventHandler.handle(this, current, message);
                 }
             }
+            drainBackupOutbox(current);
             if (livenessProbeRequested.compareAndSet(true, false)) {
                 sendManualPing(current, "liveness:" + livenessProbeReason);
                 probeSentAt = SystemClock.elapsedRealtime();
@@ -271,8 +303,30 @@ public final class RemoteLinkService extends Service {
     private boolean handleServiceMessage(String message) {
         try {
             JSONObject json = new JSONObject(message);
-            if ("gps_ack".equals(json.optString("type", ""))) {
+            String type = json.optString("type", "");
+            if ("gps_ack".equals(type)) {
                 handleGpsAck(json);
+                return true;
+            }
+            if ("notif_backup_ack".equals(type)) {
+                handleNotifBackupAck(json);
+                return true;
+            }
+            if ("notif_backup_status".equals(type)) {
+                boolean enabled = json.optBoolean("enabled", false);
+                NotificationBackupStateStore.setServerAvailable(this, enabled);
+                // Re-check the outbox on the next pass now that we know the state.
+                backupOutboxDirty = true;
+                LogStore.append(this, "remote", "Notification backup status from server enabled=" + enabled);
+                return true;
+            }
+            if ("hello_ack".equals(type) || "heartbeat_ack".equals(type)) {
+                if (json.has("notif_backup")) {
+                    NotificationBackupStateStore.setServerAvailable(this, json.optBoolean("notif_backup", false));
+                }
+                // Server signalled liveness; re-check the outbox (covers a server that
+                // re-enables the store mid-session even if a queue nudge was missed).
+                backupOutboxDirty = true;
                 return true;
             }
         } catch (Exception ignored) {
@@ -298,6 +352,110 @@ public final class RemoteLinkService extends Service {
             gpsAckLock.notifyAll();
             LogStore.append(this, "remote", "GPS ack received id=" + id
                     + " ok=" + pending.ok + " reason=" + pending.reason);
+        }
+    }
+
+    private void handleNotifBackupAck(JSONObject json) {
+        String key = json.optString("key", "");
+        if (key.isEmpty()) {
+            return;
+        }
+        boolean ok = json.optBoolean("ok", false);
+        String reason = json.optString("reason", "");
+        if (ok) {
+            backupInFlight.remove(key);
+            NotificationBackupStore.remove(this, key);
+            NotificationBackupStateStore.setServerAvailable(this, true);
+        } else if ("store-not-configured".equals(reason)) {
+            // Server has Notification Backup turned off. Keep the record queued and
+            // stop draining until the server reports it available again.
+            backupInFlight.remove(key);
+            NotificationBackupStateStore.setServerAvailable(this, false);
+            LogStore.append(this, "remote", "Notification backup rejected; server store not configured");
+        } else {
+            // Transient failure: leave it in-flight so the drain retries after the window.
+            LogStore.append(this, "remote", "Notification backup not acked key=" + key + " reason=" + reason);
+        }
+    }
+
+    private void sendBackupProbeIfRequested(RemoteWebSocketClient current) {
+        if (!backupProbeRequested.compareAndSet(true, false)) {
+            return;
+        }
+        try {
+            JSONObject probe = new JSONObject();
+            probe.put("type", "notif_backup_probe");
+            probe.put("id", "android-" + UUID.randomUUID().toString());
+            probe.put("ts", System.currentTimeMillis() / 1000L);
+            current.sendText(probe.toString());
+            LogStore.append(this, "remote", "Notification backup probe sent reason=" + backupProbeReason);
+        } catch (Exception e) {
+            LogStore.append(this, "remote", "Notification backup probe failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            current.close();
+        }
+    }
+
+    private void drainBackupOutbox(RemoteWebSocketClient current) {
+        Config config = Config.get(this);
+        if (!config.notificationBackupEnabled()) {
+            return;
+        }
+        if (!NotificationBackupStateStore.isServerAvailable(this)) {
+            // Server backup is off; keep queuing locally (the outbox is capped) and
+            // wait for a heartbeat_ack / probe to report it available again.
+            return;
+        }
+        if (!backupOutboxDirty && backupInFlight.isEmpty()) {
+            return;
+        }
+
+        long now = SystemClock.elapsedRealtime();
+        Iterator<Map.Entry<String, Long>> inFlight = backupInFlight.entrySet().iterator();
+        while (inFlight.hasNext()) {
+            Map.Entry<String, Long> entry = inFlight.next();
+            if (now - entry.getValue() >= BACKUP_RETRY_MILLIS) {
+                inFlight.remove();
+            }
+        }
+
+        List<JSONObject> pending = NotificationBackupStore.peek(this, 0);
+        if (pending.isEmpty()) {
+            backupInFlight.clear();
+            backupOutboxDirty = false;
+            return;
+        }
+
+        String uuid = config.installUuid();
+        int sent = 0;
+        for (JSONObject record : pending) {
+            if (backupInFlight.size() >= BACKUP_MAX_IN_FLIGHT) {
+                break;
+            }
+            String key = NotificationBackup.keyOf(record);
+            if (key.isEmpty() || backupInFlight.containsKey(key)) {
+                continue;
+            }
+            try {
+                JSONObject payload = new JSONObject(record.toString());
+                payload.put("type", NotificationBackup.MESSAGE_TYPE);
+                payload.put("uuid", uuid);
+                current.sendText(payload.toString());
+                backupInFlight.put(key, now);
+                heartbeatResetAtMillis = now;
+                sent++;
+            } catch (Exception e) {
+                LogStore.append(this, "remote", "Notification backup send failed: "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage());
+                current.close();
+                return;
+            }
+        }
+        // Stay dirty while records remain outstanding; the empty branch above
+        // flips this off once the outbox is fully acked and drained.
+        backupOutboxDirty = true;
+        if (sent > 0) {
+            LogStore.append(this, "remote", "Notification backup sent count=" + sent + " outbox=" + pending.size());
         }
     }
 

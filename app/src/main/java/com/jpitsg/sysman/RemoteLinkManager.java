@@ -32,6 +32,25 @@ final class RemoteLinkManager {
         }
     }
 
+    static void flushBackups(Context context, String reason) {
+        Context app = context.getApplicationContext();
+        if (Config.get(app).remoteLinkEnabled()) {
+            start(app, ACTION_SYNC, reason);
+        }
+    }
+
+    static void flushBackups(Context context) {
+        flushBackups(context, "notification-backup");
+    }
+
+    static boolean probeBackup(Context context, String reason) {
+        Context app = context.getApplicationContext();
+        if (!Config.get(app).remoteLinkEnabled()) {
+            return false;
+        }
+        return RemoteLinkService.sendBackupProbeIfRunning(app, reason);
+    }
+
     static boolean ping(Context context, String reason) {
         Context app = context.getApplicationContext();
         if (!Config.get(app).remoteLinkEnabled()) {
