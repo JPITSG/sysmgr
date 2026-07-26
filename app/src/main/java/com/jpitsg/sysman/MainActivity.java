@@ -6,6 +6,7 @@ import android.app.Activity;
 import android.app.TimePickerDialog;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -67,6 +68,7 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_COMMON_PERMISSIONS = 10;
     private static final int REQUEST_BACKGROUND_LOCATION = 11;
     private static final int REQUEST_NOTIFICATIONS = 12;
+    private static final int REQUEST_BLUETOOTH_ADVERTISE = 13;
     private static final int REQUEST_EXPORT_SETTINGS = 20;
     private static final int REQUEST_IMPORT_SETTINGS = 21;
     private static final int REQUEST_SAVE_NOTIFICATION_IMAGE = 22;
@@ -231,6 +233,22 @@ public final class MainActivity extends Activity {
     private BroadcastReceiver openVpnStateReceiver;
     private static volatile String cachedVpnEngineVersion;
 
+    private TextView beaconPill;
+    private LinearLayout beaconStatusList;
+    private LinearLayout beaconRuleList;
+    private TextView beaconUuidValue;
+    private EditText beaconMajorField;
+    private EditText beaconMinorField;
+    private EditText beaconMeasuredPowerField;
+    private EditText beaconRuleBatteryField;
+    private EditText beaconRuleIntervalField;
+    private Button beaconTxUltraLowButton;
+    private Button beaconTxLowButton;
+    private Button beaconTxMediumButton;
+    private Button beaconTxHighButton;
+    private int beaconTxPowerDbm = Config.BEACON_TX_POWER_HIGH;
+    private BroadcastReceiver beaconStateReceiver;
+
     private Switch useExactAlarmsSwitch;
     private Switch allowIdleAlarmsSwitch;
     private Switch postOnStartupSwitch;
@@ -258,6 +276,7 @@ public final class MainActivity extends Activity {
     private Switch remoteLinkEnabledSwitch;
     private Switch remoteLinkAcceptAnySslCertSwitch;
     private Switch remoteLinkShowNotificationSwitch;
+    private Switch beaconEnabledSwitch;
     private Switch logEnabledSwitch;
     private Switch clearNotificationsOnOpenSwitch;
     private Switch notificationBackupEnabledSwitch;
@@ -363,6 +382,7 @@ public final class MainActivity extends Activity {
         registerNotificationHistoryReceiver();
         registerNotificationBackupReceiver();
         registerOpenVpnStateReceiver();
+        registerBeaconStateReceiver();
         NotificationCleaner.clearOnAppOpen(this);
         OpenVpnManager.syncStateOnLaunch(this);
         refreshStatusAndLog();
@@ -376,6 +396,7 @@ public final class MainActivity extends Activity {
         unregisterNotificationBackupReceiver();
         unregisterRemoteLinkStateReceiver();
         unregisterOpenVpnStateReceiver();
+        unregisterBeaconStateReceiver();
         super.onPause();
     }
 
@@ -452,6 +473,7 @@ public final class MainActivity extends Activity {
         buildBatteryAlertPanel(root);
         buildVolumeControlPanel(root);
         buildOpenVpnPanel(root);
+        buildBeaconPanel(root);
         buildRebootPanel(root);
         buildSettingsTransferPanel(root);
         buildPermissionsPanel(root);
@@ -462,6 +484,7 @@ public final class MainActivity extends Activity {
         RemoteLinkManager.sync(this, "activity-open");
         VolumeControlManager.sync(this, "activity-open");
         OpenVpnManager.sync(this, "activity-open");
+        BeaconManager.sync(this, "activity-open");
     }
 
     private void buildGpsLoggerControls(LinearLayout panel) {
@@ -549,8 +572,8 @@ public final class MainActivity extends Activity {
         notificationBackupCountPill.setTextSize(11);
         notificationBackupCountPill.setTypeface(Typeface.DEFAULT_BOLD);
         notificationBackupCountPill.setLetterSpacing(0.06f);
-        notificationBackupCountPill.setSingleLine(true);
         notificationBackupCountPill.setIncludeFontPadding(false);
+        Ui.marqueeLabel(notificationBackupCountPill);
         notificationBackupCountPill.setPadding(dp(GAP), dp(4), dp(GAP), dp(4));
         notificationBackupCountPill.setVisibility(View.GONE);
         statusCard.addView(notificationBackupCountPill, inRow(statusCard,
@@ -773,6 +796,113 @@ public final class MainActivity extends Activity {
         frame.content.addView(openVpnEngineVersionText, stack(frame.content));
     }
 
+    private void buildBeaconPanel(LinearLayout root) {
+        Panel frame = addExpandablePanel(root, "Beacon", true);
+        beaconPill = frame.pill;
+
+        LinearLayout enableGroup = addToggleGroup(frame.content);
+        beaconEnabledSwitch = addGroupedToggle(enableGroup, "Enable beacon");
+
+        addSubsectionLabel(frame.content, "Identity");
+        addFieldLabel(frame.content, "Proximity UUID — match receivers on this");
+        beaconUuidValue = historyText("", 13, COLOR_TEXT, false);
+        beaconUuidValue.setTypeface(Typeface.MONOSPACE);
+        beaconUuidValue.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        beaconUuidValue.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        beaconUuidValue.setMinHeight(dp(FIELD_MIN_HEIGHT));
+        beaconUuidValue.setGravity(Gravity.CENTER_VERTICAL);
+        beaconUuidValue.setTextIsSelectable(true);
+        frame.content.addView(beaconUuidValue, stack(frame.content));
+
+        LinearLayout uuidRow = newRow();
+        frame.content.addView(uuidRow, stack(frame.content));
+        addRowButton(uuidRow, tonalButton("Copy UUID", action("beacon_copy_uuid")));
+        addRowButton(uuidRow, neutralButton("New UUID", action("beacon_new_uuid")));
+
+        beaconMajorField = addField(frame.content, "Major (0-65535)", InputType.TYPE_CLASS_NUMBER);
+        beaconMinorField = addField(frame.content, "Minor (0-65535)", InputType.TYPE_CLASS_NUMBER);
+
+        addSubsectionLabel(frame.content, "Signal");
+        addBeaconTxPowerInput(frame.content);
+        beaconMeasuredPowerField = addField(frame.content, "Measured power at 1 m (dBm)",
+                InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+
+        addSubsectionLabel(frame.content, "Battery Rules");
+        beaconRuleList = newColumn();
+        beaconRuleList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        beaconRuleList.setClipToOutline(true);
+        frame.content.addView(beaconRuleList, stack(frame.content));
+
+        addSubsectionLabel(frame.content, "Add Battery Rule");
+        beaconRuleBatteryField = addField(frame.content, "Battery at or above (%)", InputType.TYPE_CLASS_NUMBER);
+        beaconRuleIntervalField = addField(frame.content, "Broadcast every (seconds, 0 = don't broadcast)",
+                InputType.TYPE_CLASS_NUMBER);
+        LinearLayout addRuleRow = newRow();
+        frame.content.addView(addRuleRow, stack(frame.content));
+        addRowButton(addRuleRow, tonalButton("Add Rule", action("add_beacon_rule")));
+
+        addSubsectionLabel(frame.content, "Status");
+        beaconStatusList = newColumn();
+        beaconStatusList.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
+        beaconStatusList.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        frame.content.addView(beaconStatusList, stack(frame.content));
+
+        LinearLayout buttonRow = newRow();
+        frame.content.addView(buttonRow, stack(frame.content));
+        addRowButton(buttonRow, tonalButton("Bluetooth Settings", action("bluetooth_settings")));
+        addRowButton(buttonRow, tonalButton("Save Beacon Settings", action("save_beacon")));
+    }
+
+    private void addBeaconTxPowerInput(LinearLayout root) {
+        addFieldLabel(root, "Transmit power");
+        LinearLayout row = newRow();
+        root.addView(row, stack(root));
+        beaconTxUltraLowButton = tonalButton("Ultra", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setBeaconTxPower(Config.BEACON_TX_POWER_ULTRA_LOW);
+            }
+        });
+        beaconTxLowButton = tonalButton("Low", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setBeaconTxPower(Config.BEACON_TX_POWER_LOW);
+            }
+        });
+        beaconTxMediumButton = tonalButton("Medium", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setBeaconTxPower(Config.BEACON_TX_POWER_MEDIUM);
+            }
+        });
+        beaconTxHighButton = tonalButton("High", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setBeaconTxPower(Config.BEACON_TX_POWER_HIGH);
+            }
+        });
+        addRowButton(row, beaconTxUltraLowButton);
+        addRowButton(row, beaconTxLowButton);
+        addRowButton(row, beaconTxMediumButton);
+        addRowButton(row, beaconTxHighButton);
+        updateBeaconTxPowerButtons();
+    }
+
+    private void setBeaconTxPower(int dbm) {
+        beaconTxPowerDbm = dbm;
+        updateBeaconTxPowerButtons();
+        if (!loadingConfig) {
+            saveBeaconConfigOnly();
+        }
+    }
+
+    private void updateBeaconTxPowerButtons() {
+        styleChoiceButton(beaconTxUltraLowButton, beaconTxPowerDbm == Config.BEACON_TX_POWER_ULTRA_LOW);
+        styleChoiceButton(beaconTxLowButton, beaconTxPowerDbm == Config.BEACON_TX_POWER_LOW);
+        styleChoiceButton(beaconTxMediumButton, beaconTxPowerDbm == Config.BEACON_TX_POWER_MEDIUM);
+        styleChoiceButton(beaconTxHighButton, beaconTxPowerDbm == Config.BEACON_TX_POWER_HIGH);
+    }
+
     private void buildRebootPanel(LinearLayout root) {
         Panel frame = addExpandablePanel(root, "Reboot Automation", true);
         rebootPill = frame.pill;
@@ -890,6 +1020,11 @@ public final class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             addRowButton(r5, tonalButton("Notification Permission", action("notifications")));
         }
+
+        LinearLayout r6 = newRow();
+        frame.content.addView(r6, stack(frame.content));
+        addRowButton(r6, tonalButton("Bluetooth Advertise", action("bluetooth_permission")));
+        addRowButton(r6, tonalButton("Bluetooth Settings", action("bluetooth_settings")));
     }
 
     private void buildLogPanel(LinearLayout root) {
@@ -1326,6 +1461,9 @@ public final class MainActivity extends Activity {
         status.setTypeface(Typeface.DEFAULT_BOLD);
         status.setLetterSpacing(0.08f);
         status.setIncludeFontPadding(false);
+        // "MISSING — TAP TO IMPORT" outruns the row on a narrow screen, and
+        // this badge has no ellipsize to fall back on.
+        Ui.marqueeLabel(status);
         row.addView(status, inRow(row, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
 
         final boolean isInline = inline;
@@ -1419,6 +1557,35 @@ public final class MainActivity extends Activity {
         } catch (RuntimeException ignored) {
         }
         openVpnStateReceiver = null;
+    }
+
+    private void registerBeaconStateReceiver() {
+        if (beaconStateReceiver != null) {
+            return;
+        }
+        beaconStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                refreshStatusAndLog();
+            }
+        };
+        IntentFilter filter = new IntentFilter(BeaconStateStore.ACTION_STATE_CHANGED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(beaconStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(beaconStateReceiver, filter);
+        }
+    }
+
+    private void unregisterBeaconStateReceiver() {
+        if (beaconStateReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(beaconStateReceiver);
+        } catch (RuntimeException ignored) {
+        }
+        beaconStateReceiver = null;
     }
 
     // ---- OpenVPN import / connect ------------------------------------------
@@ -1683,6 +1850,25 @@ public final class MainActivity extends Activity {
         saveVpnConfigOnly();
         LogStore.append(this, "vpn", "VPN settings saved");
         Toast.makeText(this, "VPN settings saved", Toast.LENGTH_SHORT).show();
+    }
+
+    private void saveBeaconConfigOnly() {
+        Config.get(this).saveBeaconConfig(
+                beaconEnabledSwitch.isChecked(),
+                text(beaconMajorField),
+                text(beaconMinorField),
+                text(beaconMeasuredPowerField),
+                beaconTxPowerDbm);
+        // refresh() starts the service when enabled and stops it when not, and
+        // additionally makes a running service rebuild its advertisement.
+        BeaconManager.refresh(this, "settings-saved");
+        refreshStatusAndLog();
+    }
+
+    private void saveBeaconSettings() {
+        saveBeaconConfigOnly();
+        LogStore.append(this, "beacon", "Beacon settings saved");
+        Toast.makeText(this, "Beacon settings saved", Toast.LENGTH_SHORT).show();
     }
 
     private byte[] readUriBytes(Uri uri, int maxBytes) {
@@ -2056,6 +2242,274 @@ public final class MainActivity extends Activity {
     }
 
     // ============================================================
+    //  Beacon panel
+    // ============================================================
+
+    private void refreshBeaconPanel() {
+        if (beaconPill == null) {
+            return;
+        }
+        Config config = Config.get(this);
+        boolean enabled = switchValue(beaconEnabledSwitch, config.beaconEnabled());
+        String state = enabled ? BeaconStateStore.state(this) : BeaconStateStore.STATE_OFF;
+        // Before the service has had a chance to report, show the reason it
+        // would fail rather than a stale state.
+        if (enabled && !BeaconService.isActive()) {
+            String blocking = BeaconManager.blockingState(this);
+            if (blocking != null) {
+                state = blocking;
+            }
+        }
+        renderBeaconPill(enabled, state);
+        renderBeaconStatus(config, enabled, state);
+        renderBeaconRules(config);
+        if (beaconUuidValue != null) {
+            beaconUuidValue.setText(config.beaconUuid().toString());
+        }
+    }
+
+    private void renderBeaconPill(boolean enabled, String state) {
+        if (!enabled) {
+            setPillState(beaconPill, "DISABLED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+            return;
+        }
+        if (BeaconStateStore.STATE_ADVERTISING.equals(state)) {
+            setPillState(beaconPill, "BROADCASTING", COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+            return;
+        }
+        if (BeaconStateStore.STATE_PAUSED.equals(state)) {
+            setPillState(beaconPill, "PAUSED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+            return;
+        }
+        setPillState(beaconPill, "ATTENTION", COLOR_DANGER_CONTAINER, COLOR_DANGER_ON_CONTAINER);
+    }
+
+    private void renderBeaconStatus(Config config, boolean enabled, String state) {
+        if (beaconStatusList == null) {
+            return;
+        }
+        beaconStatusList.removeAllViews();
+
+        boolean advertising = enabled && BeaconStateStore.STATE_ADVERTISING.equals(state);
+        boolean healthy = advertising || BeaconStateStore.STATE_PAUSED.equals(state);
+        String detail = enabled ? BeaconStateStore.detail(this) : "";
+        String stateText = BeaconStateStore.label(state);
+        if (!enabled) {
+            stateText = "Off";
+        } else if (!detail.isEmpty() && !advertising) {
+            stateText = stateText + " — " + detail;
+        }
+        addInfoRow(beaconStatusList, "State", stateText,
+                enabled ? (healthy ? COLOR_OK : COLOR_BAD) : COLOR_TEXT_DIM);
+
+        // Android hands out a rotating private address and won't tell an
+        // ordinary app what it is, so say so plainly instead of showing the
+        // placeholder the adapter returns.
+        String address = BeaconAdvertiser.localAddress(this);
+        addInfoRow(beaconStatusList, "Broadcast MAC",
+                address.isEmpty() ? "Randomised by Android" : address,
+                address.isEmpty() ? COLOR_TEXT_DIM : COLOR_TEXT);
+
+        int liveInterval = BeaconStateStore.intervalSeconds(this);
+        int requestedInterval = BeaconStateStore.requestedIntervalSeconds(this);
+        String frequency;
+        if (advertising) {
+            frequency = Config.beaconIntervalDisplay(liveInterval);
+            if (liveInterval != requestedInterval && requestedInterval > 0) {
+                frequency = frequency + " (asked for " + requestedInterval + "s)";
+            }
+        } else {
+            frequency = "Not broadcasting";
+        }
+        addInfoRow(beaconStatusList, "Frequency", frequency, advertising ? COLOR_TEXT : COLOR_TEXT_DIM);
+
+        Config.BeaconRule activeRule = enabled ? config.beaconRuleById(BeaconStateStore.ruleId(this)) : null;
+        addInfoRow(beaconStatusList, "Active rule",
+                activeRule == null ? "None" : activeRule.displayThreshold() + " → " + activeRule.displayInterval(),
+                activeRule == null ? COLOR_TEXT_DIM : COLOR_TEXT);
+
+        int battery = BeaconStateStore.batteryPercent(this);
+        if (battery < 0) {
+            battery = BatteryReader.batteryPercent(this);
+        }
+        addInfoRow(beaconStatusList, "Battery", battery < 0 ? "Unknown" : battery + "%", COLOR_TEXT);
+
+        addInfoRow(beaconStatusList, "Transmit power",
+                Config.beaconTxPowerDisplay(beaconTxPowerDbm), COLOR_TEXT);
+        addInfoRow(beaconStatusList, "Major / minor",
+                config.beaconMajor() + " / " + config.beaconMinor(), COLOR_TEXT);
+
+        if (advertising) {
+            long since = BeaconStateStore.advertisingSinceMillis(this);
+            if (since > 0L) {
+                addInfoRow(beaconStatusList, "Broadcasting for",
+                        formatDuration(System.currentTimeMillis() - since), COLOR_TEXT);
+            }
+            if (BeaconStateStore.legacyFallback(this)) {
+                addInfoRow(beaconStatusList, "Radio mode",
+                        "Legacy fallback — interval approximate", COLOR_BAD);
+            }
+        }
+    }
+
+    private void renderBeaconRules(Config config) {
+        if (beaconRuleList == null) {
+            return;
+        }
+        List<Config.BeaconRule> rules = config.beaconRules();
+        beaconRuleList.removeAllViews();
+        if (rules.isEmpty()) {
+            TextView empty = historyText("No rules — the beacon stays silent", 13, COLOR_TEXT_DIM, false);
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+            beaconRuleList.addView(empty, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+            return;
+        }
+
+        String activeRuleId = switchValue(beaconEnabledSwitch, config.beaconEnabled())
+                ? BeaconStateStore.ruleId(this)
+                : "";
+        for (int i = 0; i < rules.size(); i++) {
+            if (i > 0) {
+                View hairline = new View(this);
+                hairline.setBackgroundColor(COLOR_FIELD_BORDER);
+                beaconRuleList.addView(hairline, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+            }
+            addBeaconRuleRow(rules.get(i), rules.get(i).id.equals(activeRuleId));
+        }
+    }
+
+    private void addBeaconRuleRow(final Config.BeaconRule rule, boolean active) {
+        LinearLayout item = newColumn();
+        item.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+
+        LinearLayout top = newRow();
+        item.addView(top, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView threshold = historyText(rule.displayThreshold(), 16, COLOR_TEXT, true);
+        top.addView(threshold, inRow(top, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        if (active) {
+            TextView activePill = new TextView(this);
+            activePill.setText("ACTIVE");
+            activePill.setTextSize(10);
+            activePill.setTypeface(Typeface.DEFAULT_BOLD);
+            activePill.setLetterSpacing(0.12f);
+            activePill.setTextColor(COLOR_PRIMARY_ON_CONTAINER);
+            activePill.setBackground(roundedFill(COLOR_PRIMARY_CONTAINER, PILL_CORNER, 0, 0));
+            activePill.setPadding(dp(GAP), dp(6), dp(GAP), dp(6));
+            activePill.setIncludeFontPadding(false);
+            Ui.marqueeLabel(activePill);
+            top.addView(activePill, inRow(top,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+        }
+
+        Button delete = neutralButton("Delete", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                deleteBeaconRule(rule);
+            }
+        });
+        top.addView(delete, inRow(top, dp(96), dp(BUTTON_MIN_HEIGHT), 0f));
+
+        TextView detail = historyText(rule.displayInterval(), 12,
+                rule.broadcasts() ? COLOR_TEXT_DIM : COLOR_BAD, false);
+        detail.setLineSpacing(0, 1.2f);
+        item.addView(detail, topMarginParams(6));
+
+        beaconRuleList.addView(item, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private void addBeaconRule() {
+        try {
+            Config.BeaconRule rule = Config.get(this).addBeaconRule(
+                    text(beaconRuleBatteryField), text(beaconRuleIntervalField));
+            beaconRuleBatteryField.setText("");
+            beaconRuleIntervalField.setText("");
+            LogStore.append(this, "beacon", "Rule added " + rule.displayThreshold()
+                    + " → " + rule.displayInterval());
+            BeaconManager.refresh(this, "rule-added");
+            refreshStatusAndLog();
+            Toast.makeText(this, "Rule added", Toast.LENGTH_SHORT).show();
+        } catch (IllegalArgumentException e) {
+            Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void deleteBeaconRule(Config.BeaconRule rule) {
+        Config.get(this).removeBeaconRule(rule.id);
+        LogStore.append(this, "beacon", "Rule removed " + rule.displayThreshold());
+        BeaconManager.refresh(this, "rule-removed");
+        refreshStatusAndLog();
+    }
+
+    private void copyBeaconUuid() {
+        String uuid = Config.get(this).beaconUuid().toString();
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            Toast.makeText(this, "Clipboard unavailable", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("Beacon UUID", uuid));
+        Toast.makeText(this, "Beacon UUID copied", Toast.LENGTH_SHORT).show();
+    }
+
+    private void regenerateBeaconUuid() {
+        OpenVpnConfirmDialog.show(this, "Generate a new UUID?",
+                "Receivers matching the current UUID will stop seeing this phone until you update them.",
+                "Generate", true, new OpenVpnConfirmDialog.Listener() {
+                    @Override
+                    public void onConfirm() {
+                        String uuid = Config.get(MainActivity.this).regenerateBeaconUuid().toString();
+                        LogStore.append(MainActivity.this, "beacon", "Beacon UUID regenerated");
+                        BeaconManager.refresh(MainActivity.this, "uuid-regenerated");
+                        refreshStatusAndLog();
+                        Toast.makeText(MainActivity.this, "New UUID: " + uuid, Toast.LENGTH_LONG).show();
+                    }
+                });
+    }
+
+    private void openBluetoothSettings() {
+        openIntent(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
+    }
+
+    private void requestBluetoothAdvertise() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            Toast.makeText(this, "Bluetooth advertising needs no runtime permission on this Android version",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (PermissionState.hasBluetoothAdvertise(this)) {
+            Toast.makeText(this, "Bluetooth advertise already granted", Toast.LENGTH_SHORT).show();
+            refreshStatusAndLog();
+            return;
+        }
+        requestPermissions(new String[]{Manifest.permission.BLUETOOTH_ADVERTISE}, REQUEST_BLUETOOTH_ADVERTISE);
+    }
+
+    private static String formatDuration(long millis) {
+        long totalSeconds = Math.max(0L, millis / 1000L);
+        long hours = totalSeconds / 3600L;
+        long minutes = (totalSeconds % 3600L) / 60L;
+        long seconds = totalSeconds % 60L;
+        if (hours > 0L) {
+            return hours + "h " + minutes + "m";
+        }
+        if (minutes > 0L) {
+            return minutes + "m " + seconds + "s";
+        }
+        return seconds + "s";
+    }
+
+    // ============================================================
     //  Panel / card helpers
     // ============================================================
 
@@ -2167,8 +2621,10 @@ public final class MainActivity extends Activity {
         v.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
         v.setGravity(Gravity.CENTER);
         v.setWidth(dp(PILL_WIDTH));
-        v.setSingleLine(true);
         v.setIncludeFontPadding(false);
+        // The pill is a fixed width, so a long state word would otherwise be
+        // cut off mid-letter.
+        Ui.marqueeLabel(v);
         return v;
     }
 
@@ -2674,6 +3130,31 @@ public final class MainActivity extends Activity {
         root.addView(row, stack(root));
     }
 
+    /** Label/value row for read-only status cards, styled like {@link #addStatusRow}. */
+    private void addInfoRow(LinearLayout root, String label, String value, int valueColor) {
+        LinearLayout row = newRow();
+        row.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT));
+
+        TextView labelView = new TextView(this);
+        labelView.setText(label);
+        labelView.setTextColor(COLOR_LABEL);
+        labelView.setTextSize(13);
+        labelView.setIncludeFontPadding(false);
+        row.addView(labelView, inRow(row, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView valueView = new TextView(this);
+        valueView.setText(value);
+        valueView.setTextColor(valueColor);
+        valueView.setTextSize(13);
+        valueView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        valueView.setGravity(Gravity.END);
+        valueView.setIncludeFontPadding(false);
+        valueView.setLineSpacing(0, 1.15f);
+        row.addView(valueView, inRow(row, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
+
+        root.addView(row, stack(root));
+    }
+
     // ============================================================
     //  System bars & insets
     // ============================================================
@@ -2734,6 +3215,7 @@ public final class MainActivity extends Activity {
         setEnabledPill(batteryAlertPill, switchValue(batteryAlertEnabledSwitch, config.batteryAlertEnabled()));
         refreshVolumeControlPanel();
         refreshOpenVpnPanel();
+        refreshBeaconPanel();
         setEnabledPill(rebootPill, switchValue(rebootAutomationEnabledSwitch, config.rebootAutomationEnabled()));
         setRemoteLinkPill(RemoteLinkStateStore.isConnected(this));
         refreshNotificationBackupStatus();
@@ -2759,6 +3241,9 @@ public final class MainActivity extends Activity {
         boolean dndAccess = !dndRuleConfigured || PermissionState.notificationPolicyAccessGranted(this);
         boolean vpnProfileConfigured = OpenVpnProfileStore.hasProfile(this);
         boolean vpnConsent = !vpnProfileConfigured || PermissionState.vpnConsentGranted(this);
+        boolean beaconEnabled = switchValue(beaconEnabledSwitch, config.beaconEnabled());
+        boolean bluetoothAdvertise = !beaconEnabled || PermissionState.hasBluetoothAdvertise(this);
+        boolean bluetoothOn = !beaconEnabled || BeaconAdvertiser.isBluetoothOn(this);
         boolean hiddenWifiMonitorNeedsAccessibility = tracking
                 && switchValue(postOnWifiChangeSwitch, config.postOnWifiChange())
                 && !switchValue(showWifiMonitorNotificationSwitch, config.showWifiMonitorNotification())
@@ -2777,7 +3262,9 @@ public final class MainActivity extends Activity {
                 && notificationAccess
                 && accessibility
                 && dndAccess
-                && vpnConsent;
+                && vpnConsent
+                && bluetoothAdvertise
+                && bluetoothOn;
         setPillState(
                 permissionsPill,
                 allPermissionsOk ? "ALL OK" : "ATTENTION",
@@ -2799,6 +3286,10 @@ public final class MainActivity extends Activity {
         }
         if (vpnProfileConfigured) {
             addStatusRow(statusContainer, "VPN consent", vpnConsent);
+        }
+        if (beaconEnabled) {
+            addStatusRow(statusContainer, "Bluetooth advertise", bluetoothAdvertise);
+            addStatusRow(statusContainer, "Bluetooth on", bluetoothOn);
         }
         if (hiddenWifiMonitorNeedsAccessibility) {
             addStatusRow(statusContainer, "Hidden Wi-Fi monitor", false);
@@ -3021,9 +3512,16 @@ public final class MainActivity extends Activity {
         if (target == null) {
             return;
         }
+        CharSequence previous = target.getText();
+        boolean textChanged = previous == null || !text.contentEquals(previous);
         target.setText(text);
         target.setTextColor(fg);
         target.setBackground(roundedFill(bg, PILL_CORNER, 0, 0));
+        if (textChanged) {
+            // A state word that is longer than the last one has to be given a
+            // fresh chance to scroll rather than sitting there clipped.
+            Ui.rearmMarquee(target);
+        }
     }
 
     private boolean switchValue(Switch sw, boolean fallback) {
@@ -3103,6 +3601,13 @@ public final class MainActivity extends Activity {
             vpnTapNetmaskField.setText(config.vpnTapNetmask());
             vpnTapGatewayField.setText(config.vpnTapGateway());
             vpnRemoteCommandEnabledSwitch.setChecked(config.vpnRemoteCommandEnabled());
+            beaconEnabledSwitch.setChecked(config.beaconEnabled());
+            beaconUuidValue.setText(config.beaconUuid().toString());
+            beaconMajorField.setText(Integer.toString(config.beaconMajor()));
+            beaconMinorField.setText(Integer.toString(config.beaconMinor()));
+            beaconMeasuredPowerField.setText(Integer.toString(config.beaconMeasuredPower()));
+            beaconTxPowerDbm = config.beaconTxPowerDbm();
+            updateBeaconTxPowerButtons();
             useExactAlarmsSwitch.setChecked(config.useExactAlarms());
             allowIdleAlarmsSwitch.setChecked(config.allowIdleAlarms());
             postOnStartupSwitch.setChecked(config.postOnStartup());
@@ -3154,6 +3659,19 @@ public final class MainActivity extends Activity {
         bindSaveRemoteLinkConfig(remoteLinkShowNotificationSwitch);
 
         bindSaveVpnConfig(vpnRemoteCommandEnabledSwitch);
+
+        beaconEnabledSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (loadingConfig) {
+                    return;
+                }
+                saveBeaconConfigOnly();
+                if (isChecked && !PermissionState.hasBluetoothAdvertise(MainActivity.this)) {
+                    requestBluetoothAdvertise();
+                }
+            }
+        });
 
         bindSaveNotificationBackupConfig(notificationBackupEnabledSwitch);
         bindSaveNotificationBackupConfig(notificationBackupIncludeSysmgrSwitch);
@@ -3979,6 +4497,9 @@ public final class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         LogStore.append(this, "ui", "Permission result request=" + requestCode);
+        if (requestCode == REQUEST_BLUETOOTH_ADVERTISE && PermissionState.hasBluetoothAdvertise(this)) {
+            BeaconManager.sync(this, "advertise-permission-granted");
+        }
         refreshStatusAndLog();
     }
 
@@ -4054,6 +4575,18 @@ public final class MainActivity extends Activity {
                     vpnDisconnect();
                 } else if ("save_vpn".equals(command)) {
                     saveVpnSettings();
+                } else if ("save_beacon".equals(command)) {
+                    saveBeaconSettings();
+                } else if ("add_beacon_rule".equals(command)) {
+                    addBeaconRule();
+                } else if ("beacon_copy_uuid".equals(command)) {
+                    copyBeaconUuid();
+                } else if ("beacon_new_uuid".equals(command)) {
+                    regenerateBeaconUuid();
+                } else if ("bluetooth_settings".equals(command)) {
+                    openBluetoothSettings();
+                } else if ("bluetooth_permission".equals(command)) {
+                    requestBluetoothAdvertise();
                 } else if ("notifications".equals(command)) {
                     requestNotificationPermission();
                 } else if ("refresh_notification_history".equals(command)) {

@@ -38,6 +38,18 @@ final class PermissionState {
         return context.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED;
     }
 
+    /**
+     * BLUETOOTH_ADVERTISE became a runtime permission in Android 12; below that
+     * the install-time BLUETOOTH_ADMIN grant covers advertising. Note it is not
+     * a location permission — advertising, unlike scanning, needs none.
+     */
+    static boolean hasBluetoothAdvertise(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return true;
+        }
+        return context.checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED;
+    }
+
     /** True when the app already holds VpnService consent (prepare returns null). */
     static boolean vpnConsentGranted(Context context) {
         try {

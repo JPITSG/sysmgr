@@ -6,6 +6,7 @@ import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.View;
@@ -83,6 +84,42 @@ final class Ui {
     static LinearLayout.LayoutParams matchWrap() {
         return new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    /**
+     * Lets a pill's label scroll inside its bubble instead of being clipped
+     * when the text is wider than the pill. Marquee only animates when the text
+     * genuinely overflows, so short labels are left alone.
+     */
+    static void marqueeLabel(TextView view) {
+        view.setSingleLine(true);
+        view.setEllipsize(TextUtils.TruncateAt.MARQUEE);
+        view.setMarqueeRepeatLimit(-1);
+        view.setHorizontallyScrolling(true);
+        view.setHorizontalFadingEdgeEnabled(true);
+        view.setFadingEdgeLength(dp(view.getContext(), 8));
+        // Marquee only runs on a focused or selected view. Selecting it starts
+        // the scroll without stealing focus from real inputs; the platform
+        // kicks it off once the view has been laid out and the window is
+        // focused.
+        view.setSelected(true);
+    }
+
+    /**
+     * Restarts a {@link #marqueeLabel} view's scroll after its text changed.
+     * Selection has to actually transition for the platform to re-evaluate the
+     * marquee, and the check needs the new text's layout, so the re-select is
+     * posted. Call only on a real text change — re-arming every refresh would
+     * yank a scrolling label back to the start.
+     */
+    static void rearmMarquee(final TextView view) {
+        view.setSelected(false);
+        view.post(new Runnable() {
+            @Override
+            public void run() {
+                view.setSelected(true);
+            }
+        });
     }
 
     // ---- Buttons (identical to the main screen's style) --------------------

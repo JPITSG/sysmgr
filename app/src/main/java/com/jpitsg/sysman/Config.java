@@ -109,6 +109,16 @@ final class Config {
     private static final String KEY_VPN_TAP_NETMASK = "vpn_tap_netmask";
     private static final String KEY_VPN_TAP_GATEWAY = "vpn_tap_gateway";
     private static final String KEY_VPN_REMOTE_COMMAND_ENABLED = "vpn_remote_command_enabled";
+    private static final String KEY_BEACON_ENABLED = "beacon_enabled";
+    private static final String KEY_BEACON_UUID = "beacon_uuid";
+    private static final String KEY_BEACON_MAJOR = "beacon_major";
+    private static final String KEY_BEACON_MINOR = "beacon_minor";
+    private static final String KEY_BEACON_MEASURED_POWER = "beacon_measured_power";
+    private static final String KEY_BEACON_TX_POWER_DBM = "beacon_tx_power_dbm";
+    private static final String KEY_BEACON_RULES = "beacon_rules";
+    private static final String KEY_BEACON_RULES_SEEDED = "beacon_rules_seeded";
+
+    private static final Object BEACON_UUID_LOCK = new Object();
 
     private final SharedPreferences prefs;
 
@@ -116,6 +126,46 @@ final class Config {
     static final int DND_UNCHANGED = 0;
     static final int DND_ENABLE = 1;
     static final int DND_DISABLE = 2;
+
+    /** A beacon rule interval of 0 means "matched, but stay silent". */
+    static final int BEACON_INTERVAL_OFF = 0;
+    static final int BEACON_TX_POWER_ULTRA_LOW = -21;
+    static final int BEACON_TX_POWER_LOW = -15;
+    static final int BEACON_TX_POWER_MEDIUM = -7;
+    static final int BEACON_TX_POWER_HIGH = 1;
+
+    /**
+     * "At or above this battery level, broadcast every N seconds." Rules are
+     * held sorted by threshold descending; the first one the current battery
+     * level reaches wins, so overlapping rules resolve to the most specific.
+     */
+    static final class BeaconRule {
+        final String id;
+        final int minBatteryPercent;
+        final int intervalSeconds;
+
+        BeaconRule(String id, int minBatteryPercent, int intervalSeconds) {
+            this.id = id;
+            this.minBatteryPercent = minBatteryPercent;
+            this.intervalSeconds = intervalSeconds;
+        }
+
+        boolean matches(int batteryPercent) {
+            return batteryPercent >= minBatteryPercent;
+        }
+
+        boolean broadcasts() {
+            return intervalSeconds > BEACON_INTERVAL_OFF;
+        }
+
+        String displayThreshold() {
+            return "Battery ≥ " + minBatteryPercent + "%";
+        }
+
+        String displayInterval() {
+            return beaconIntervalDisplay(intervalSeconds);
+        }
+    }
 
     static final class VolumeRule {
         final String id;
@@ -602,6 +652,249 @@ final class Config {
 
     boolean vpnRemoteCommandEnabled() {
         return prefs.getBoolean(KEY_VPN_REMOTE_COMMAND_ENABLED, false);
+    }
+
+    // ---- BLE beacon ---------------------------------------------------------
+
+    boolean beaconEnabled() {
+        return prefs.getBoolean(KEY_BEACON_ENABLED, false);
+    }
+
+    void setBeaconEnabled(boolean enabled) {
+        prefs.edit().putBoolean(KEY_BEACON_ENABLED, enabled).apply();
+    }
+
+    /**
+     * The proximity UUID receivers match on. Generated once per install and
+     * kept stable: Android rotates the on-air Bluetooth address, so this is the
+     * only durable identity the beacon has.
+     */
+    UUID beaconUuid() {
+        synchronized (BEACON_UUID_LOCK) {
+            String existing = clean(prefs.getString(KEY_BEACON_UUID, ""), "");
+            if (isUuid(existing)) {
+                return UUID.fromString(existing);
+            }
+            UUID generated = UUID.randomUUID();
+            prefs.edit().putString(KEY_BEACON_UUID, generated.toString()).commit();
+            return generated;
+        }
+    }
+
+    UUID regenerateBeaconUuid() {
+        synchronized (BEACON_UUID_LOCK) {
+            UUID generated = UUID.randomUUID();
+            prefs.edit().putString(KEY_BEACON_UUID, generated.toString()).commit();
+            return generated;
+        }
+    }
+
+    int beaconMajor() {
+        return intValue(KEY_BEACON_MAJOR, 1, 0, 65535);
+    }
+
+    int beaconMinor() {
+        return intValue(KEY_BEACON_MINOR, 1, 0, 65535);
+    }
+
+    /** Calibration byte: the RSSI a receiver should see at 1 m. */
+    int beaconMeasuredPower() {
+        return intValue(KEY_BEACON_MEASURED_POWER, -59, -127, 0);
+    }
+
+    int beaconTxPowerDbm() {
+        return intValue(KEY_BEACON_TX_POWER_DBM, BEACON_TX_POWER_HIGH, -127, 1);
+    }
+
+    List<BeaconRule> beaconRules() {
+        List<BeaconRule> rules = new ArrayList<>();
+        String raw = prefs.getString(KEY_BEACON_RULES, null);
+        if (raw == null) {
+            if (prefs.getBoolean(KEY_BEACON_RULES_SEEDED, false)) {
+                return rules;
+            }
+            return seedBeaconRules();
+        }
+        if (raw.trim().isEmpty()) {
+            return rules;
+        }
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject object = array.optJSONObject(i);
+                if (object == null) {
+                    continue;
+                }
+                String id = clean(object.optString("id", ""), "");
+                if (id.isEmpty()) {
+                    id = "beacon-rule-" + i;
+                }
+                rules.add(new BeaconRule(
+                        id,
+                        clamp(object.optInt("min_battery", 0), 0, 100),
+                        clampBeaconInterval(object.optInt("interval", BEACON_INTERVAL_OFF))));
+            }
+        } catch (Exception ignored) {
+            return new ArrayList<>();
+        }
+        sortBeaconRules(rules);
+        return rules;
+    }
+
+    /** The rule that governs this battery level, or null when none reaches it. */
+    BeaconRule beaconRuleFor(int batteryPercent) {
+        if (batteryPercent < 0) {
+            return null;
+        }
+        for (BeaconRule rule : beaconRules()) {
+            if (rule.matches(batteryPercent)) {
+                return rule;
+            }
+        }
+        return null;
+    }
+
+    BeaconRule beaconRuleById(String id) {
+        String cleanId = id == null ? "" : id.trim();
+        if (cleanId.isEmpty()) {
+            return null;
+        }
+        for (BeaconRule rule : beaconRules()) {
+            if (cleanId.equals(rule.id)) {
+                return rule;
+            }
+        }
+        return null;
+    }
+
+    BeaconRule addBeaconRule(String minBatteryPercent, String intervalSeconds) {
+        int threshold = parseRequiredInt(minBatteryPercent, 0, 100,
+                "Use a battery threshold between 0 and 100");
+        int interval = parseRequiredInt(intervalSeconds, 0, 3600,
+                "Use an interval between 0 and 3600 seconds (0 = don't broadcast)");
+        List<BeaconRule> rules = beaconRules();
+        for (BeaconRule existing : rules) {
+            if (existing.minBatteryPercent == threshold) {
+                throw new IllegalArgumentException("A rule for " + threshold + "% already exists");
+            }
+        }
+        BeaconRule rule = new BeaconRule(UUID.randomUUID().toString(), threshold, interval);
+        rules.add(rule);
+        saveBeaconRules(rules);
+        return rule;
+    }
+
+    void removeBeaconRule(String id) {
+        String cleanId = id == null ? "" : id.trim();
+        if (cleanId.isEmpty()) {
+            return;
+        }
+        List<BeaconRule> kept = new ArrayList<>();
+        for (BeaconRule rule : beaconRules()) {
+            if (!cleanId.equals(rule.id)) {
+                kept.add(rule);
+            }
+        }
+        saveBeaconRules(kept);
+    }
+
+    void saveBeaconConfig(
+            boolean enabled,
+            String major,
+            String minor,
+            String measuredPower,
+            int txPowerDbm) {
+        prefs.edit()
+                .putBoolean(KEY_BEACON_ENABLED, enabled)
+                .putInt(KEY_BEACON_MAJOR, parseInt(major, 1, 0, 65535))
+                .putInt(KEY_BEACON_MINOR, parseInt(minor, 1, 0, 65535))
+                .putInt(KEY_BEACON_MEASURED_POWER, parseInt(measuredPower, -59, -127, 0))
+                .putInt(KEY_BEACON_TX_POWER_DBM, clamp(txPowerDbm, -127, 1))
+                .apply();
+    }
+
+    /**
+     * First run gets the worked example from the feature's design: full-rate
+     * above 66%, half-rate above 33%, silent below that. The seeded flag means
+     * deleting every rule leaves the list empty instead of resurrecting them.
+     */
+    private List<BeaconRule> seedBeaconRules() {
+        List<BeaconRule> rules = new ArrayList<>();
+        rules.add(new BeaconRule(UUID.randomUUID().toString(), 66, 10));
+        rules.add(new BeaconRule(UUID.randomUUID().toString(), 33, 30));
+        rules.add(new BeaconRule(UUID.randomUUID().toString(), 0, BEACON_INTERVAL_OFF));
+        saveBeaconRules(rules);
+        return rules;
+    }
+
+    private void saveBeaconRules(List<BeaconRule> rules) {
+        sortBeaconRules(rules);
+        JSONArray array = new JSONArray();
+        for (BeaconRule rule : rules) {
+            JSONObject object = new JSONObject();
+            try {
+                object.put("id", rule.id);
+                object.put("min_battery", rule.minBatteryPercent);
+                object.put("interval", rule.intervalSeconds);
+                array.put(object);
+            } catch (Exception ignored) {
+            }
+        }
+        prefs.edit()
+                .putString(KEY_BEACON_RULES, array.toString())
+                .putBoolean(KEY_BEACON_RULES_SEEDED, true)
+                .apply();
+    }
+
+    static String beaconIntervalDisplay(int intervalSeconds) {
+        if (intervalSeconds <= BEACON_INTERVAL_OFF) {
+            return "Don't broadcast";
+        }
+        if (intervalSeconds == 1) {
+            return "Every second";
+        }
+        if (intervalSeconds % 60 == 0 && intervalSeconds >= 120) {
+            return "Every " + (intervalSeconds / 60) + " minutes";
+        }
+        return "Every " + intervalSeconds + "s";
+    }
+
+    static String beaconTxPowerDisplay(int dbm) {
+        if (dbm <= BEACON_TX_POWER_ULTRA_LOW) {
+            return "Ultra low (" + dbm + " dBm)";
+        }
+        if (dbm <= BEACON_TX_POWER_LOW) {
+            return "Low (" + dbm + " dBm)";
+        }
+        if (dbm <= BEACON_TX_POWER_MEDIUM) {
+            return "Medium (" + dbm + " dBm)";
+        }
+        return "High (+" + dbm + " dBm)";
+    }
+
+    private static int clampBeaconInterval(int seconds) {
+        return clamp(seconds, 0, 3600);
+    }
+
+    private static void sortBeaconRules(List<BeaconRule> rules) {
+        Collections.sort(rules, new Comparator<BeaconRule>() {
+            @Override
+            public int compare(BeaconRule left, BeaconRule right) {
+                return right.minBatteryPercent - left.minBatteryPercent;
+            }
+        });
+    }
+
+    private static int parseRequiredInt(String value, int min, int max, String message) {
+        try {
+            int parsed = Integer.parseInt(value == null ? "" : value.trim());
+            if (parsed < min || parsed > max) {
+                throw new IllegalArgumentException(message);
+            }
+            return parsed;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(message);
+        }
     }
 
     long settingsLastExportMillis() {

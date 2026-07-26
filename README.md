@@ -63,6 +63,15 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
   and trigger a reboot (gesture + optional PIN), locally or remotely.
 - **Scheduled volume / DND rules** — set media/ring/notification/alarm volumes
   and Do-Not-Disturb at chosen times.
+- **BLE beacon** — broadcasts the phone as a standard iBeacon so your own BLE
+  receivers can locate it by RSSI. The transmit rate is driven by **battery
+  rules** you define ("at or above 66%, broadcast every 10s; at or above 33%,
+  every 30s; otherwise stay silent"); the highest matching threshold wins, and
+  the rate re-evaluates as the battery moves. Timing is handled by the
+  Bluetooth controller, so it survives Doze without a wake lock. The panel
+  shows live state, frequency, active rule, battery, transmit power and
+  identity. Note that Android randomises the on-air Bluetooth address — match
+  your receivers on the **proximity UUID**, not on a MAC.
 - **Battery alerts** and **Wi-Fi change monitoring**.
 - **Settings backup/restore** to an XML file (no secrets/keys are exported).
 
