@@ -379,6 +379,16 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        // Coming back to the app always starts from the same place: every panel
+        // shut and the page at the top. onStart rather than onResume so a
+        // permission dialog, which only pauses the activity, leaves the screen
+        // as the user left it.
+        collapseAllPanels();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         registerRemoteLinkStateReceiver();
@@ -1038,16 +1048,6 @@ public final class MainActivity extends Activity {
         remoteLinkShowNotificationSwitch = addGroupedToggle(serviceNotifications, "Remote Link");
         vpnNotificationSwitch = addGroupedToggle(serviceNotifications, "VPN");
         beaconNotificationSwitch = addGroupedToggle(serviceNotifications, "Beacon");
-
-        frame.content.addView(historyText(
-                "A foreground service must hand Android a notification, so one is always"
-                        + " created. Turning a row off posts it on a channel the system never"
-                        + " displays, keeping it out of the shade and the status bar while the"
-                        + " service keeps running; Android may still count the app in its own"
-                        + " background-activity notice. The Wi-Fi monitor is the exception —"
-                        + " with it off the monitor moves into the Accessibility service and no"
-                        + " notification exists at all.",
-                12, COLOR_TEXT_DIM, false), stack(frame.content));
 
         wifiMonitorWarning = historyText("", 12, COLOR_BAD, false);
         wifiMonitorWarning.setVisibility(View.GONE);
@@ -2595,6 +2595,36 @@ public final class MainActivity extends Activity {
         Panel panel = new Panel(content, panelPill, indicator);
         panels.add(panel);
         return panel;
+    }
+
+    /**
+     * Shuts every panel and returns the page to the top, without animating —
+     * this runs while the window is off screen, so there is nothing to watch.
+     */
+    private void collapseAllPanels() {
+        for (Panel panel : panels) {
+            panel.content.animate().cancel();
+            panel.content.setVisibility(View.GONE);
+            ViewGroup.LayoutParams lp = panel.content.getLayoutParams();
+            if (lp != null) {
+                lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                panel.content.setLayoutParams(lp);
+            }
+            panel.indicator.animate().cancel();
+            panel.indicator.setRotation(-90f);
+        }
+        final ScrollView scrollView = contentScrollView;
+        if (scrollView != null) {
+            scrollView.scrollTo(0, 0);
+            // The collapse changes the content height, so the position has to
+            // be reasserted once the new layout has been through a pass.
+            scrollView.post(new Runnable() {
+                @Override
+                public void run() {
+                    scrollView.scrollTo(0, 0);
+                }
+            });
+        }
     }
 
     private void animatePanel(final View content, boolean expand) {
