@@ -1,7 +1,6 @@
 package com.jpitsg.sysman;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
@@ -57,6 +56,8 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
     private volatile Network sessionNetwork;
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
+    /** Re-resolved before every foreground start, so the toggle applies at once. */
+    private String channelId = CHANNEL_ID;
 
     static boolean isActive() {
         return activeService != null;
@@ -529,6 +530,7 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
 
     private void startForegroundVpn(String state) {
         OpenVpnStateStore.setState(this, state, "");
+        ensureNotificationChannel();
         Notification notification = buildNotification();
         // The specialUse FGS type (and its manifest value) exist from API 34;
         // on older releases the 2-arg overload is the safe path.
@@ -537,6 +539,20 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
+    }
+
+    /**
+     * Moves a live session's notification to the channel the user just chose.
+     * A tunnel is not worth tearing down for a cosmetic setting, so this
+     * re-posts in place; when nothing is connected there is nothing to move.
+     */
+    static void refreshNotification(Context context) {
+        OpenVpnService service = activeService;
+        if (service == null) {
+            return;
+        }
+        service.ensureNotificationChannel();
+        service.updateNotification(false);
     }
 
     private void updateNotification(boolean throttled) {
@@ -562,7 +578,7 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
         }
         Intent disconnect = new Intent(this, OpenVpnService.class).setAction(ACTION_DISCONNECT);
         PendingIntent disconnectIntent = PendingIntent.getService(this, 0, disconnect, pendingIntentFlags());
-        return new Notification.Builder(this, CHANNEL_ID)
+        Notification.Builder builder = new Notification.Builder(this, channelId)
                 .setSmallIcon(R.drawable.ic_stat_system_manager)
                 .setContentTitle("System Manager VPN")
                 .setContentText(text.toString())
@@ -572,8 +588,10 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
                 .setShowWhen(false)
                 .setContentIntent(PendingIntent.getActivity(this, 0,
                         new Intent(this, MainActivity.class), pendingIntentFlags()))
-                .addAction(R.drawable.ic_stat_system_manager, "Disconnect", disconnectIntent)
-                .build();
+                .addAction(R.drawable.ic_stat_system_manager, "Disconnect", disconnectIntent);
+        ServiceNotifications.applyBehavior(builder,
+                ServiceNotifications.shown(this, ServiceNotifications.VPN));
+        return builder.build();
     }
 
     private void stopForegroundCompat() {
@@ -588,19 +606,13 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
     }
 
     private void ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
-        }
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager == null) {
-            return;
-        }
-        NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID, "VPN", NotificationManager.IMPORTANCE_LOW);
-        channel.setDescription("Shows the embedded OpenVPN connection state.");
-        channel.setShowBadge(false);
-        channel.setSound(null, null);
-        manager.createNotificationChannel(channel);
+        channelId = ServiceNotifications.channel(
+                this,
+                CHANNEL_ID,
+                "VPN",
+                "Shows the embedded OpenVPN connection state.",
+                NotificationManager.IMPORTANCE_LOW,
+                ServiceNotifications.shown(this, ServiceNotifications.VPN));
     }
 
     private int pendingIntentFlags() {

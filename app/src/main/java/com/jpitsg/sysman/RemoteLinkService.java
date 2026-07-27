@@ -1,7 +1,6 @@
 package com.jpitsg.sysman;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
@@ -61,6 +60,8 @@ public final class RemoteLinkService extends Service {
     private Thread worker;
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
+    /** Re-resolved before every foreground start, so the toggle applies at once. */
+    private String channelId = CHANNEL_ID;
 
     @Override
     public void onCreate() {
@@ -86,17 +87,17 @@ public final class RemoteLinkService extends Service {
             return START_NOT_STICKY;
         }
 
-        if (config.remoteLinkShowNotification()) {
-            try {
-                startForegroundRemoteLink();
-            } catch (RuntimeException e) {
-                LogStore.append(this, "remote", "Remote Link foreground start failed: "
-                        + e.getClass().getSimpleName() + ": " + e.getMessage());
-                stopSelf(startId);
-                return START_NOT_STICKY;
-            }
-        } else {
-            removeForegroundNotification();
+        // Always foreground, whether or not the notification is on show: the
+        // link is a long-lived socket, and a background service would be
+        // reclaimed. Hiding is done by the channel, not by giving up the
+        // foreground status.
+        try {
+            startForegroundRemoteLink();
+        } catch (RuntimeException e) {
+            LogStore.append(this, "remote", "Remote Link foreground start failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            stopSelf(startId);
+            return START_NOT_STICKY;
         }
         if (RemoteLinkManager.ACTION_RESTART.equals(action)) {
             LogStore.append(this, "remote", "Remote Link reconnect requested reason=" + reason);
@@ -755,7 +756,9 @@ public final class RemoteLinkService extends Service {
     }
 
     private void startForegroundRemoteLink() {
-        Notification notification = new Notification.Builder(this, CHANNEL_ID)
+        boolean shown = ServiceNotifications.shown(this, ServiceNotifications.REMOTE_LINK);
+        ensureNotificationChannel();
+        Notification.Builder builder = new Notification.Builder(this, channelId)
                 .setSmallIcon(R.drawable.ic_stat_system_manager)
                 .setContentTitle("System Manager")
                 .setContentText("Remote Link active")
@@ -763,9 +766,9 @@ public final class RemoteLinkService extends Service {
                 .setOngoing(true)
                 .setShowWhen(false)
                 .setOnlyAlertOnce(true)
-                .setLocalOnly(true)
-                .setPriority(Notification.PRIORITY_MIN)
-                .build();
+                .setLocalOnly(true);
+        ServiceNotifications.applyBehavior(builder, shown);
+        Notification notification = builder.build();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
         } else {
@@ -787,20 +790,12 @@ public final class RemoteLinkService extends Service {
     }
 
     private void ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
-        }
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager == null) {
-            return;
-        }
-        NotificationChannel channel = new NotificationChannel(
+        channelId = ServiceNotifications.channel(
+                this,
                 CHANNEL_ID,
                 "Remote Link",
-                NotificationManager.IMPORTANCE_MIN);
-        channel.setDescription("Keeps the System Manager Remote Link connected.");
-        channel.setShowBadge(false);
-        channel.setSound(null, null);
-        manager.createNotificationChannel(channel);
+                "Keeps the System Manager Remote Link connected.",
+                NotificationManager.IMPORTANCE_MIN,
+                ServiceNotifications.shown(this, ServiceNotifications.REMOTE_LINK));
     }
 }

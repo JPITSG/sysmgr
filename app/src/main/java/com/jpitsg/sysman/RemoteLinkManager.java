@@ -2,7 +2,6 @@ package com.jpitsg.sysman;
 
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
 
 final class RemoteLinkManager {
     static final String ACTION_SYNC = "com.jpitsg.sysman.action.REMOTE_LINK_SYNC";
@@ -74,11 +73,11 @@ final class RemoteLinkManager {
         intent.setAction(action);
         intent.putExtra(EXTRA_REASON, reason == null ? "unknown" : reason);
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Config.get(context).remoteLinkShowNotification()) {
-                context.startForegroundService(intent);
-            } else {
-                context.startService(intent);
-            }
+            // Always a foreground start, even when the notification is hidden:
+            // startService() from a background caller (boot, an alarm, a
+            // settings change) throws on API 26+, and the socket needs to
+            // outlive the app being backgrounded either way.
+            context.startForegroundService(intent);
         } catch (RuntimeException e) {
             LogStore.append(context, "remote", "Remote Link start failed: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());

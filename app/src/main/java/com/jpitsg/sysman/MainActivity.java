@@ -276,6 +276,9 @@ public final class MainActivity extends Activity {
     private Switch remoteLinkEnabledSwitch;
     private Switch remoteLinkAcceptAnySslCertSwitch;
     private Switch remoteLinkShowNotificationSwitch;
+    private Switch taskServiceNotificationSwitch;
+    private Switch vpnNotificationSwitch;
+    private Switch beaconNotificationSwitch;
     private Switch beaconEnabledSwitch;
     private Switch logEnabledSwitch;
     private Switch clearNotificationsOnOpenSwitch;
@@ -634,7 +637,8 @@ public final class MainActivity extends Activity {
         allowIdleAlarmsSwitch = addGroupedToggle(group, "Allow GPS, volume, and reboot alarms while idle");
         postOnStartupSwitch = addGroupedToggle(group, "Send once after boot");
         postOnWifiChangeSwitch = addGroupedToggle(group, "Send when Wi-Fi changes");
-        showWifiMonitorNotificationSwitch = addGroupedToggle(group, "Show Wi-Fi monitor notification");
+        // The Wi-Fi monitor's own notification toggle lives with the other
+        // service notifications, under Permissions.
     }
 
     private void buildHighPriorityPanel(LinearLayout root) {
@@ -955,7 +959,8 @@ public final class MainActivity extends Activity {
         LinearLayout enableGroup = addToggleGroup(frame.content);
         remoteLinkEnabledSwitch = addGroupedToggle(enableGroup, "Enable Remote Link");
         remoteLinkAcceptAnySslCertSwitch = addGroupedToggle(enableGroup, "Accept any SSL cert");
-        remoteLinkShowNotificationSwitch = addGroupedToggle(enableGroup, "Show Remote Link notification");
+        // The Remote Link's own notification toggle lives with the other
+        // service notifications, under Permissions.
 
         addSubsectionLabel(frame.content, "Connection");
         remoteLinkEndpointField = addField(frame.content, "Remote Link endpoint", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
@@ -1025,6 +1030,28 @@ public final class MainActivity extends Activity {
         frame.content.addView(r6, stack(frame.content));
         addRowButton(r6, tonalButton("Bluetooth Advertise", action("bluetooth_permission")));
         addRowButton(r6, tonalButton("Bluetooth Settings", action("bluetooth_settings")));
+
+        addSubsectionLabel(frame.content, "Service Notifications");
+        LinearLayout serviceNotifications = addToggleGroup(frame.content);
+        taskServiceNotificationSwitch = addGroupedToggle(serviceNotifications, "Task runner");
+        showWifiMonitorNotificationSwitch = addGroupedToggle(serviceNotifications, "Wi-Fi monitor");
+        remoteLinkShowNotificationSwitch = addGroupedToggle(serviceNotifications, "Remote Link");
+        vpnNotificationSwitch = addGroupedToggle(serviceNotifications, "VPN");
+        beaconNotificationSwitch = addGroupedToggle(serviceNotifications, "Beacon");
+
+        frame.content.addView(historyText(
+                "A foreground service must hand Android a notification, so one is always"
+                        + " created. Turning a row off posts it on a channel the system never"
+                        + " displays, keeping it out of the shade and the status bar while the"
+                        + " service keeps running; Android may still count the app in its own"
+                        + " background-activity notice. The Wi-Fi monitor is the exception —"
+                        + " with it off the monitor moves into the Accessibility service and no"
+                        + " notification exists at all.",
+                12, COLOR_TEXT_DIM, false), stack(frame.content));
+
+        wifiMonitorWarning = historyText("", 12, COLOR_BAD, false);
+        wifiMonitorWarning.setVisibility(View.GONE);
+        frame.content.addView(wifiMonitorWarning, stack(frame.content));
     }
 
     private void buildLogPanel(LinearLayout root) {
@@ -3613,6 +3640,9 @@ public final class MainActivity extends Activity {
             postOnStartupSwitch.setChecked(config.postOnStartup());
             postOnWifiChangeSwitch.setChecked(config.postOnWifiChange());
             showWifiMonitorNotificationSwitch.setChecked(config.showWifiMonitorNotification());
+            taskServiceNotificationSwitch.setChecked(config.taskServiceNotificationEnabled());
+            vpnNotificationSwitch.setChecked(config.vpnNotificationEnabled());
+            beaconNotificationSwitch.setChecked(config.beaconNotificationEnabled());
             useGpsProviderSwitch.setChecked(config.useGpsProvider());
             useNetworkProviderSwitch.setChecked(config.useNetworkProvider());
             requestGpsOnSsidMismatchSwitch.setChecked(config.requestGpsOnSsidMismatch());
@@ -3631,6 +3661,9 @@ public final class MainActivity extends Activity {
         bindSaveGpsConfig(postOnStartupSwitch);
         bindSaveGpsConfig(postOnWifiChangeSwitch);
         bindSaveGpsConfig(showWifiMonitorNotificationSwitch);
+        bindSaveServiceNotificationConfig(taskServiceNotificationSwitch);
+        bindSaveServiceNotificationConfig(vpnNotificationSwitch);
+        bindSaveServiceNotificationConfig(beaconNotificationSwitch);
         bindSaveGpsConfig(useGpsProviderSwitch);
         bindSaveGpsConfig(useNetworkProviderSwitch);
         bindSaveGpsConfig(requestGpsOnSsidMismatchSwitch);
@@ -3709,6 +3742,37 @@ public final class MainActivity extends Activity {
                 saveGpsConfigOnly();
             }
         });
+    }
+
+    private void bindSaveServiceNotificationConfig(Switch sw) {
+        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (loadingConfig) {
+                    return;
+                }
+                saveServiceNotificationConfigOnly();
+            }
+        });
+    }
+
+    /**
+     * Saves the visibility choices and nudges each running service so it
+     * re-posts on the right channel straight away. The task runner is
+     * short-lived enough to pick the change up on its next run.
+     */
+    private void saveServiceNotificationConfigOnly() {
+        Config.get(this).saveServiceNotificationConfig(
+                taskServiceNotificationSwitch.isChecked(),
+                vpnNotificationSwitch.isChecked(),
+                beaconNotificationSwitch.isChecked());
+        BeaconManager.refresh(this, "service-notifications");
+        OpenVpnService.refreshNotification(this);
+        LogStore.append(this, "ui", "Service notification visibility saved"
+                + " task=" + taskServiceNotificationSwitch.isChecked()
+                + " vpn=" + vpnNotificationSwitch.isChecked()
+                + " beacon=" + beaconNotificationSwitch.isChecked());
+        refreshStatusAndLog();
     }
 
     private void bindSaveNotificationBackupConfig(Switch sw) {

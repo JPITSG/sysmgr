@@ -11,8 +11,11 @@ import android.os.Build;
 import android.os.IBinder;
 
 public final class NetworkMonitorService extends Service {
-    private static final String CHANNEL_ID_HIDDEN = "system_manager_network_monitor_hidden";
-    private static final String CHANNEL_ID_VISIBLE = "system_manager_network_monitor_visible";
+    private static final String CHANNEL_ID = "system_manager_network_monitor_visible";
+    // This service only ever runs with its notification on show — the hidden
+    // path moved into the Accessibility service — so the old second channel is
+    // deleted rather than left sitting in the system's channel list.
+    private static final String LEGACY_CHANNEL_ID_HIDDEN = "system_manager_network_monitor_hidden";
     private static final int NOTIFICATION_ID = 0x5302;
 
     private WifiChangeMonitor monitor;
@@ -83,9 +86,7 @@ public final class NetworkMonitorService extends Service {
     }
 
     private boolean startForegroundMonitor() {
-        Config config = Config.get(this);
-        boolean visible = config.showWifiMonitorNotification();
-        Notification notification = new Notification.Builder(this, visible ? CHANNEL_ID_VISIBLE : CHANNEL_ID_HIDDEN)
+        Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_system_manager)
                 .setContentTitle("System Manager")
                 .setContentText("Monitoring Wi-Fi changes")
@@ -94,10 +95,6 @@ public final class NetworkMonitorService extends Service {
                 .setShowWhen(false)
                 .setOnlyAlertOnce(true)
                 .setLocalOnly(true)
-                .setDefaults(0)
-                .setVibrate(new long[0])
-                .setSound(null)
-                .setPriority(visible ? Notification.PRIORITY_LOW : Notification.PRIORITY_MIN)
                 .build();
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -113,28 +110,17 @@ public final class NetworkMonitorService extends Service {
     }
 
     private void ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
-        }
         NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) {
             return;
         }
-        NotificationChannel hidden = new NotificationChannel(
-                CHANNEL_ID_HIDDEN,
-                "Network monitor hidden",
-                NotificationManager.IMPORTANCE_MIN);
-        hidden.setDescription("Keeps System Manager aware of Wi-Fi connection changes with a minimized silent notification.");
-        hidden.setShowBadge(false);
-        hidden.setSound(null, null);
-        manager.createNotificationChannel(hidden);
-
-        NotificationChannel visible = new NotificationChannel(
-                CHANNEL_ID_VISIBLE,
+        NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
                 "Network monitor",
                 NotificationManager.IMPORTANCE_LOW);
-        visible.setDescription("Shows when System Manager is watching Wi-Fi connection changes.");
-        visible.setShowBadge(false);
-        manager.createNotificationChannel(visible);
+        channel.setDescription("Shows when System Manager is watching Wi-Fi connection changes.");
+        channel.setShowBadge(false);
+        manager.createNotificationChannel(channel);
+        manager.deleteNotificationChannel(LEGACY_CHANNEL_ID_HIDDEN);
     }
 }

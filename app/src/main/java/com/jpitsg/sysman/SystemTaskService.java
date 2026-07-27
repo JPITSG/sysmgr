@@ -1,7 +1,6 @@
 package com.jpitsg.sysman;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
@@ -24,6 +23,8 @@ public final class SystemTaskService extends Service {
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private ExecutorService executor;
+    /** Re-resolved before every foreground start, so the toggle applies at once. */
+    private String channelId = CHANNEL_ID;
 
     static void startTask(Context context, String taskId, String reason, boolean reschedule) {
         Context app = context.getApplicationContext();
@@ -126,14 +127,17 @@ public final class SystemTaskService extends Service {
     }
 
     private void startForegroundForTask(String taskId, String reason) {
-        Notification notification = new Notification.Builder(this, CHANNEL_ID)
+        boolean shown = ServiceNotifications.shown(this, ServiceNotifications.TASK_RUNNER);
+        ensureNotificationChannel();
+        Notification.Builder builder = new Notification.Builder(this, channelId)
                 .setSmallIcon(R.drawable.ic_stat_system_manager)
                 .setContentTitle("System Manager")
                 .setContentText("Running " + taskId + " (" + reason + ")")
                 .setCategory(Notification.CATEGORY_SERVICE)
                 .setOngoing(true)
-                .setShowWhen(false)
-                .build();
+                .setShowWhen(false);
+        ServiceNotifications.applyBehavior(builder, shown);
+        Notification notification = builder.build();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
         } else {
@@ -142,19 +146,12 @@ public final class SystemTaskService extends Service {
     }
 
     private void ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
-        }
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager == null) {
-            return;
-        }
-        NotificationChannel channel = new NotificationChannel(
+        channelId = ServiceNotifications.channel(
+                this,
                 CHANNEL_ID,
                 "System task runner",
-                NotificationManager.IMPORTANCE_MIN);
-        channel.setDescription("Short-lived service notification for System Manager background tasks.");
-        channel.setShowBadge(false);
-        manager.createNotificationChannel(channel);
+                "Short-lived service notification for System Manager background tasks.",
+                NotificationManager.IMPORTANCE_MIN,
+                ServiceNotifications.shown(this, ServiceNotifications.TASK_RUNNER));
     }
 }

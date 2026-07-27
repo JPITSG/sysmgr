@@ -1,7 +1,6 @@
 package com.jpitsg.sysman;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
@@ -35,6 +34,9 @@ public final class BeaconService extends Service {
 
     private static volatile boolean active;
 
+    /** Re-resolved before every foreground start, so the toggle applies at once. */
+    private String channelId = CHANNEL_ID;
+
     private BeaconAdvertiser advertiser;
     private BroadcastReceiver batteryReceiver;
     private BroadcastReceiver bluetoothReceiver;
@@ -52,7 +54,7 @@ public final class BeaconService extends Service {
         super.onCreate();
         active = true;
         advertiser = new BeaconAdvertiser(this);
-        ensureNotificationChannel();
+        resolveChannel();
         registerReceivers();
     }
 
@@ -262,6 +264,7 @@ public final class BeaconService extends Service {
     // ---- Foreground notification -------------------------------------------
 
     private void startForegroundBeacon() {
+        resolveChannel();
         Notification notification = buildNotification();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification,
@@ -300,7 +303,8 @@ public final class BeaconService extends Service {
         PendingIntent contentIntent = PendingIntent.getActivity(
                 this, NOTIFICATION_ID, new Intent(this, MainActivity.class), flags);
 
-        return new Notification.Builder(this, CHANNEL_ID)
+        boolean shown = ServiceNotifications.shown(this, ServiceNotifications.BEACON);
+        Notification.Builder builder = new Notification.Builder(this, channelId)
                 .setSmallIcon(R.drawable.ic_stat_system_manager)
                 .setContentTitle("Beacon")
                 .setContentText(text)
@@ -309,26 +313,18 @@ public final class BeaconService extends Service {
                 .setOngoing(true)
                 .setShowWhen(false)
                 .setOnlyAlertOnce(true)
-                .setLocalOnly(true)
-                .setPriority(Notification.PRIORITY_MIN)
-                .build();
+                .setLocalOnly(true);
+        ServiceNotifications.applyBehavior(builder, shown);
+        return builder.build();
     }
 
-    private void ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
-        }
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager == null) {
-            return;
-        }
-        NotificationChannel channel = new NotificationChannel(
+    private void resolveChannel() {
+        channelId = ServiceNotifications.channel(
+                this,
                 CHANNEL_ID,
                 "Beacon",
-                NotificationManager.IMPORTANCE_MIN);
-        channel.setDescription("Keeps the System Manager BLE beacon broadcasting.");
-        channel.setShowBadge(false);
-        channel.setSound(null, null);
-        manager.createNotificationChannel(channel);
+                "Keeps the System Manager BLE beacon broadcasting.",
+                NotificationManager.IMPORTANCE_MIN,
+                ServiceNotifications.shown(this, ServiceNotifications.BEACON));
     }
 }

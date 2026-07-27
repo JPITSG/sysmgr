@@ -117,6 +117,9 @@ final class Config {
     private static final String KEY_BEACON_TX_POWER_DBM = "beacon_tx_power_dbm";
     private static final String KEY_BEACON_RULES = "beacon_rules";
     private static final String KEY_BEACON_RULES_SEEDED = "beacon_rules_seeded";
+    private static final String KEY_TASK_SERVICE_NOTIFICATION = "task_service_notification";
+    private static final String KEY_VPN_NOTIFICATION = "vpn_notification";
+    private static final String KEY_BEACON_NOTIFICATION = "beacon_notification";
 
     private static final Object BEACON_UUID_LOCK = new Object();
 
@@ -652,6 +655,32 @@ final class Config {
 
     boolean vpnRemoteCommandEnabled() {
         return prefs.getBoolean(KEY_VPN_REMOTE_COMMAND_ENABLED, false);
+    }
+
+    // ---- Foreground service notifications -----------------------------------
+
+    // Default on: these have always been visible, so hiding one stays a
+    // deliberate choice rather than something an update does silently. The
+    // Remote Link and Wi-Fi monitor keep their own older keys.
+
+    boolean taskServiceNotificationEnabled() {
+        return prefs.getBoolean(KEY_TASK_SERVICE_NOTIFICATION, true);
+    }
+
+    boolean vpnNotificationEnabled() {
+        return prefs.getBoolean(KEY_VPN_NOTIFICATION, true);
+    }
+
+    boolean beaconNotificationEnabled() {
+        return prefs.getBoolean(KEY_BEACON_NOTIFICATION, true);
+    }
+
+    void saveServiceNotificationConfig(boolean taskService, boolean vpn, boolean beacon) {
+        prefs.edit()
+                .putBoolean(KEY_TASK_SERVICE_NOTIFICATION, taskService)
+                .putBoolean(KEY_VPN_NOTIFICATION, vpn)
+                .putBoolean(KEY_BEACON_NOTIFICATION, beacon)
+                .apply();
     }
 
     // ---- BLE beacon ---------------------------------------------------------
