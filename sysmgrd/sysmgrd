@@ -36,7 +36,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.bindip || !args.bindport || !args.log || !args.users) {
-  console.error('usage: sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2>');
+  console.error('usage: sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--statefile=<path>]');
   process.exit(2);
 }
 
@@ -56,6 +56,13 @@ if (users.size === 0) {
 }
 const gpsMysql = parseGpsMysqlConfig(args);
 const notificationStore = createNotificationStore(args);
+// Optional --statefile: mirrors the remote link status to a file for openHAB to
+// read. Empty disables the feature entirely.
+const stateFilePath = args.statefile ? String(args.statefile) : '';
+if (stateFilePath) {
+  fs.mkdirSync(path.dirname(stateFilePath), {recursive: true});
+}
+let lastRemoteLinkState = '';
 let nextConnectionId = 1;
 let certDir = null;
 const clients = new Map();
@@ -74,6 +81,35 @@ function formatTimestamp(date) {
 
 function pad(value, width) {
   return String(value).padStart(width, '0');
+}
+
+// Remote link status for openHAB. Written synchronously, and via temp+rename so
+// a reader never catches a half-written file. Every teardown path feeds this --
+// client close, daemon signal, crash handler -- so the file is never left
+// claiming Online once the link is gone. A SIGKILL is the one case it cannot
+// cover; daemon startup rewrites the file to correct exactly that.
+function writeRemoteLinkState(state) {
+  if (!stateFilePath || state === lastRemoteLinkState) {
+    return;
+  }
+  const tempPath = `${stateFilePath}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, state);
+    fs.renameSync(tempPath, stateFilePath);
+    lastRemoteLinkState = state;
+    log(`remote link state written state=${state} path=${stateFilePath}`);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (cleanupErr) {
+      // Ignore: the temp file may never have been created.
+    }
+    log(`remote link state write failed path=${stateFilePath} error=${err.message}`);
+  }
+}
+
+function syncRemoteLinkState() {
+  writeRemoteLinkState(activeClients().length > 0 ? 'Online' : 'Offline');
 }
 
 function websocketAccept(key) {
@@ -1161,6 +1197,7 @@ server.on('upgrade', (req, socket) => {
     '\r\n'
   );
   log(`websocket connected connection=${connectionId} from=${client.from} user=${credentials.username}`);
+  syncRemoteLinkState();
   sendJson(socket, {type: 'connected', connection_id: connectionId, ts: Math.floor(Date.now() / 1000)});
 
   const state = {buffer: Buffer.alloc(0)};
@@ -1192,6 +1229,8 @@ server.on('upgrade', (req, socket) => {
       resolveConnectionLostPings(connectionId, closedClient.uuid, 'connection-closed');
     }
     clients.delete(connectionId);
+    // Fires for a clean close frame and for an abruptly dropped socket alike.
+    syncRemoteLinkState();
   });
   socket.on('error', (err) => log(`websocket error connection=${connectionId} error=${err.message}`));
 });
@@ -1207,7 +1246,9 @@ tcpServer.on('error', (err) => {
   process.exitCode = 1;
 });
 tcpServer.listen(bindPort, bindIp, () => {
-  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'}`);
+  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'} statefile=${stateFilePath || 'disabled'}`);
+  // No clients yet, so this also clears a stale Online left by a hard kill.
+  syncRemoteLinkState();
 });
 
 function parseControlMessage(text) {
@@ -1344,6 +1385,7 @@ const controlServer = startControlSocket();
 
 function shutdown(signal) {
   log(`daemon shutdown signal=${signal}`);
+  writeRemoteLinkState('Offline');
   cleanupCertificate();
   cleanupControlSocket();
   controlServer.close();
@@ -1393,12 +1435,14 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 process.on('uncaughtException', (err) => {
   log(`uncaught exception ${err && err.stack ? err.stack : err}`);
+  writeRemoteLinkState('Offline');
   cleanupCertificate();
   cleanupControlSocket();
   process.exit(1);
 });
 process.on('unhandledRejection', (err) => {
   log(`unhandled rejection ${err && err.stack ? err.stack : err}`);
+  writeRemoteLinkState('Offline');
   cleanupCertificate();
   cleanupControlSocket();
   process.exit(1);
