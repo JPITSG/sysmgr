@@ -173,8 +173,14 @@ public final class MainActivity extends Activity {
     private EditText fallbackLongitudeField;
     private EditText logMaxLinesField;
     private EditText highPriorityPackageField;
+    private EditText highPriorityTitleFilterField;
+    private EditText highPriorityTitleExcludeField;
     private EditText highPriorityTextFilterField;
+    private EditText highPriorityTextExcludeField;
+    private EditText highPriorityRemoteTitleFilterField;
+    private EditText highPriorityRemoteTitleExcludeField;
     private EditText highPriorityRemoteTextFilterField;
+    private EditText highPriorityRemoteTextExcludeField;
     private EditText highPriorityRemoteDedupeSecondsField;
     private EditText highPriorityToneTitleField;
     private EditText highPriorityPlaySecondsField;
@@ -660,13 +666,19 @@ public final class MainActivity extends Activity {
         highPriorityEnabledSwitch = addGroupedToggle(packageGroup, "Enable package-based alerts");
         highPriorityPackageField = addField(frame.content, "Notification app", InputType.TYPE_CLASS_TEXT);
         configureAppPickerField(highPriorityPackageField);
-        highPriorityTextFilterField = addField(frame.content, "Text contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityTitleFilterField = addField(frame.content, "Title contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityTitleExcludeField = addField(frame.content, "Title does not contain", InputType.TYPE_CLASS_TEXT);
+        highPriorityTextFilterField = addField(frame.content, "Message contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityTextExcludeField = addField(frame.content, "Message does not contain", InputType.TYPE_CLASS_TEXT);
         highPriorityDedupeSecondsField = addField(frame.content, "Duplicate window (seconds)", InputType.TYPE_CLASS_NUMBER);
 
         addSubsectionLabel(frame.content, "Remote Link Alerts");
         LinearLayout socketGroup = addToggleGroup(frame.content);
         highPriorityRemoteEnabledSwitch = addGroupedToggle(socketGroup, "Enable Remote Link alerts");
-        highPriorityRemoteTextFilterField = addField(frame.content, "Text contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityRemoteTitleFilterField = addField(frame.content, "Title contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityRemoteTitleExcludeField = addField(frame.content, "Title does not contain", InputType.TYPE_CLASS_TEXT);
+        highPriorityRemoteTextFilterField = addField(frame.content, "Message contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityRemoteTextExcludeField = addField(frame.content, "Message does not contain", InputType.TYPE_CLASS_TEXT);
         highPriorityRemoteDedupeSecondsField = addField(frame.content, "Duplicate window (seconds)", InputType.TYPE_CLASS_NUMBER);
 
         addSubsectionLabel(frame.content, "Tone & Volume");
@@ -3613,9 +3625,17 @@ public final class MainActivity extends Activity {
             logMaxLinesField.setText(Integer.toString(config.logMaxLines()));
             highPriorityEnabledSwitch.setChecked(config.highPriorityEnabled());
             highPriorityPackageField.setText(appDisplayText(config.highPriorityPackage()));
-            highPriorityTextFilterField.setText(config.highPriorityTextFilter());
+            AlertTextFilter highPriorityFilter = config.highPriorityFilter();
+            highPriorityTitleFilterField.setText(highPriorityFilter.titleContains);
+            highPriorityTitleExcludeField.setText(highPriorityFilter.titleExcludes);
+            highPriorityTextFilterField.setText(highPriorityFilter.messageContains);
+            highPriorityTextExcludeField.setText(highPriorityFilter.messageExcludes);
             highPriorityRemoteEnabledSwitch.setChecked(config.highPriorityRemoteEnabled());
-            highPriorityRemoteTextFilterField.setText(config.highPriorityRemoteTextFilter());
+            AlertTextFilter highPriorityRemoteFilter = config.highPriorityRemoteFilter();
+            highPriorityRemoteTitleFilterField.setText(highPriorityRemoteFilter.titleContains);
+            highPriorityRemoteTitleExcludeField.setText(highPriorityRemoteFilter.titleExcludes);
+            highPriorityRemoteTextFilterField.setText(highPriorityRemoteFilter.messageContains);
+            highPriorityRemoteTextExcludeField.setText(highPriorityRemoteFilter.messageExcludes);
             highPriorityRemoteDedupeSecondsField.setText(Integer.toString(config.highPriorityRemoteDedupeSeconds()));
             highPriorityToneTitleField.setText(config.highPriorityToneTitle());
             highPriorityPlaySecondsField.setText(Integer.toString(config.highPriorityPlaySeconds()));
@@ -4023,9 +4043,9 @@ public final class MainActivity extends Activity {
         Config.get(this).saveHighPriorityConfig(
                 highPriorityEnabledSwitch.isChecked(),
                 appPackageFromField(highPriorityPackageField),
-                text(highPriorityTextFilterField),
+                highPriorityFilterFromFields(),
                 highPriorityRemoteEnabledSwitch.isChecked(),
-                text(highPriorityRemoteTextFilterField),
+                highPriorityRemoteFilterFromFields(),
                 text(highPriorityRemoteDedupeSecondsField),
                 text(highPriorityToneTitleField),
                 text(highPriorityPlaySecondsField),
@@ -4127,9 +4147,9 @@ public final class MainActivity extends Activity {
         Config.get(this).saveHighPriorityConfig(
                 highPriorityEnabledSwitch.isChecked(),
                 appPackageFromField(highPriorityPackageField),
-                text(highPriorityTextFilterField),
+                highPriorityFilterFromFields(),
                 highPriorityRemoteEnabledSwitch.isChecked(),
-                text(highPriorityRemoteTextFilterField),
+                highPriorityRemoteFilterFromFields(),
                 text(highPriorityRemoteDedupeSecondsField),
                 text(highPriorityToneTitleField),
                 text(highPriorityPlaySecondsField),
@@ -4137,6 +4157,22 @@ public final class MainActivity extends Activity {
                 highPriorityRaiseAlarmVolumeSwitch.isChecked(),
                 text(highPriorityAlarmVolumePercentField));
         refreshStatusAndLog();
+    }
+
+    private AlertTextFilter highPriorityFilterFromFields() {
+        return new AlertTextFilter(
+                text(highPriorityTitleFilterField),
+                text(highPriorityTitleExcludeField),
+                text(highPriorityTextFilterField),
+                text(highPriorityTextExcludeField));
+    }
+
+    private AlertTextFilter highPriorityRemoteFilterFromFields() {
+        return new AlertTextFilter(
+                text(highPriorityRemoteTitleFilterField),
+                text(highPriorityRemoteTitleExcludeField),
+                text(highPriorityRemoteTextFilterField),
+                text(highPriorityRemoteTextExcludeField));
     }
 
     private void saveHighPrioritySettings() {

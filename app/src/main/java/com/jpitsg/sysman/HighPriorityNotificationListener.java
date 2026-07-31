@@ -30,10 +30,11 @@ public final class HighPriorityNotificationListener extends NotificationListener
         maybeBackup(config, sbn, packageName, payload);
 
         if (config.highPriorityEnabled() && config.highPriorityPackage().equals(packageName)) {
-            String filter = config.highPriorityTextFilter();
-            if (!payload.textContains(filter)) {
-                LogStore.append(this, "notification", "Package-based notification ignored; text did not contain filter title="
-                        + payload.shortTitle());
+            AlertTextFilter filter = config.highPriorityFilter();
+            String rejection = filter.rejection(payload.title, payload.text);
+            if (rejection != null) {
+                LogStore.append(this, "notification", "Package-based notification ignored; " + rejection
+                        + " title=" + payload.shortTitle());
                 return;
             }
 

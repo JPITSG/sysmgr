@@ -226,17 +226,21 @@ final class RemoteEventHandler {
         if (!config.highPriorityRemoteEnabled()) {
             return false;
         }
-        String filter = config.highPriorityRemoteTextFilter();
-        String haystack = cleanTitle(title) + "\n" + body;
-        if (!hasText(filter) || !haystack.contains(filter)) {
-            LogStore.append(app, "remote", "Remote Link high-priority alert ignored; text did not contain filter id=" + id);
+        AlertTextFilter filter = config.highPriorityRemoteFilter();
+        String cleanedTitle = cleanTitle(title);
+        String message = body == null ? "" : body;
+        String rejection = filter.rejection(cleanedTitle, message);
+        if (rejection != null) {
+            LogStore.append(app, "remote", "Remote Link high-priority alert ignored; " + rejection + " id=" + id);
             return false;
         }
+        String haystack = cleanedTitle + "\n" + message;
         if (NotificationDeduper.wasRecentlyHandled("remote-socket", haystack, config.highPriorityRemoteDedupeSeconds())) {
             LogStore.append(app, "remote", "Duplicate Remote Link high-priority alert suppressed id=" + id);
             return true;
         }
-        LogStore.append(app, "remote", "Remote Link high-priority alert matched id=" + id + " filter=" + filter);
+        LogStore.append(app, "remote", "Remote Link high-priority alert matched id=" + id
+                + " filter=" + filter.describe());
         HighPriorityAlertPlayer.handleNotification(app, "remote-link:" + id);
         return true;
     }

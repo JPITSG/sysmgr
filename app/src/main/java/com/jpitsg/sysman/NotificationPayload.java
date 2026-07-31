@@ -9,10 +9,6 @@ final class NotificationPayload {
         this.text = text == null ? "" : text;
     }
 
-    boolean textContains(String needle) {
-        return needle != null && !needle.isEmpty() && text.contains(needle);
-    }
-
     String shortTitle() {
         return shorten(title, 80);
     }

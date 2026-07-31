@@ -63,9 +63,15 @@ final class Config {
     private static final String KEY_NOTIFICATION_BACKUP_INCLUDE_SYSMGR = "notification_backup_include_sysmgr";
     private static final String KEY_HIGH_PRIORITY_ENABLED = "high_priority_enabled";
     private static final String KEY_HIGH_PRIORITY_PACKAGE = "high_priority_package";
+    private static final String KEY_HIGH_PRIORITY_TITLE_FILTER = "high_priority_title_filter";
+    private static final String KEY_HIGH_PRIORITY_TITLE_EXCLUDE = "high_priority_title_exclude";
     private static final String KEY_HIGH_PRIORITY_TEXT_FILTER = "high_priority_text_filter";
+    private static final String KEY_HIGH_PRIORITY_TEXT_EXCLUDE = "high_priority_text_exclude";
     private static final String KEY_HIGH_PRIORITY_REMOTE_ENABLED = "high_priority_remote_enabled";
+    private static final String KEY_HIGH_PRIORITY_REMOTE_TITLE_FILTER = "high_priority_remote_title_filter";
+    private static final String KEY_HIGH_PRIORITY_REMOTE_TITLE_EXCLUDE = "high_priority_remote_title_exclude";
     private static final String KEY_HIGH_PRIORITY_REMOTE_TEXT_FILTER = "high_priority_remote_text_filter";
+    private static final String KEY_HIGH_PRIORITY_REMOTE_TEXT_EXCLUDE = "high_priority_remote_text_exclude";
     private static final String KEY_HIGH_PRIORITY_REMOTE_DEDUPE_SECONDS = "high_priority_remote_dedupe_seconds";
     private static final String KEY_HIGH_PRIORITY_TONE_TITLE = "high_priority_tone_title";
     private static final String KEY_HIGH_PRIORITY_PLAY_SECONDS = "high_priority_play_seconds";
@@ -375,16 +381,24 @@ final class Config {
         return string(KEY_HIGH_PRIORITY_PACKAGE, "");
     }
 
-    String highPriorityTextFilter() {
-        return string(KEY_HIGH_PRIORITY_TEXT_FILTER, "!");
+    AlertTextFilter highPriorityFilter() {
+        return new AlertTextFilter(
+                string(KEY_HIGH_PRIORITY_TITLE_FILTER, ""),
+                string(KEY_HIGH_PRIORITY_TITLE_EXCLUDE, ""),
+                string(KEY_HIGH_PRIORITY_TEXT_FILTER, ""),
+                string(KEY_HIGH_PRIORITY_TEXT_EXCLUDE, ""));
     }
 
     boolean highPriorityRemoteEnabled() {
         return prefs.getBoolean(KEY_HIGH_PRIORITY_REMOTE_ENABLED, false);
     }
 
-    String highPriorityRemoteTextFilter() {
-        return string(KEY_HIGH_PRIORITY_REMOTE_TEXT_FILTER, "!");
+    AlertTextFilter highPriorityRemoteFilter() {
+        return new AlertTextFilter(
+                string(KEY_HIGH_PRIORITY_REMOTE_TITLE_FILTER, ""),
+                string(KEY_HIGH_PRIORITY_REMOTE_TITLE_EXCLUDE, ""),
+                string(KEY_HIGH_PRIORITY_REMOTE_TEXT_FILTER, ""),
+                string(KEY_HIGH_PRIORITY_REMOTE_TEXT_EXCLUDE, ""));
     }
 
     int highPriorityRemoteDedupeSeconds() {
@@ -995,9 +1009,9 @@ final class Config {
     void saveHighPriorityConfig(
             boolean enabled,
             String packageName,
-            String textFilter,
+            AlertTextFilter filter,
             boolean remoteEnabled,
-            String remoteTextFilter,
+            AlertTextFilter remoteFilter,
             String remoteDedupeSeconds,
             String toneTitle,
             String playSeconds,
@@ -1007,9 +1021,15 @@ final class Config {
         prefs.edit()
                 .putBoolean(KEY_HIGH_PRIORITY_ENABLED, enabled)
                 .putString(KEY_HIGH_PRIORITY_PACKAGE, clean(packageName, ""))
-                .putString(KEY_HIGH_PRIORITY_TEXT_FILTER, clean(textFilter, "!"))
+                .putString(KEY_HIGH_PRIORITY_TITLE_FILTER, filter.titleContains)
+                .putString(KEY_HIGH_PRIORITY_TITLE_EXCLUDE, filter.titleExcludes)
+                .putString(KEY_HIGH_PRIORITY_TEXT_FILTER, filter.messageContains)
+                .putString(KEY_HIGH_PRIORITY_TEXT_EXCLUDE, filter.messageExcludes)
                 .putBoolean(KEY_HIGH_PRIORITY_REMOTE_ENABLED, remoteEnabled)
-                .putString(KEY_HIGH_PRIORITY_REMOTE_TEXT_FILTER, clean(remoteTextFilter, "!"))
+                .putString(KEY_HIGH_PRIORITY_REMOTE_TITLE_FILTER, remoteFilter.titleContains)
+                .putString(KEY_HIGH_PRIORITY_REMOTE_TITLE_EXCLUDE, remoteFilter.titleExcludes)
+                .putString(KEY_HIGH_PRIORITY_REMOTE_TEXT_FILTER, remoteFilter.messageContains)
+                .putString(KEY_HIGH_PRIORITY_REMOTE_TEXT_EXCLUDE, remoteFilter.messageExcludes)
                 .putInt(KEY_HIGH_PRIORITY_REMOTE_DEDUPE_SECONDS, parseInt(remoteDedupeSeconds, 60, 0, 3600))
                 .putString(KEY_HIGH_PRIORITY_TONE_TITLE, clean(toneTitle, ""))
                 .putInt(KEY_HIGH_PRIORITY_PLAY_SECONDS, parseInt(playSeconds, 15, 1, 300))
