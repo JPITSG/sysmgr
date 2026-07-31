@@ -35,6 +35,10 @@ public final class RemoteLinkService extends Service {
     private static final long BACKUP_RETRY_MILLIS = 60_000L;
     // Cap how many notifications are outstanding (sent, awaiting ack) at once.
     private static final int BACKUP_MAX_IN_FLIGHT = 100;
+    // If the platform ever times the foreground service out anyway, come back
+    // on this delay rather than the watchdog's, but slowly enough that a
+    // still-exhausted runtime budget cannot turn into a restart loop.
+    private static final long FGS_TIMEOUT_RESTART_DELAY_MILLIS = 5L * 60_000L;
     private static final long[] BACKOFF_STEP_SECONDS = {1L, 2L, 5L, 10L, 30L};
     private static volatile RemoteLinkService activeService;
 
@@ -115,6 +119,23 @@ public final class RemoteLinkService extends Service {
         return null;
     }
 
+    /**
+     * Android 15+ times out foreground services of a capped type. Handling this
+     * is what keeps the timeout from becoming a crash: ignore it and the
+     * platform throws ForegroundServiceDidNotStopInTimeException on the main
+     * thread, killing the process and the socket with it. Stop cleanly instead
+     * and let the alarm bring the link back.
+     */
+    @Override
+    public void onTimeout(int startId, int fgsType) {
+        LogStore.append(this, "remote", "Remote Link foreground service timed out type=" + fgsType
+                + "; stopping and retrying in " + (FGS_TIMEOUT_RESTART_DELAY_MILLIS / 60_000L) + "min");
+        AlarmScheduler.scheduleRemoteLinkWatchdogAfter(this, FGS_TIMEOUT_RESTART_DELAY_MILLIS, "fgs-timeout");
+        stopRequested = true;
+        closeClient();
+        stopSelf();
+    }
+
     @Override
     public void onDestroy() {
         stopRequested = true;
@@ -129,6 +150,11 @@ public final class RemoteLinkService extends Service {
             activeService = null;
         }
         super.onDestroy();
+    }
+
+    /** False after a process death took the service down without restarting it. */
+    static boolean isRunning() {
+        return activeService != null;
     }
 
     static boolean sendPingIfRunning(Context context, String reason) {
@@ -769,7 +795,10 @@ public final class RemoteLinkService extends Service {
                 .setLocalOnly(true);
         ServiceNotifications.applyBehavior(builder, shown);
         Notification notification = builder.build();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // Uncapped, unlike dataSync; see the manifest entry for why.
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
         } else {
             startForeground(NOTIFICATION_ID, notification);

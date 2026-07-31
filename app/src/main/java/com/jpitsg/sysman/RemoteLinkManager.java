@@ -65,6 +65,7 @@ final class RemoteLinkManager {
 
     static void stop(Context context) {
         RemoteLinkStateStore.setConnected(context, false);
+        AlarmScheduler.cancelRemoteLinkWatchdog(context);
         context.getApplicationContext().stopService(new Intent(context.getApplicationContext(), RemoteLinkService.class));
     }
 
@@ -72,6 +73,10 @@ final class RemoteLinkManager {
         Intent intent = new Intent(context, RemoteLinkService.class);
         intent.setAction(action);
         intent.putExtra(EXTRA_REASON, reason == null ? "unknown" : reason);
+        // Armed before the start, not after: the watchdog has to keep ticking
+        // even when the start itself is what failed. Every enabled path into the
+        // service comes through here, so this is also what keeps it re-armed.
+        AlarmScheduler.scheduleRemoteLinkWatchdog(context, reason);
         try {
             // Always a foreground start, even when the notification is hidden:
             // startService() from a background caller (boot, an alarm, a

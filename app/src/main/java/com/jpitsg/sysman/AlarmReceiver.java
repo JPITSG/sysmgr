@@ -28,6 +28,15 @@ public final class AlarmReceiver extends BroadcastReceiver {
             }
             return;
         }
+        if (TaskIds.REMOTE_LINK_WATCHDOG.equals(taskId)) {
+            LogStore.append(context, "remote", "Remote Link watchdog woke; service_running="
+                    + RemoteLinkService.isRunning()
+                    + " connected=" + RemoteLinkStateStore.isConnected(context));
+            // sync() restarts the service if it is gone and re-arms the watchdog,
+            // or cancels it outright if the Remote Link has been turned off.
+            RemoteLinkManager.sync(context, "watchdog:" + reason);
+            return;
+        }
         if (TaskIds.REBOOT_SCHEDULED.equals(taskId)) {
             RebootManager.handleScheduledAlarm(context, reason);
             return;

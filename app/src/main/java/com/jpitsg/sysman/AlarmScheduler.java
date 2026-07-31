@@ -16,6 +16,10 @@ final class AlarmScheduler {
     static final String ACTION_RUN_TASK = "com.jpitsg.sysman.action.RUN_TASK";
     static final String EXTRA_TASK_ID = "task_id";
     static final String EXTRA_REASON = "reason";
+    // Nothing but opening the app used to restart a Remote Link whose service
+    // had died with its process, which left the link down for hours. This is the
+    // ceiling on how long that can now go unnoticed.
+    private static final long REMOTE_LINK_WATCHDOG_INTERVAL_MILLIS = 15L * 60_000L;
 
     private AlarmScheduler() {
     }
@@ -149,6 +153,50 @@ final class AlarmScheduler {
             alarmManager.cancel(pendingIntent(app, TaskIds.BATTERY_ALERT_CHECK, "cancel"));
         }
         LogStore.append(app, "alarm", "Canceled battery alert check");
+    }
+
+    static void scheduleRemoteLinkWatchdog(Context context, String reason) {
+        scheduleRemoteLinkWatchdogAfter(context, REMOTE_LINK_WATCHDOG_INTERVAL_MILLIS, reason);
+    }
+
+    static void scheduleRemoteLinkWatchdogAfter(Context context, long delayMillis, String reason) {
+        Context app = context.getApplicationContext();
+        if (!Config.get(app).remoteLinkEnabled()) {
+            cancelRemoteLinkWatchdog(app);
+            return;
+        }
+        AlarmManager alarmManager = (AlarmManager) app.getSystemService(Context.ALARM_SERVICE);
+        if (alarmManager == null) {
+            LogStore.append(app, "alarm", "AlarmManager unavailable for Remote Link watchdog");
+            return;
+        }
+
+        long safeDelayMillis = Math.max(0L, delayMillis);
+        long triggerAt = SystemClock.elapsedRealtime() + safeDelayMillis;
+        PendingIntent pendingIntent = pendingIntent(app, TaskIds.REMOTE_LINK_WATCHDOG, "watchdog:" + reason);
+        try {
+            // Always allow-while-idle, and never behind the GPS alarm's exact/idle
+            // toggles: a link that died overnight is precisely the case this
+            // exists for, so Doze must not be able to defer it past morning.
+            if (canScheduleExact(alarmManager)) {
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent);
+            } else {
+                alarmManager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent);
+            }
+            LogStore.append(app, "alarm", "Scheduled Remote Link watchdog in "
+                    + (safeDelayMillis / 1000L) + " sec reason=" + reason);
+        } catch (SecurityException e) {
+            LogStore.append(app, "alarm", "Remote Link watchdog scheduling failed: " + e.getMessage());
+        }
+    }
+
+    static void cancelRemoteLinkWatchdog(Context context) {
+        Context app = context.getApplicationContext();
+        AlarmManager alarmManager = (AlarmManager) app.getSystemService(Context.ALARM_SERVICE);
+        if (alarmManager != null) {
+            alarmManager.cancel(pendingIntent(app, TaskIds.REMOTE_LINK_WATCHDOG, "cancel"));
+        }
+        LogStore.append(app, "alarm", "Canceled Remote Link watchdog");
     }
 
     static void scheduleNextVolumeRule(Context context, String reason) {

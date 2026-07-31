@@ -72,10 +72,21 @@
             android:exported="false"
             android:foregroundServiceType="location" />
 
+        <!--
+            specialUse, not dataSync: Android 15+ caps a dataSync foreground
+            service at six hours per 24-hour window, then kills the process with
+            ForegroundServiceDidNotStopInTimeException. The Remote Link socket is
+            meant to stay up indefinitely, so it must use an uncapped type.
+            dataSync stays declared for API 29-33, which has no specialUse.
+        -->
         <service
             android:name=".RemoteLinkService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="remote_link" />
+        </service>
 
         <service
             android:name=".BeaconService"
