@@ -92,11 +92,20 @@ final class BeaconStateStore {
 
     /** Records what the rule engine resolved, independent of whether the radio started. */
     static void setRuleContext(Context context, int batteryPercent, String ruleId, int requestedIntervalSeconds) {
-        prefs(context).edit()
+        SharedPreferences prefs = prefs(context);
+        String nextRuleId = ruleId == null ? "" : ruleId;
+        int nextInterval = Math.max(0, requestedIntervalSeconds);
+        if (prefs.getInt(KEY_BATTERY_PERCENT, -1) == batteryPercent
+                && nextRuleId.equals(prefs.getString(KEY_RULE_ID, ""))
+                && prefs.getInt(KEY_REQUESTED_INTERVAL_SECONDS, 0) == nextInterval) {
+            return;
+        }
+        prefs.edit()
                 .putInt(KEY_BATTERY_PERCENT, batteryPercent)
-                .putString(KEY_RULE_ID, ruleId == null ? "" : ruleId)
-                .putInt(KEY_REQUESTED_INTERVAL_SECONDS, Math.max(0, requestedIntervalSeconds))
+                .putString(KEY_RULE_ID, nextRuleId)
+                .putInt(KEY_REQUESTED_INTERVAL_SECONDS, nextInterval)
                 .apply();
+        broadcast(context);
     }
 
     static String state(Context context) {

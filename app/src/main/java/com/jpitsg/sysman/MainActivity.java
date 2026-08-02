@@ -3,7 +3,10 @@ package com.jpitsg.sysman;
 import android.Manifest;
 import android.animation.ValueAnimator;
 import android.app.Activity;
+import android.app.AlarmManager;
+import android.app.NotificationManager;
 import android.app.TimePickerDialog;
+import android.bluetooth.BluetoothAdapter;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -25,12 +28,16 @@ import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.location.LocationManager;
+import android.net.ConnectivityManager;
 import android.net.Uri;
 import android.net.VpnService;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
@@ -100,6 +107,7 @@ public final class MainActivity extends Activity {
     private static final int LOG_VISIBLE_LINES = 16;
     private static final int NOTIFICATION_HISTORY_PAGE_SIZE = 25;
     private static final long LIVE_SAVE_DELAY_MS = 600L;
+    private static final long LIVE_STATUS_TICK_MS = 1000L;
 
     private static final int COLOR_BG = Ui.COLOR_BG;
     private static final int COLOR_SURFACE = Ui.COLOR_SURFACE;
@@ -156,6 +164,8 @@ public final class MainActivity extends Activity {
     private volatile boolean notificationRefreshInFlight;
     private volatile boolean pendingNotificationRefresh;
     private volatile boolean pendingNotificationForce;
+    private volatile boolean notificationBackupRefreshInFlight;
+    private volatile boolean pendingNotificationBackupRefresh;
     private ScrollView contentScrollView;
     private LinearLayout volumeRuleList;
     private NotificationHistoryStore.Entry pendingImageSaveEntry;
@@ -243,6 +253,8 @@ public final class MainActivity extends Activity {
     private String pendingVpnCertSlot;
     private boolean pendingVpnConnectAfterConsent;
     private BroadcastReceiver openVpnStateReceiver;
+    private boolean openVpnHasProfile;
+    private boolean openVpnProfileReady;
     private static volatile String cachedVpnEngineVersion;
 
     private TextView beaconPill;
@@ -260,6 +272,7 @@ public final class MainActivity extends Activity {
     private Button beaconTxHighButton;
     private int beaconTxPowerDbm = Config.BEACON_TX_POWER_HIGH;
     private BroadcastReceiver beaconStateReceiver;
+    private TextView beaconAdvertisingDurationValue;
 
     private Switch useExactAlarmsSwitch;
     private Switch allowIdleAlarmsSwitch;
@@ -298,6 +311,7 @@ public final class MainActivity extends Activity {
     private Switch notificationBackupIncludeSysmgrSwitch;
     private final List<Panel> panels = new ArrayList<>();
     private final Handler liveSaveHandler = new Handler(Looper.getMainLooper());
+    private final Handler liveStatusHandler = new Handler(Looper.getMainLooper());
     private final List<LiveSaveGroup> liveSaveGroups = new ArrayList<>();
     private LiveSaveGroup gpsSettingsSave;
     private LiveSaveGroup highPrioritySettingsSave;
@@ -310,10 +324,15 @@ public final class MainActivity extends Activity {
     private BroadcastReceiver remoteLinkStateReceiver;
     private BroadcastReceiver notificationHistoryReceiver;
     private BroadcastReceiver notificationBackupReceiver;
+    private BroadcastReceiver logChangedReceiver;
+    private BroadcastReceiver networkStateReceiver;
+    private BroadcastReceiver systemStateReceiver;
     private boolean loadingConfig;
     private volatile WifiSnapshot cachedWifi;
-    private volatile boolean statusIoInFlight;
-    private volatile boolean statusIoRequested;
+    private volatile boolean wifiIoInFlight;
+    private volatile boolean wifiIoRequested;
+    private volatile boolean logIoInFlight;
+    private volatile boolean logIoRequested;
     private String renderedNotificationHistoryKey;
     private final LruCache<String, Bitmap> notificationImageCache =
             new LruCache<String, Bitmap>(notificationImageCacheSizeKb()) {
@@ -322,6 +341,13 @@ public final class MainActivity extends Activity {
                     return Math.max(1, bitmap.getAllocationByteCount() / 1024);
                 }
             };
+    private final Runnable liveStatusTicker = new Runnable() {
+        @Override
+        public void run() {
+            updateTimeBasedStatus();
+            liveStatusHandler.postDelayed(this, LIVE_STATUS_TICK_MS);
+        }
+    };
 
     private static final class Panel {
         final LinearLayout content;
@@ -484,26 +510,35 @@ public final class MainActivity extends Activity {
         registerNotificationBackupReceiver();
         registerOpenVpnStateReceiver();
         registerBeaconStateReceiver();
+        registerLogChangedReceiver();
+        registerNetworkStateReceiver();
+        registerSystemStateReceiver();
         NotificationCleaner.clearOnAppOpen(this);
         OpenVpnManager.syncStateOnLaunch(this);
         refreshStatusAndLog();
         refreshNotificationHistory();
-        refreshNotificationBackupStatus();
+        liveStatusHandler.removeCallbacks(liveStatusTicker);
+        liveStatusHandler.post(liveStatusTicker);
     }
 
     @Override
     protected void onPause() {
+        liveStatusHandler.removeCallbacks(liveStatusTicker);
         flushPendingLiveSaves();
         unregisterNotificationHistoryReceiver();
         unregisterNotificationBackupReceiver();
         unregisterRemoteLinkStateReceiver();
         unregisterOpenVpnStateReceiver();
         unregisterBeaconStateReceiver();
+        unregisterLogChangedReceiver();
+        unregisterNetworkStateReceiver();
+        unregisterSystemStateReceiver();
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
+        liveStatusHandler.removeCallbacks(liveStatusTicker);
         for (LiveSaveGroup group : liveSaveGroups) {
             group.cancel();
         }
@@ -1421,11 +1456,9 @@ public final class MainActivity extends Activity {
         }
         boolean hasProfile = OpenVpnProfileStore.hasProfile(this);
         OpenVpnProfileStore.Meta meta = hasProfile ? OpenVpnProfileStore.readMeta(this) : null;
-        String simpleState = OpenVpnStateStore.simpleState(this);
-        boolean connectedOrConnecting = OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)
-                || OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState);
+        openVpnHasProfile = hasProfile;
+        openVpnProfileReady = hasProfile && meta != null && meta.allSlotsSatisfied();
 
-        setOpenVpnPill(hasProfile, simpleState);
         renderOpenVpnSummary(meta);
         renderOpenVpnSlots(meta);
         openVpnEditRow.setVisibility(hasProfile ? View.VISIBLE : View.GONE);
@@ -1438,13 +1471,23 @@ public final class MainActivity extends Activity {
         }
         vpnTapSection.setVisibility(meta != null && meta.isTap() ? View.VISIBLE : View.GONE);
 
-        openVpnStatusText.setText(openVpnStatusLine(simpleState));
-
-        boolean profileReady = hasProfile && meta != null && meta.allSlotsSatisfied();
-        applyButtonState(vpnConnectButton, profileReady && !connectedOrConnecting, COLOR_PRIMARY, Color.WHITE);
-        applyButtonState(vpnDisconnectButton, connectedOrConnecting, COLOR_DANGER, Color.WHITE);
+        refreshOpenVpnLiveState();
 
         resolveVpnEngineVersion();
+    }
+
+    private void refreshOpenVpnLiveState() {
+        if (openVpnPill == null || openVpnStatusText == null) {
+            return;
+        }
+        String simpleState = OpenVpnStateStore.simpleState(this);
+        boolean connectedOrConnecting = OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)
+                || OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState);
+        setOpenVpnPill(openVpnHasProfile, simpleState);
+        openVpnStatusText.setText(openVpnStatusLine(simpleState));
+        applyButtonState(vpnConnectButton, openVpnProfileReady && !connectedOrConnecting,
+                COLOR_PRIMARY, Color.WHITE);
+        applyButtonState(vpnDisconnectButton, connectedOrConnecting, COLOR_DANGER, Color.WHITE);
     }
 
     private void setOpenVpnPill(boolean hasProfile, String simpleState) {
@@ -1651,7 +1694,7 @@ public final class MainActivity extends Activity {
         openVpnStateReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                refreshStatusAndLog();
+                refreshOpenVpnLiveState();
             }
         };
         IntentFilter filter = new IntentFilter(OpenVpnStateStore.ACTION_STATE_CHANGED);
@@ -1680,7 +1723,7 @@ public final class MainActivity extends Activity {
         beaconStateReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                refreshStatusAndLog();
+                refreshBeaconPanel();
             }
         };
         IntentFilter filter = new IntentFilter(BeaconStateStore.ACTION_STATE_CHANGED);
@@ -2410,6 +2453,7 @@ public final class MainActivity extends Activity {
         if (beaconStatusList == null) {
             return;
         }
+        beaconAdvertisingDurationValue = null;
         beaconStatusList.removeAllViews();
 
         boolean advertising = enabled && BeaconStateStore.STATE_ADVERTISING.equals(state);
@@ -2450,9 +2494,9 @@ public final class MainActivity extends Activity {
                 activeRule == null ? "None" : activeRule.displayThreshold() + " → " + activeRule.displayInterval(),
                 activeRule == null ? COLOR_TEXT_DIM : COLOR_TEXT);
 
-        int battery = BeaconStateStore.batteryPercent(this);
+        int battery = BatteryReader.batteryPercent(this);
         if (battery < 0) {
-            battery = BatteryReader.batteryPercent(this);
+            battery = BeaconStateStore.batteryPercent(this);
         }
         addInfoRow(beaconStatusList, "Battery", battery < 0 ? "Unknown" : battery + "%", COLOR_TEXT);
 
@@ -2464,7 +2508,7 @@ public final class MainActivity extends Activity {
         if (advertising) {
             long since = BeaconStateStore.advertisingSinceMillis(this);
             if (since > 0L) {
-                addInfoRow(beaconStatusList, "Broadcasting for",
+                beaconAdvertisingDurationValue = addInfoRow(beaconStatusList, "Broadcasting for",
                         formatDuration(System.currentTimeMillis() - since), COLOR_TEXT);
             }
             if (BeaconStateStore.legacyFallback(this)) {
@@ -2630,6 +2674,17 @@ public final class MainActivity extends Activity {
             return minutes + "m " + seconds + "s";
         }
         return seconds + "s";
+    }
+
+    private void updateTimeBasedStatus() {
+        TextView duration = beaconAdvertisingDurationValue;
+        if (duration == null || !BeaconStateStore.isAdvertising(this)) {
+            return;
+        }
+        long since = BeaconStateStore.advertisingSinceMillis(this);
+        if (since > 0L) {
+            duration.setText(formatDuration(System.currentTimeMillis() - since));
+        }
     }
 
     // ============================================================
@@ -3282,7 +3337,7 @@ public final class MainActivity extends Activity {
     }
 
     /** Label/value row for read-only status cards, styled like {@link #addStatusRow}. */
-    private void addInfoRow(LinearLayout root, String label, String value, int valueColor) {
+    private TextView addInfoRow(LinearLayout root, String label, String value, int valueColor) {
         LinearLayout row = newRow();
         row.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT));
 
@@ -3304,6 +3359,7 @@ public final class MainActivity extends Activity {
         row.addView(valueView, inRow(row, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
 
         root.addView(row, stack(root));
+        return valueView;
     }
 
     // ============================================================
@@ -3446,12 +3502,11 @@ public final class MainActivity extends Activity {
             addStatusRow(statusContainer, "Hidden Wi-Fi monitor", false);
         }
 
-        // Wi-Fi identity and the log file are read off the main thread and
-        // applied when ready. The Wi-Fi lookup can block ~1.2s while identity
-        // is resolving (e.g. right after a network change), which would freeze
-        // the UI if done inline — this method is called on every state-change
-        // broadcast.
-        scheduleStatusIo();
+        // Wi-Fi identity and the log file are read independently off the main
+        // thread and applied when ready. The Wi-Fi lookup can block ~1.2s while
+        // identity is resolving (e.g. right after a network change).
+        scheduleWifiRefresh();
+        scheduleLogRefresh();
     }
 
     private void renderWifi(Config config, WifiSnapshot wifi) {
@@ -3487,43 +3542,64 @@ public final class MainActivity extends Activity {
         }
     }
 
-    /**
-     * Reads the Wi-Fi snapshot and log tail off the main thread and applies
-     * them when done. Coalesces bursts via an in-flight guard; a refresh
-     * requested mid-read triggers exactly one more read so the display stays
-     * eventually consistent without a tight loop.
-     */
-    private void scheduleStatusIo() {
-        if (statusIoInFlight) {
-            statusIoRequested = true;
+    /** Reads Wi-Fi off the main thread and coalesces bursts of network events. */
+    private void scheduleWifiRefresh() {
+        if (wifiIoInFlight) {
+            wifiIoRequested = true;
             return;
         }
-        statusIoInFlight = true;
-        statusIoRequested = false;
-        final Config config = Config.get(this);
-        final int maxLines = Math.min(config.logMaxLines(), 300);
+        wifiIoInFlight = true;
+        wifiIoRequested = false;
         new Thread(new Runnable() {
             @Override
             public void run() {
                 final WifiSnapshot wifi = WifiInfoReader.read(MainActivity.this);
-                final CharSequence log = colorizeLog(LogStore.readTail(MainActivity.this, maxLines));
                 cachedWifi = wifi;
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        statusIoInFlight = false;
-                        if (statusContainer != null && logView != null) {
-                            renderWifi(config, wifi);
-                            logView.setText(log);
+                        wifiIoInFlight = false;
+                        if (wifiSummary != null) {
+                            renderWifi(Config.get(MainActivity.this), wifi);
                         }
-                        if (statusIoRequested) {
-                            statusIoRequested = false;
-                            scheduleStatusIo();
+                        if (wifiIoRequested) {
+                            wifiIoRequested = false;
+                            scheduleWifiRefresh();
                         }
                     }
                 });
             }
-        }, "SystemManagerStatusIo").start();
+        }, "SystemManagerWifiStatus").start();
+    }
+
+    /** Reads the newest log lines off the main thread and coalesces write bursts. */
+    private void scheduleLogRefresh() {
+        if (logIoInFlight) {
+            logIoRequested = true;
+            return;
+        }
+        logIoInFlight = true;
+        logIoRequested = false;
+        final int maxLines = Math.min(Config.get(this).logMaxLines(), 300);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final CharSequence log = colorizeLog(LogStore.readTail(MainActivity.this, maxLines));
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        logIoInFlight = false;
+                        if (logView != null) {
+                            logView.setText(log);
+                        }
+                        if (logIoRequested) {
+                            logIoRequested = false;
+                            scheduleLogRefresh();
+                        }
+                    }
+                });
+            }
+        }, "SystemManagerLogStatus").start();
     }
 
     private void seedWifiStateAsync(final String reason) {
@@ -3562,7 +3638,8 @@ public final class MainActivity extends Activity {
         remoteLinkStateReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                refreshStatusAndLog();
+                setRemoteLinkPill(RemoteLinkStateStore.isConnected(MainActivity.this));
+                refreshNotificationBackupStatus();
             }
         };
         IntentFilter filter = new IntentFilter(RemoteLinkStateStore.ACTION_STATE_CHANGED);
@@ -3641,6 +3718,126 @@ public final class MainActivity extends Activity {
         } catch (RuntimeException ignored) {
         }
         notificationBackupReceiver = null;
+    }
+
+    private void registerLogChangedReceiver() {
+        if (logChangedReceiver != null) {
+            return;
+        }
+        logChangedReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                scheduleLogRefresh();
+            }
+        };
+        registerInternalReceiver(logChangedReceiver, new IntentFilter(LogStore.ACTION_CHANGED));
+    }
+
+    private void unregisterLogChangedReceiver() {
+        if (logChangedReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(logChangedReceiver);
+        } catch (RuntimeException ignored) {
+        }
+        logChangedReceiver = null;
+    }
+
+    private void registerNetworkStateReceiver() {
+        if (networkStateReceiver != null) {
+            return;
+        }
+        networkStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                scheduleWifiRefresh();
+            }
+        };
+        registerInternalReceiver(networkStateReceiver,
+                new IntentFilter(NetworkStateStore.ACTION_STATE_CHANGED));
+    }
+
+    private void unregisterNetworkStateReceiver() {
+        if (networkStateReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(networkStateReceiver);
+        } catch (RuntimeException ignored) {
+        }
+        networkStateReceiver = null;
+    }
+
+    private void registerSystemStateReceiver() {
+        if (systemStateReceiver != null) {
+            return;
+        }
+        systemStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent == null ? "" : intent.getAction();
+                if (ConnectivityManager.CONNECTIVITY_ACTION.equals(action)
+                        || WifiManager.WIFI_STATE_CHANGED_ACTION.equals(action)
+                        || WifiManager.NETWORK_STATE_CHANGED_ACTION.equals(action)) {
+                    scheduleWifiRefresh();
+                    return;
+                }
+                if (Intent.ACTION_BATTERY_CHANGED.equals(action)) {
+                    refreshBeaconPanel();
+                    return;
+                }
+                // Permission and radio changes are uncommon, so a complete
+                // synchronous indicator refresh is clearer and still cheap.
+                refreshStatusAndLog();
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(ConnectivityManager.CONNECTIVITY_ACTION);
+        filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
+        filter.addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION);
+        filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
+        filter.addAction(Intent.ACTION_BATTERY_CHANGED);
+        filter.addAction(LocationManager.PROVIDERS_CHANGED_ACTION);
+        filter.addAction(LocationManager.MODE_CHANGED_ACTION);
+        filter.addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
+        filter.addAction(NotificationManager.ACTION_NOTIFICATION_POLICY_ACCESS_GRANTED_CHANGED);
+        filter.addAction(Intent.ACTION_TIME_CHANGED);
+        filter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            filter.addAction(AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED);
+        }
+        registerFrameworkReceiver(systemStateReceiver, filter);
+    }
+
+    private void unregisterSystemStateReceiver() {
+        if (systemStateReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(systemStateReceiver);
+        } catch (RuntimeException ignored) {
+        }
+        systemStateReceiver = null;
+    }
+
+    private void registerInternalReceiver(BroadcastReceiver receiver, IntentFilter filter) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
+    }
+
+    private void registerFrameworkReceiver(BroadcastReceiver receiver, IntentFilter filter) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Some framework broadcasts (Bluetooth in particular) originate
+            // from privileged apps rather than the system UID and require an
+            // exported dynamic receiver on Android 13+.
+            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
     }
 
     private void setEnabledPill(TextView target, boolean enabled) {
@@ -4316,11 +4513,11 @@ public final class MainActivity extends Activity {
         if (notificationBackupPill == null) {
             return;
         }
-        final Config config = Config.get(this);
-        final boolean enabled = switchValue(notificationBackupEnabledSwitch, config.notificationBackupEnabled());
-        final boolean linkEnabled = config.remoteLinkEnabled();
-        final boolean serverChecked = NotificationBackupStateStore.isChecked(this);
-        final boolean serverAvailable = NotificationBackupStateStore.isServerAvailable(this);
+        if (notificationBackupRefreshInFlight) {
+            pendingNotificationBackupRefresh = true;
+            return;
+        }
+        notificationBackupRefreshInFlight = true;
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -4328,14 +4525,27 @@ public final class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        applyNotificationBackupStatus(enabled, linkEnabled, serverChecked, serverAvailable, queued);
+                        notificationBackupRefreshInFlight = false;
+                        Config config = Config.get(MainActivity.this);
+                        applyNotificationBackupStatus(
+                                switchValue(notificationBackupEnabledSwitch,
+                                        config.notificationBackupEnabled()),
+                                config.remoteLinkEnabled(),
+                                RemoteLinkStateStore.isConnected(MainActivity.this),
+                                NotificationBackupStateStore.isChecked(MainActivity.this),
+                                NotificationBackupStateStore.isServerAvailable(MainActivity.this),
+                                queued);
+                        if (pendingNotificationBackupRefresh) {
+                            pendingNotificationBackupRefresh = false;
+                            refreshNotificationBackupStatus();
+                        }
                     }
                 });
             }
         }, "SystemManagerBackupStatus").start();
     }
 
-    private void applyNotificationBackupStatus(boolean enabled, boolean linkEnabled,
+    private void applyNotificationBackupStatus(boolean enabled, boolean linkEnabled, boolean linkConnected,
                                                boolean serverChecked, boolean serverAvailable, int queued) {
         if (notificationBackupPill == null) {
             return;
@@ -4356,6 +4566,12 @@ public final class MainActivity extends Activity {
             pillBg = COLOR_DANGER_CONTAINER;
             pillFg = COLOR_DANGER_ON_CONTAINER;
             message = "Turn on the Remote Link to send backups.";
+            dotColor = COLOR_BAD;
+        } else if (!linkConnected) {
+            pillText = "OFFLINE";
+            pillBg = COLOR_DANGER_CONTAINER;
+            pillFg = COLOR_DANGER_ON_CONTAINER;
+            message = "Waiting for the Remote Link to reconnect. Backups are held on this device.";
             dotColor = COLOR_BAD;
         } else if (serverChecked && !serverAvailable) {
             pillText = "SERVER OFF";

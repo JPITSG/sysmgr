@@ -12,13 +12,16 @@ final class RemoteLinkStateStore {
     }
 
     static void setConnected(Context context, boolean connected) {
-        context.getApplicationContext()
-                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit()
+        Context app = context.getApplicationContext();
+        SharedPreferences prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_CONNECTED, false) == connected) {
+            return;
+        }
+        prefs.edit()
                 .putBoolean(KEY_CONNECTED, connected)
                 .apply();
-        context.getApplicationContext().sendBroadcast(new android.content.Intent(ACTION_STATE_CHANGED)
-                .setPackage(context.getPackageName()));
+        app.sendBroadcast(new android.content.Intent(ACTION_STATE_CHANGED)
+                .setPackage(app.getPackageName()));
     }
 
     static boolean isConnected(Context context) {

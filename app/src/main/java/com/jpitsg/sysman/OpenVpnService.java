@@ -495,8 +495,8 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
     public void onByteCount(long rx, long tx) {
         rxBytes = rx;
         txBytes = tx;
-        // Persist (no broadcast) so the UI and remote status acks read fresh
-        // counts; the notification uses the in-memory values directly.
+        // Persist and notify the open activity; the notification uses the
+        // in-memory values directly and keeps its own update throttle.
         OpenVpnStateStore.setByteCounts(this, rx, tx);
         updateNotification(true);
     }

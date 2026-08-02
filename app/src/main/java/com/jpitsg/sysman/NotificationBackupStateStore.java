@@ -20,6 +20,20 @@ final class NotificationBackupStateStore {
     private NotificationBackupStateStore() {
     }
 
+    static void setChecking(Context context) {
+        Context app = context.getApplicationContext();
+        SharedPreferences prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        boolean changed = prefs.getBoolean(KEY_CHECKED, false)
+                || prefs.getBoolean(KEY_SERVER_AVAILABLE, false);
+        prefs.edit()
+                .putBoolean(KEY_SERVER_AVAILABLE, false)
+                .putBoolean(KEY_CHECKED, false)
+                .apply();
+        if (changed) {
+            app.sendBroadcast(new Intent(ACTION_STATE_CHANGED).setPackage(app.getPackageName()));
+        }
+    }
+
     static void setServerAvailable(Context context, boolean available) {
         Context app = context.getApplicationContext();
         SharedPreferences prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);

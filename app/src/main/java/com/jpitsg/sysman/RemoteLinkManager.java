@@ -70,6 +70,11 @@ final class RemoteLinkManager {
     }
 
     private static void start(Context context, String action, String reason) {
+        if (!RemoteLinkService.isRunning()) {
+            // A process death cannot run Service.onDestroy(), so clear any
+            // persisted connection state before starting a replacement.
+            RemoteLinkStateStore.setConnected(context, false);
+        }
         Intent intent = new Intent(context, RemoteLinkService.class);
         intent.setAction(action);
         intent.putExtra(EXTRA_REASON, reason == null ? "unknown" : reason);
@@ -84,6 +89,9 @@ final class RemoteLinkManager {
             // outlive the app being backgrounded either way.
             context.startForegroundService(intent);
         } catch (RuntimeException e) {
+            if (!RemoteLinkService.isRunning()) {
+                RemoteLinkStateStore.setConnected(context, false);
+            }
             LogStore.append(context, "remote", "Remote Link start failed: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());
         }

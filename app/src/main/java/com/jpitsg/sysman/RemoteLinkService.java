@@ -71,6 +71,7 @@ public final class RemoteLinkService extends Service {
     public void onCreate() {
         super.onCreate();
         activeService = this;
+        RemoteLinkStateStore.setConnected(this, false);
         ensureNotificationChannel();
         registerNetworkCallback();
     }
@@ -214,6 +215,7 @@ public final class RemoteLinkService extends Service {
                 boolean connected = false;
                 long connectedAtMillis = 0L;
                 try {
+                    NotificationBackupStateStore.setChecking(this);
                     LogStore.append(this, "remote", "Connecting to " + config.remoteLinkEndpoint());
                     current.connect();
                     connected = true;

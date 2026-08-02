@@ -1,6 +1,7 @@
 package com.jpitsg.sysman;
 
 import android.content.Context;
+import android.content.Intent;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -15,6 +16,7 @@ import java.util.Iterator;
 import java.util.Locale;
 
 final class LogStore {
+    static final String ACTION_CHANGED = "com.jpitsg.sysman.action.LOG_CHANGED";
     private static final String LOG_FILE = "system-manager.log";
     private static final String LOG_TMP_FILE = "system-manager.log.tmp";
     private static final Object LOCK = new Object();
@@ -23,8 +25,8 @@ final class LogStore {
     }
 
     static void append(Context context, String tag, String message) {
+        Context app = context.getApplicationContext();
         synchronized (LOCK) {
-            Context app = context.getApplicationContext();
             if (!Config.get(app).logEnabled()) {
                 return;
             }
@@ -38,6 +40,7 @@ final class LogStore {
             }
             trim(app, Config.get(app).logMaxLines());
         }
+        broadcastChanged(app);
     }
 
     static String readTail(Context context, int maxLines) {
@@ -68,22 +71,28 @@ final class LogStore {
     }
 
     static void clear(Context context) {
+        Context app = context.getApplicationContext();
+        boolean changed;
         synchronized (LOCK) {
-            File file = logFile(context.getApplicationContext());
-            if (file.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                file.delete();
-            }
+            File file = logFile(app);
+            changed = !file.exists() || file.delete();
+        }
+        if (changed) {
+            broadcastChanged(app);
         }
     }
 
     static void replaceWithSingleEntry(Context context, String tag, String message) {
+        Context app = context.getApplicationContext();
+        boolean changed;
         synchronized (LOCK) {
-            Context app = context.getApplicationContext();
             File file = logFile(app);
             String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(new Date());
             String line = timestamp + " [" + tag + "] " + message + "\n";
-            writeAtomically(app, file, line);
+            changed = writeAtomically(app, file, line);
+        }
+        if (changed) {
+            broadcastChanged(app);
         }
     }
 
@@ -115,7 +124,7 @@ final class LogStore {
         writeAtomically(context, file, builder.toString());
     }
 
-    private static void writeAtomically(Context context, File target, String content) {
+    private static boolean writeAtomically(Context context, File target, String content) {
         File temp = new File(context.getFilesDir(), LOG_TMP_FILE);
         try (FileOutputStream out = new FileOutputStream(temp, false)) {
             out.write(content.getBytes(StandardCharsets.UTF_8));
@@ -124,17 +133,23 @@ final class LogStore {
         } catch (Exception ignored) {
             //noinspection ResultOfMethodCallIgnored
             temp.delete();
-            return;
+            return false;
         }
 
         if (target.exists() && !target.delete()) {
             //noinspection ResultOfMethodCallIgnored
             temp.delete();
-            return;
+            return false;
         }
         if (!temp.renameTo(target)) {
             //noinspection ResultOfMethodCallIgnored
             temp.delete();
+            return false;
         }
+        return true;
+    }
+
+    private static void broadcastChanged(Context context) {
+        context.sendBroadcast(new Intent(ACTION_CHANGED).setPackage(context.getPackageName()));
     }
 }

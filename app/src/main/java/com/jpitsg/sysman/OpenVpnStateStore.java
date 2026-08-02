@@ -59,11 +59,22 @@ final class OpenVpnStateStore {
     }
 
     static void setRemote(Context context, String remote) {
-        prefs(context).edit().putString(KEY_REMOTE, remote == null ? "" : remote).apply();
+        SharedPreferences prefs = prefs(context);
+        String next = remote == null ? "" : remote;
+        if (next.equals(prefs.getString(KEY_REMOTE, ""))) {
+            return;
+        }
+        prefs.edit().putString(KEY_REMOTE, next).apply();
+        broadcast(context);
     }
 
     static void setByteCounts(Context context, long rx, long tx) {
-        prefs(context).edit().putLong(KEY_RX, rx).putLong(KEY_TX, tx).apply();
+        SharedPreferences prefs = prefs(context);
+        if (prefs.getLong(KEY_RX, 0L) == rx && prefs.getLong(KEY_TX, 0L) == tx) {
+            return;
+        }
+        prefs.edit().putLong(KEY_RX, rx).putLong(KEY_TX, tx).apply();
+        broadcast(context);
     }
 
     static String state(Context context) {

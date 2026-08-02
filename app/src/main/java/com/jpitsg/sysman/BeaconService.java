@@ -230,11 +230,19 @@ public final class BeaconService extends Service {
                 updateNotification();
             }
         };
-        // All three actions are protected system or package-local broadcasts,
-        // so they still reach a non-exported receiver.
-        registerInternal(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
-        registerInternal(bluetoothReceiver, new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED));
+        registerFramework(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        registerFramework(bluetoothReceiver, new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED));
         registerInternal(stateReceiver, new IntentFilter(BeaconStateStore.ACTION_STATE_CHANGED));
+    }
+
+    private void registerFramework(BroadcastReceiver receiver, IntentFilter filter) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Bluetooth state comes from a privileged framework app rather
+            // than the system UID on some devices, so it needs this flag.
+            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
     }
 
     private void registerInternal(BroadcastReceiver receiver, IntentFilter filter) {
