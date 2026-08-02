@@ -29,11 +29,15 @@ import android.net.Uri;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
+import android.text.Editable;
 import android.text.InputType;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.text.method.ScrollingMovementMethod;
 import android.text.style.ForegroundColorSpan;
 import android.util.LruCache;
@@ -58,6 +62,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.URI;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -94,6 +99,7 @@ public final class MainActivity extends Activity {
     private static final int STATUS_DOT_SIZE = 8;
     private static final int LOG_VISIBLE_LINES = 16;
     private static final int NOTIFICATION_HISTORY_PAGE_SIZE = 25;
+    private static final long LIVE_SAVE_DELAY_MS = 600L;
 
     private static final int COLOR_BG = Ui.COLOR_BG;
     private static final int COLOR_SURFACE = Ui.COLOR_SURFACE;
@@ -291,6 +297,16 @@ public final class MainActivity extends Activity {
     private Switch notificationBackupEnabledSwitch;
     private Switch notificationBackupIncludeSysmgrSwitch;
     private final List<Panel> panels = new ArrayList<>();
+    private final Handler liveSaveHandler = new Handler(Looper.getMainLooper());
+    private final List<LiveSaveGroup> liveSaveGroups = new ArrayList<>();
+    private LiveSaveGroup gpsSettingsSave;
+    private LiveSaveGroup highPrioritySettingsSave;
+    private LiveSaveGroup batteryAlertSettingsSave;
+    private LiveSaveGroup rebootSettingsSave;
+    private LiveSaveGroup remoteLinkSettingsSave;
+    private LiveSaveGroup vpnSettingsSave;
+    private LiveSaveGroup beaconSettingsSave;
+    private Toast settingsFeedbackToast;
     private BroadcastReceiver remoteLinkStateReceiver;
     private BroadcastReceiver notificationHistoryReceiver;
     private BroadcastReceiver notificationBackupReceiver;
@@ -328,6 +344,72 @@ public final class MainActivity extends Activity {
             this.slider = slider;
             this.unchangedSwitch = unchangedSwitch;
             this.valueView = valueView;
+        }
+    }
+
+    private interface LiveSaveAction {
+        boolean save();
+    }
+
+    /** Coalesces typing within one section while switches still persist immediately. */
+    private final class LiveSaveGroup implements Runnable {
+        private final LiveSaveAction saveAction;
+        private boolean pending;
+
+        LiveSaveGroup(LiveSaveAction saveAction) {
+            this.saveAction = saveAction;
+        }
+
+        void schedule() {
+            if (loadingConfig) {
+                return;
+            }
+            pending = true;
+            liveSaveHandler.removeCallbacks(this);
+            liveSaveHandler.postDelayed(this, LIVE_SAVE_DELAY_MS);
+        }
+
+        boolean saveNow() {
+            return saveNow(true);
+        }
+
+        boolean saveNow(boolean showToast) {
+            if (loadingConfig) {
+                return false;
+            }
+            pending = false;
+            liveSaveHandler.removeCallbacks(this);
+            boolean saved = saveAction.save();
+            if (!saved) {
+                // Keep the section dirty so a dependent action cannot proceed
+                // with stale persisted values after a failed debounce.
+                pending = true;
+            }
+            if (saved && showToast) {
+                showSettingSavedToast();
+            }
+            return saved;
+        }
+
+        boolean isPending() {
+            return pending;
+        }
+
+        void cancel() {
+            pending = false;
+            liveSaveHandler.removeCallbacks(this);
+        }
+
+        @Override
+        public void run() {
+            if (!pending) {
+                return;
+            }
+            if (loadingConfig) {
+                liveSaveHandler.postDelayed(this, LIVE_SAVE_DELAY_MS);
+                return;
+            }
+            saveNow();
         }
     }
 
@@ -411,12 +493,21 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        flushPendingLiveSaves();
         unregisterNotificationHistoryReceiver();
         unregisterNotificationBackupReceiver();
         unregisterRemoteLinkStateReceiver();
         unregisterOpenVpnStateReceiver();
         unregisterBeaconStateReceiver();
         super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        for (LiveSaveGroup group : liveSaveGroups) {
+            group.cancel();
+        }
+        super.onDestroy();
     }
 
     @Override
@@ -517,7 +608,6 @@ public final class MainActivity extends Activity {
         LinearLayout row2 = newRow();
         panel.addView(row2, stack(panel));
         addRowButton(row2, tonalButton("Send Now", action("send")));
-        addRowButton(row2, tonalButton("Save GPS Settings", action("save_gps")));
     }
 
     // ============================================================
@@ -694,9 +784,6 @@ public final class MainActivity extends Activity {
         addRowButton(row, tonalButton("Test Alert", action("test_high_priority_alert")));
         addRowButton(row, tonalButton("Notification Access", action("notification_access")));
 
-        LinearLayout saveRow = newRow();
-        frame.content.addView(saveRow, stack(frame.content));
-        addRowButton(saveRow, tonalButton("Save High Priority Settings", action("save_high_priority")));
     }
 
     private void buildBatteryAlertPanel(LinearLayout root) {
@@ -721,9 +808,6 @@ public final class MainActivity extends Activity {
         addRowButton(row, tonalButton("Test Battery Alert", action("test_battery_alert")));
         addRowButton(row, tonalButton("Notification Permission", action("notifications")));
 
-        LinearLayout saveRow = newRow();
-        frame.content.addView(saveRow, stack(frame.content));
-        addRowButton(saveRow, tonalButton("Save Battery Alert Settings", action("save_battery_alert")));
     }
 
     private void buildVolumeControlPanel(LinearLayout root) {
@@ -814,10 +898,6 @@ public final class MainActivity extends Activity {
         addRowButton(controlRow, vpnConnectButton);
         addRowButton(controlRow, vpnDisconnectButton);
 
-        LinearLayout saveRow = newRow();
-        frame.content.addView(saveRow, stack(frame.content));
-        addRowButton(saveRow, tonalButton("Save VPN Settings", action("save_vpn")));
-
         openVpnEngineVersionText = historyText("OpenVPN engine: resolving…", 11, COLOR_TEXT_FAINT, false);
         frame.content.addView(openVpnEngineVersionText, stack(frame.content));
     }
@@ -876,7 +956,6 @@ public final class MainActivity extends Activity {
         LinearLayout buttonRow = newRow();
         frame.content.addView(buttonRow, stack(frame.content));
         addRowButton(buttonRow, tonalButton("Bluetooth Settings", action("bluetooth_settings")));
-        addRowButton(buttonRow, tonalButton("Save Beacon Settings", action("save_beacon")));
     }
 
     private void addBeaconTxPowerInput(LinearLayout root) {
@@ -915,10 +994,14 @@ public final class MainActivity extends Activity {
     }
 
     private void setBeaconTxPower(int dbm) {
+        int previous = beaconTxPowerDbm;
         beaconTxPowerDbm = dbm;
         updateBeaconTxPowerButtons();
-        if (!loadingConfig) {
-            saveBeaconConfigOnly();
+        if (!loadingConfig && beaconSettingsSave != null) {
+            if (!beaconSettingsSave.saveNow()) {
+                beaconTxPowerDbm = previous;
+                updateBeaconTxPowerButtons();
+            }
         }
     }
 
@@ -971,7 +1054,6 @@ public final class MainActivity extends Activity {
         LinearLayout row2 = newRow();
         frame.content.addView(row2, stack(frame.content));
         addRowButton(row2, tonalButton("Accessibility", action("accessibility_settings")));
-        addRowButton(row2, tonalButton("Save Reboot Settings", action("save_reboot")));
     }
 
     private void buildRemoteLinkPanel(LinearLayout root) {
@@ -995,9 +1077,6 @@ public final class MainActivity extends Activity {
         addRowButton(row, tonalButton("Reconnect", action("remote_link_reconnect")));
         addRowButton(row, tonalButton("Ping", action("remote_link_ping")));
 
-        LinearLayout saveRow = newRow();
-        frame.content.addView(saveRow, stack(frame.content));
-        addRowButton(saveRow, tonalButton("Save Remote Link", action("save_remote_link")));
     }
 
     private void buildSettingsTransferPanel(LinearLayout root) {
@@ -1079,10 +1158,6 @@ public final class MainActivity extends Activity {
         frame.content.addView(buttons, stack(frame.content));
         addRowButton(buttons, tonalButton("Refresh", action("refresh_log")));
         addRowButton(buttons, neutralButton("Clear", action("clear_log")));
-
-        LinearLayout saveRow = newRow();
-        frame.content.addView(saveRow, stack(frame.content));
-        addRowButton(saveRow, tonalButton("Save Log Settings", action("save_log")));
 
         logView = new TextView(this);
         logView.setText("");
@@ -1832,7 +1907,6 @@ public final class MainActivity extends Activity {
     }
 
     private void vpnConnect() {
-        saveVpnConfigOnly();
         if (!OpenVpnProfileStore.hasProfile(this)) {
             Toast.makeText(this, "Import a profile first", Toast.LENGTH_LONG).show();
             return;
@@ -1873,7 +1947,15 @@ public final class MainActivity extends Activity {
         refreshStatusAndLog();
     }
 
-    private void saveVpnConfigOnly() {
+    private boolean saveVpnConfigOnly() {
+        boolean tapSettingsVisible = vpnTapSection != null
+                && vpnTapSection.getVisibility() == View.VISIBLE;
+        if (tapSettingsVisible
+                && (!requireIpv4(vpnTapStaticIpField, "VPN static IP", true)
+                        || !requireSubnetMask(vpnTapNetmaskField, "VPN netmask")
+                        || !requireIpv4(vpnTapGatewayField, "VPN gateway", true))) {
+            return false;
+        }
         Config.get(this).saveVpnConfig(
                 text(vpnUsernameField),
                 text(vpnPasswordField),
@@ -1883,15 +1965,21 @@ public final class MainActivity extends Activity {
                 text(vpnTapGatewayField),
                 vpnRemoteCommandEnabledSwitch.isChecked());
         refreshStatusAndLog();
+        return true;
     }
 
-    private void saveVpnSettings() {
-        saveVpnConfigOnly();
-        LogStore.append(this, "vpn", "VPN settings saved");
-        Toast.makeText(this, "VPN settings saved", Toast.LENGTH_SHORT).show();
+    private boolean saveVpnTogglesOnly() {
+        Config.get(this).saveVpnRemoteCommandConfig(vpnRemoteCommandEnabledSwitch.isChecked());
+        refreshStatusAndLog();
+        return true;
     }
 
-    private void saveBeaconConfigOnly() {
+    private boolean saveBeaconConfigOnly() {
+        if (!requireInteger(beaconMajorField, "Beacon major", 0, 65535)
+                || !requireInteger(beaconMinorField, "Beacon minor", 0, 65535)
+                || !requireInteger(beaconMeasuredPowerField, "Beacon measured power", -127, 0)) {
+            return false;
+        }
         Config.get(this).saveBeaconConfig(
                 beaconEnabledSwitch.isChecked(),
                 text(beaconMajorField),
@@ -1902,12 +1990,7 @@ public final class MainActivity extends Activity {
         // additionally makes a running service rebuild its advertisement.
         BeaconManager.refresh(this, "settings-saved");
         refreshStatusAndLog();
-    }
-
-    private void saveBeaconSettings() {
-        saveBeaconConfigOnly();
-        LogStore.append(this, "beacon", "Beacon settings saved");
-        Toast.makeText(this, "Beacon settings saved", Toast.LENGTH_SHORT).show();
+        return true;
     }
 
     private byte[] readUriBytes(Uri uri, int maxBytes) {
@@ -2488,6 +2571,7 @@ public final class MainActivity extends Activity {
         LogStore.append(this, "beacon", "Rule removed " + rule.displayThreshold());
         BeaconManager.refresh(this, "rule-removed");
         refreshStatusAndLog();
+        Toast.makeText(this, "Rule deleted", Toast.LENGTH_SHORT).show();
     }
 
     private void copyBeaconUuid() {
@@ -3060,7 +3144,6 @@ public final class MainActivity extends Activity {
             public void onAppSelected(String packageName, String label) {
                 targetField.setText(appDisplayText(packageName, label));
                 LogStore.append(MainActivity.this, "ui", "Selected app package=" + packageName + " label=" + label);
-                Toast.makeText(MainActivity.this, label, Toast.LENGTH_SHORT).show();
             }
         });
     }
@@ -3085,7 +3168,6 @@ public final class MainActivity extends Activity {
             public void onToneSelected(String title, String typeLabel) {
                 targetField.setText(title);
                 LogStore.append(MainActivity.this, "ui", "Selected alarm tone title=" + title + " type=" + typeLabel);
-                Toast.makeText(MainActivity.this, title, Toast.LENGTH_SHORT).show();
             }
         });
     }
@@ -3706,42 +3788,167 @@ public final class MainActivity extends Activity {
     }
 
     private void wireLiveSettings() {
-        bindSaveGpsConfig(useExactAlarmsSwitch);
-        bindSaveGpsConfig(allowIdleAlarmsSwitch);
-        bindSaveGpsConfig(postOnStartupSwitch);
-        bindSaveGpsConfig(postOnWifiChangeSwitch);
-        bindSaveGpsConfig(showWifiMonitorNotificationSwitch);
-        bindSaveServiceNotificationConfig(taskServiceNotificationSwitch);
-        bindSaveServiceNotificationConfig(vpnNotificationSwitch);
-        bindSaveServiceNotificationConfig(beaconNotificationSwitch);
-        bindSaveGpsConfig(useGpsProviderSwitch);
-        bindSaveGpsConfig(useNetworkProviderSwitch);
-        bindSaveGpsConfig(requestGpsOnSsidMismatchSwitch);
-        bindSaveGpsConfig(useFallbackOnSsidMatchSwitch);
-        bindSaveGpsConfig(useCachedBeforeFreshSwitch);
-        bindSaveGpsConfig(includeExtendedFieldsSwitch);
-        bindSaveGpsConfig(caseSensitiveSsidSwitch);
-        bindSaveGpsConfig(gpsUseRemoteLinkSwitch);
+        gpsSettingsSave = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveGpsConfigOnly();
+            }
+        });
+        bindLiveEdits(gpsSettingsSave,
+                serverBaseUrlField, trackPathField, ssidPatternField,
+                highBatteryIntervalField, lowBatteryIntervalField, batteryThresholdField,
+                locationTimeoutField, desiredAccuracyField, maxCachedLocationField,
+                httpTimeoutField, fallbackLatitudeField, fallbackLongitudeField);
+        bindLiveToggles(gpsSettingsSave, new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveGpsTogglesOnly();
+            }
+        },
+                useExactAlarmsSwitch, allowIdleAlarmsSwitch, postOnStartupSwitch,
+                postOnWifiChangeSwitch,
+                useGpsProviderSwitch, useNetworkProviderSwitch,
+                requestGpsOnSsidMismatchSwitch, useFallbackOnSsidMatchSwitch,
+                useCachedBeforeFreshSwitch, includeExtendedFieldsSwitch,
+                caseSensitiveSsidSwitch, gpsUseRemoteLinkSwitch);
 
-        bindSaveHighPriorityConfig(highPriorityEnabledSwitch);
-        bindSaveHighPriorityConfig(highPriorityRemoteEnabledSwitch);
-        bindSaveHighPriorityConfig(highPriorityRaiseAlarmVolumeSwitch);
+        final LiveSaveGroup serviceNotifications = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveServiceNotificationConfigOnly();
+            }
+        });
+        bindLiveToggles(serviceNotifications,
+                taskServiceNotificationSwitch, vpnNotificationSwitch, beaconNotificationSwitch);
 
-        bindSaveBatteryAlertConfig(batteryAlertEnabledSwitch);
-        bindSaveBatteryAlertConfig(batteryAlertUseExactAlarmsSwitch);
-        bindSaveBatteryAlertConfig(batteryAlertAllowIdleAlarmsSwitch);
+        final LiveSaveGroup wifiMonitorNotification = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                Config.get(MainActivity.this).saveWifiMonitorNotificationConfig(
+                        showWifiMonitorNotificationSwitch.isChecked());
+                NetworkMonitorService.sync(MainActivity.this);
+                refreshStatusAndLog();
+                return true;
+            }
+        });
+        bindLiveToggles(wifiMonitorNotification, showWifiMonitorNotificationSwitch);
 
-        bindSaveRebootConfig(rebootAutomationEnabledSwitch);
-        bindSaveRebootConfig(rebootNotificationTriggerEnabledSwitch);
-        bindSaveRebootConfig(rebootRemoteTriggerEnabledSwitch);
-        bindSaveRebootConfig(rebootScheduleEnabledSwitch);
-        bindSaveRebootConfig(rebootOnlyWhenWifiNotMatchingSwitch);
+        highPrioritySettingsSave = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveHighPriorityConfigOnly();
+            }
+        });
+        bindLiveEdits(highPrioritySettingsSave,
+                highPriorityPackageField,
+                highPriorityTitleFilterField, highPriorityTitleExcludeField,
+                highPriorityTextFilterField, highPriorityTextExcludeField,
+                highPriorityRemoteTitleFilterField, highPriorityRemoteTitleExcludeField,
+                highPriorityRemoteTextFilterField, highPriorityRemoteTextExcludeField,
+                highPriorityRemoteDedupeSecondsField, highPriorityToneTitleField,
+                highPriorityPlaySecondsField, highPriorityDedupeSecondsField,
+                highPriorityAlarmVolumePercentField);
+        bindLiveToggles(highPrioritySettingsSave, new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveHighPriorityTogglesOnly();
+            }
+        },
+                highPriorityEnabledSwitch, highPriorityRemoteEnabledSwitch,
+                highPriorityRaiseAlarmVolumeSwitch);
 
-        bindSaveRemoteLinkConfig(remoteLinkEnabledSwitch);
-        bindSaveRemoteLinkConfig(remoteLinkAcceptAnySslCertSwitch);
-        bindSaveRemoteLinkConfig(remoteLinkShowNotificationSwitch);
+        batteryAlertSettingsSave = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveBatteryAlertConfigOnly();
+            }
+        });
+        bindLiveEdits(batteryAlertSettingsSave,
+                batteryAlertThresholdField, batteryAlertCheckIntervalField,
+                batteryAlertVibrateSecondsField);
+        bindLiveToggles(batteryAlertSettingsSave, new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveBatteryAlertTogglesOnly();
+            }
+        },
+                batteryAlertEnabledSwitch, batteryAlertUseExactAlarmsSwitch,
+                batteryAlertAllowIdleAlarmsSwitch);
 
-        bindSaveVpnConfig(vpnRemoteCommandEnabledSwitch);
+        rebootSettingsSave = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveRebootConfigOnly();
+            }
+        });
+        bindLiveEdits(rebootSettingsSave,
+                rebootTriggerPackageField, rebootTriggerTitleField, rebootTriggerTextField,
+                rebootScheduleHourField, rebootScheduleMinuteField, rebootWifiPatternField,
+                rebootPinSequenceField, rebootDelayedTestSecondsField,
+                rebootPowerDialogWaitMsField, rebootStepWaitMsField);
+        bindLiveToggles(rebootSettingsSave, new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveRebootTogglesOnly();
+            }
+        },
+                rebootAutomationEnabledSwitch, rebootNotificationTriggerEnabledSwitch,
+                rebootRemoteTriggerEnabledSwitch, rebootScheduleEnabledSwitch,
+                rebootOnlyWhenWifiNotMatchingSwitch);
+
+        remoteLinkSettingsSave = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveRemoteLinkConfigLive();
+            }
+        });
+        bindLiveEdits(remoteLinkSettingsSave,
+                remoteLinkEndpointField, remoteLinkUsernameField,
+                remoteLinkPasswordField, remoteLinkHeartbeatSecondsField);
+        bindLiveToggles(remoteLinkSettingsSave, new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveRemoteLinkTogglesOnly();
+            }
+        },
+                remoteLinkEnabledSwitch, remoteLinkAcceptAnySslCertSwitch);
+
+        final LiveSaveGroup remoteLinkNotification = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                Config.get(MainActivity.this).saveRemoteLinkNotificationConfig(
+                        remoteLinkShowNotificationSwitch.isChecked());
+                RemoteLinkManager.sync(MainActivity.this, "remote-link-notification-live");
+                refreshStatusAndLog();
+                return true;
+            }
+        });
+        bindLiveToggles(remoteLinkNotification, remoteLinkShowNotificationSwitch);
+
+        vpnSettingsSave = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveVpnConfigOnly();
+            }
+        });
+        bindLiveEdits(vpnSettingsSave,
+                vpnUsernameField, vpnPasswordField, vpnKeyPassphraseField,
+                vpnTapStaticIpField, vpnTapNetmaskField, vpnTapGatewayField);
+        bindLiveToggles(vpnSettingsSave, new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveVpnTogglesOnly();
+            }
+        }, vpnRemoteCommandEnabledSwitch);
+
+        beaconSettingsSave = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveBeaconConfigOnly();
+            }
+        });
+        bindLiveEdits(beaconSettingsSave,
+                beaconMajorField, beaconMinorField, beaconMeasuredPowerField);
 
         beaconEnabledSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
@@ -3749,102 +3956,360 @@ public final class MainActivity extends Activity {
                 if (loadingConfig) {
                     return;
                 }
-                saveBeaconConfigOnly();
+                boolean saved = beaconSettingsSave.saveNow();
+                if (!saved && !isChecked) {
+                    Config.get(MainActivity.this).setBeaconEnabled(false);
+                    BeaconManager.refresh(MainActivity.this, "beacon-disabled-live");
+                    refreshStatusAndLog();
+                    showSettingSavedToast();
+                    saved = true;
+                }
+                if (!saved) {
+                    loadingConfig = true;
+                    try {
+                        buttonView.setChecked(!isChecked);
+                    } finally {
+                        loadingConfig = false;
+                    }
+                    return;
+                }
                 if (isChecked && !PermissionState.hasBluetoothAdvertise(MainActivity.this)) {
                     requestBluetoothAdvertise();
                 }
             }
         });
 
-        bindSaveNotificationBackupConfig(notificationBackupEnabledSwitch);
-        bindSaveNotificationBackupConfig(notificationBackupIncludeSysmgrSwitch);
-
-        clearNotificationsOnOpenSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+        final LiveSaveGroup notificationBackupSettings = liveSaveGroup(new LiveSaveAction() {
             @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                Config.get(MainActivity.this).saveNotificationHistoryConfig(isChecked);
-                refreshStatusAndLog();
+            public boolean save() {
+                return saveNotificationBackupConfigOnly();
             }
         });
+        bindLiveToggles(notificationBackupSettings,
+                notificationBackupEnabledSwitch, notificationBackupIncludeSysmgrSwitch);
 
-        logEnabledSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+        final LiveSaveGroup notificationHistorySettings = liveSaveGroup(new LiveSaveAction() {
             @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                Config.get(MainActivity.this).saveLogConfig(isChecked, text(logMaxLinesField));
+            public boolean save() {
+                Config.get(MainActivity.this).saveNotificationHistoryConfig(
+                        clearNotificationsOnOpenSwitch.isChecked());
                 refreshStatusAndLog();
+                return true;
             }
         });
+        bindLiveToggles(notificationHistorySettings, clearNotificationsOnOpenSwitch);
+
+        final LiveSaveGroup logSettings = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveLogConfigOnly();
+            }
+        });
+        bindLiveEdits(logSettings, logMaxLinesField);
+        bindLiveToggles(logSettings, new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveLogToggleOnly();
+            }
+        }, logEnabledSwitch);
     }
 
-    private void bindSaveGpsConfig(Switch sw) {
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                saveGpsConfigOnly();
-            }
-        });
+    private LiveSaveGroup liveSaveGroup(LiveSaveAction saveAction) {
+        LiveSaveGroup group = new LiveSaveGroup(saveAction);
+        liveSaveGroups.add(group);
+        return group;
     }
 
-    private void bindSaveServiceNotificationConfig(Switch sw) {
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+    private void bindLiveEdits(final LiveSaveGroup group, EditText... fields) {
+        TextWatcher watcher = new TextWatcher() {
             @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                saveServiceNotificationConfigOnly();
+            public void beforeTextChanged(CharSequence text, int start, int count, int after) {
             }
-        });
+
+            @Override
+            public void onTextChanged(CharSequence text, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable editable) {
+                group.schedule();
+            }
+        };
+        for (EditText field : fields) {
+            if (field != null) {
+                field.addTextChangedListener(watcher);
+            }
+        }
+    }
+
+    private void bindLiveToggles(final LiveSaveGroup group, Switch... switches) {
+        bindLiveToggles(group, null, switches);
+    }
+
+    private void bindLiveToggles(final LiveSaveGroup group,
+                                 final LiveSaveAction disabledToggleSaveAction,
+                                 Switch... switches) {
+        for (Switch sw : switches) {
+            if (sw == null) {
+                continue;
+            }
+            sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+                @Override
+                public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                    if (loadingConfig) {
+                        return;
+                    }
+                    boolean saved = group.saveNow();
+                    if (!saved && !isChecked && disabledToggleSaveAction != null) {
+                        saved = disabledToggleSaveAction.save();
+                        if (saved) {
+                            showSettingSavedToast();
+                        }
+                    }
+                    if (!saved) {
+                        loadingConfig = true;
+                        try {
+                            buttonView.setChecked(!isChecked);
+                        } finally {
+                            loadingConfig = false;
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    private boolean flushPendingLiveSaves() {
+        boolean attempted = false;
+        boolean allSaved = true;
+        for (LiveSaveGroup group : liveSaveGroups) {
+            if (!group.isPending()) {
+                continue;
+            }
+            attempted = true;
+            if (!group.saveNow(false)) {
+                allSaved = false;
+            }
+        }
+        if (attempted && allSaved) {
+            showSettingSavedToast();
+        }
+        return allSaved;
+    }
+
+    private boolean flushLiveSaveGroup(LiveSaveGroup group) {
+        if (group == null || !group.isPending()) {
+            return true;
+        }
+        boolean saved = group.saveNow(false);
+        if (saved) {
+            showSettingSavedToast();
+        }
+        return saved;
+    }
+
+    private boolean flushSettingsForAction(String command) {
+        if ("export_settings".equals(command)) {
+            return flushPendingLiveSaves();
+        }
+        if ("start".equals(command) || "send".equals(command)) {
+            return flushLiveSaveGroup(gpsSettingsSave);
+        }
+        if ("test_high_priority_alert".equals(command)) {
+            return flushLiveSaveGroup(highPrioritySettingsSave);
+        }
+        if ("test_battery_alert".equals(command)) {
+            return flushLiveSaveGroup(batteryAlertSettingsSave);
+        }
+        if ("test_reboot_now".equals(command) || "test_reboot_delayed".equals(command)) {
+            return flushLiveSaveGroup(rebootSettingsSave);
+        }
+        if ("remote_link_reconnect".equals(command)) {
+            return flushLiveSaveGroup(remoteLinkSettingsSave);
+        }
+        if ("vpn_connect".equals(command)) {
+            return flushLiveSaveGroup(vpnSettingsSave);
+        }
+        return true;
+    }
+
+    private void showSettingSavedToast() {
+        if (settingsFeedbackToast != null) {
+            settingsFeedbackToast.cancel();
+        }
+        settingsFeedbackToast = Toast.makeText(
+                getApplicationContext(), "Setting saved", Toast.LENGTH_SHORT);
+        settingsFeedbackToast.show();
+    }
+
+    private boolean requireInteger(EditText field, String label, int min, int max) {
+        try {
+            int value = Integer.parseInt(text(field).trim());
+            if (value < min || value > max) {
+                return invalidSetting(field, label, "Use a value from " + min + " to " + max);
+            }
+            field.setError(null);
+            return true;
+        } catch (RuntimeException e) {
+            return invalidSetting(field, label, "Use a value from " + min + " to " + max);
+        }
+    }
+
+    private boolean requireDecimal(EditText field, String label, double min, double max) {
+        try {
+            double value = Double.parseDouble(text(field).trim());
+            if (Double.isNaN(value) || Double.isInfinite(value) || value < min || value > max) {
+                return invalidSetting(field, label, "Use a value from " + min + " to " + max);
+            }
+            field.setError(null);
+            return true;
+        } catch (RuntimeException e) {
+            return invalidSetting(field, label, "Use a value from " + min + " to " + max);
+        }
+    }
+
+    private boolean requireText(EditText field, String label) {
+        if (text(field).trim().isEmpty()) {
+            return invalidSetting(field, label, "This value is required");
+        }
+        field.setError(null);
+        return true;
+    }
+
+    private boolean requireAppSelection(EditText field, String label) {
+        if (appPackageFromField(field).trim().isEmpty()) {
+            return invalidSetting(field, label, "Choose an app");
+        }
+        field.setError(null);
+        return true;
+    }
+
+    private boolean requireEndpoint(EditText field, String label, String... allowedSchemes) {
+        String value = text(field).trim();
+        try {
+            URI uri = URI.create(value);
+            String scheme = uri.getScheme();
+            boolean allowed = false;
+            if (scheme != null) {
+                for (String candidate : allowedSchemes) {
+                    if (candidate.equalsIgnoreCase(scheme)) {
+                        allowed = true;
+                        break;
+                    }
+                }
+            }
+            int port = uri.getPort();
+            if (!allowed
+                    || uri.getHost() == null
+                    || uri.getHost().trim().isEmpty()
+                    || port == 0
+                    || port > 65535) {
+                return invalidSetting(field, label, "Use a complete server URL");
+            }
+            field.setError(null);
+            return true;
+        } catch (RuntimeException e) {
+            return invalidSetting(field, label, "Use a complete server URL");
+        }
+    }
+
+    private boolean requireIpv4(EditText field, String label, boolean optional) {
+        String value = text(field).trim();
+        if (optional && value.isEmpty()) {
+            field.setError(null);
+            return true;
+        }
+        if (strictIpv4Value(value) < 0L) {
+            return invalidSetting(field, label, "Use a dotted IPv4 address");
+        }
+        field.setError(null);
+        return true;
+    }
+
+    private boolean requireSubnetMask(EditText field, String label) {
+        long mask = strictIpv4Value(text(field).trim());
+        long inverted = (~mask) & 0xffffffffL;
+        if (mask <= 0L || (inverted & (inverted + 1L)) != 0L) {
+            return invalidSetting(field, label, "Use a contiguous subnet mask");
+        }
+        field.setError(null);
+        return true;
+    }
+
+    private static long strictIpv4Value(String value) {
+        String[] parts = value.split("\\.", -1);
+        if (parts.length != 4) {
+            return -1L;
+        }
+        long result = 0L;
+        for (String part : parts) {
+            if (part.isEmpty() || part.length() > 3) {
+                return -1L;
+            }
+            for (int i = 0; i < part.length(); i++) {
+                char character = part.charAt(i);
+                if (character < '0' || character > '9') {
+                    return -1L;
+                }
+            }
+            int octet;
+            try {
+                octet = Integer.parseInt(part);
+            } catch (NumberFormatException e) {
+                return -1L;
+            }
+            if (octet > 255) {
+                return -1L;
+            }
+            result = (result << 8) | octet;
+        }
+        return result;
+    }
+
+    private boolean invalidSetting(EditText field, String label, String message) {
+        field.setError(message);
+        if (settingsFeedbackToast != null) {
+            settingsFeedbackToast.cancel();
+        }
+        settingsFeedbackToast = Toast.makeText(
+                getApplicationContext(), "Check " + label, Toast.LENGTH_SHORT);
+        settingsFeedbackToast.show();
+        return false;
     }
 
     /**
      * Saves the visibility choices and nudges each running service so it
-     * re-posts on the right channel straight away. The task runner is
-     * short-lived enough to pick the change up on its next run.
+     * re-posts on the right channel straight away.
      */
-    private void saveServiceNotificationConfigOnly() {
+    private boolean saveServiceNotificationConfigOnly() {
         Config.get(this).saveServiceNotificationConfig(
                 taskServiceNotificationSwitch.isChecked(),
                 vpnNotificationSwitch.isChecked(),
                 beaconNotificationSwitch.isChecked());
-        BeaconManager.refresh(this, "service-notifications");
+        SystemTaskService.refreshNotification();
+        BeaconManager.sync(this, "service-notifications");
         OpenVpnService.refreshNotification(this);
         LogStore.append(this, "ui", "Service notification visibility saved"
                 + " task=" + taskServiceNotificationSwitch.isChecked()
                 + " vpn=" + vpnNotificationSwitch.isChecked()
                 + " beacon=" + beaconNotificationSwitch.isChecked());
         refreshStatusAndLog();
+        return true;
     }
 
-    private void bindSaveNotificationBackupConfig(Switch sw) {
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                boolean enabled = notificationBackupEnabledSwitch.isChecked();
-                Config.get(MainActivity.this).saveNotificationBackupConfig(
-                        enabled, notificationBackupIncludeSysmgrSwitch.isChecked());
-                LogStore.append(MainActivity.this, "ui", "Notification backup settings saved enabled=" + enabled);
-                if (enabled) {
-                    // Bring the Remote Link up (if enabled) and ask the server whether
-                    // it is storing notifications, so we can tell the user right away.
-                    RemoteLinkManager.sync(MainActivity.this, "notification-backup-enable");
-                    RemoteLinkManager.probeBackup(MainActivity.this, "backup-toggle");
-                }
-                refreshNotificationBackupStatus();
-            }
-        });
+    private boolean saveNotificationBackupConfigOnly() {
+        boolean enabled = notificationBackupEnabledSwitch.isChecked();
+        Config.get(this).saveNotificationBackupConfig(
+                enabled, notificationBackupIncludeSysmgrSwitch.isChecked());
+        LogStore.append(this, "ui", "Notification backup settings saved enabled=" + enabled);
+        if (enabled) {
+            // Bring the Remote Link up (if enabled) and ask the server whether
+            // it is storing notifications, so we can tell the user right away.
+            RemoteLinkManager.sync(this, "notification-backup-enable");
+            RemoteLinkManager.probeBackup(this, "backup-toggle");
+        }
+        refreshNotificationBackupStatus();
+        return true;
     }
 
     private void refreshNotificationBackupStatus() {
@@ -3952,68 +4417,28 @@ public final class MainActivity extends Activity {
         dot.setBackground(drawable);
     }
 
-    private void bindSaveHighPriorityConfig(Switch sw) {
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                saveHighPriorityConfigOnly();
-            }
-        });
-    }
-
-    private void bindSaveBatteryAlertConfig(Switch sw) {
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                saveBatteryAlertConfigOnly();
-            }
-        });
-    }
-
-    private void bindSaveRebootConfig(Switch sw) {
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                saveRebootConfigOnly();
-            }
-        });
-    }
-
-    private void bindSaveRemoteLinkConfig(Switch sw) {
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                saveRemoteLinkConfigLive();
-            }
-        });
-    }
-
-    private void bindSaveVpnConfig(Switch sw) {
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (loadingConfig) {
-                    return;
-                }
-                saveVpnConfigOnly();
-            }
-        });
-    }
-
-    private void saveConfig(boolean toast) {
-        Config.get(this).saveGpsConfig(
+    private boolean saveGpsConfigOnly() {
+        if (!requireEndpoint(serverBaseUrlField, "GPS server URL", "http", "https")
+                || !requireText(trackPathField, "GPS track path")
+                || !requireText(ssidPatternField, "GPS SSID pattern")
+                || !requireInteger(highBatteryIntervalField, "High-battery interval", 1, 1440)
+                || !requireInteger(lowBatteryIntervalField, "Low-battery interval", 1, 1440)
+                || !requireInteger(batteryThresholdField, "GPS battery threshold", 1, 100)
+                || !requireInteger(locationTimeoutField, "Location timeout", 5, 300)
+                || !requireInteger(desiredAccuracyField, "Desired accuracy", 1, 10000)
+                || !requireInteger(maxCachedLocationField, "Cached location age", 0, 1440)
+                || !requireInteger(httpTimeoutField, "HTTP timeout", 1, 120)
+                || !requireDecimal(fallbackLatitudeField, "Fallback latitude", -90d, 90d)
+                || !requireDecimal(fallbackLongitudeField, "Fallback longitude", -180d, 180d)) {
+            return false;
+        }
+        Config config = Config.get(this);
+        int previousHighInterval = config.highBatteryIntervalMinutes();
+        int previousLowInterval = config.lowBatteryIntervalMinutes();
+        int previousBatteryThreshold = config.batteryThresholdPercent();
+        boolean alarmModeChanged = config.useExactAlarms() != useExactAlarmsSwitch.isChecked()
+                || config.allowIdleAlarms() != allowIdleAlarmsSwitch.isChecked();
+        config.saveGpsConfig(
                 text(serverBaseUrlField),
                 text(trackPathField),
                 text(ssidPatternField),
@@ -4038,112 +4463,68 @@ public final class MainActivity extends Activity {
                 useFallbackOnSsidMatchSwitch.isChecked(),
                 useCachedBeforeFreshSwitch.isChecked(),
                 includeExtendedFieldsSwitch.isChecked(),
-                caseSensitiveSsidSwitch.isChecked(),
-                text(logMaxLinesField));
-        Config.get(this).saveHighPriorityConfig(
-                highPriorityEnabledSwitch.isChecked(),
-                appPackageFromField(highPriorityPackageField),
-                highPriorityFilterFromFields(),
-                highPriorityRemoteEnabledSwitch.isChecked(),
-                highPriorityRemoteFilterFromFields(),
-                text(highPriorityRemoteDedupeSecondsField),
-                text(highPriorityToneTitleField),
-                text(highPriorityPlaySecondsField),
-                text(highPriorityDedupeSecondsField),
-                highPriorityRaiseAlarmVolumeSwitch.isChecked(),
-                text(highPriorityAlarmVolumePercentField));
-        Config.get(this).saveBatteryAlertConfig(
-                batteryAlertEnabledSwitch.isChecked(),
-                text(batteryAlertThresholdField),
-                text(batteryAlertCheckIntervalField),
-                text(batteryAlertVibrateSecondsField),
-                batteryAlertUseExactAlarmsSwitch.isChecked(),
-                batteryAlertAllowIdleAlarmsSwitch.isChecked());
-        Config.get(this).saveRebootConfig(
-                rebootAutomationEnabledSwitch.isChecked(),
-                rebootNotificationTriggerEnabledSwitch.isChecked(),
-                rebootRemoteTriggerEnabledSwitch.isChecked(),
-                rebootScheduleEnabledSwitch.isChecked(),
-                appPackageFromField(rebootTriggerPackageField),
-                text(rebootTriggerTitleField),
-                text(rebootTriggerTextField),
-                text(rebootScheduleHourField),
-                text(rebootScheduleMinuteField),
-                text(rebootWifiPatternField),
-                rebootOnlyWhenWifiNotMatchingSwitch.isChecked(),
-                text(rebootPinSequenceField),
-                text(rebootDelayedTestSecondsField),
-                text(rebootPowerDialogWaitMsField),
-                text(rebootStepWaitMsField));
-        Config.get(this).saveRemoteLinkConfig(
-                remoteLinkEnabledSwitch.isChecked(),
-                text(remoteLinkEndpointField),
-                text(remoteLinkUsernameField),
-                text(remoteLinkPasswordField),
-                text(remoteLinkHeartbeatSecondsField),
-                remoteLinkAcceptAnySslCertSwitch.isChecked(),
-                remoteLinkShowNotificationSwitch.isChecked());
-        Config.get(this).saveLogConfig(
-                logEnabledSwitch.isChecked(),
-                text(logMaxLinesField));
-        Config.get(this).saveNotificationHistoryConfig(
-                clearNotificationsOnOpenSwitch.isChecked());
-        Config.get(this).saveNotificationBackupConfig(
-                notificationBackupEnabledSwitch.isChecked(),
-                notificationBackupIncludeSysmgrSwitch.isChecked());
-        LogStore.append(this, "ui", "Configuration saved");
+                caseSensitiveSsidSwitch.isChecked());
         NetworkMonitorService.sync(this);
-        BatteryAlertManager.sync(this, "config-save");
-        VolumeControlManager.sync(this, "config-save");
-        RebootManager.sync(this, "config-save");
-        RemoteLinkManager.restart(this, "config-save");
-        if (toast) {
-            Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show();
+        boolean gpsScheduleChanged = previousHighInterval != config.highBatteryIntervalMinutes()
+                || previousLowInterval != config.lowBatteryIntervalMinutes()
+                || previousBatteryThreshold != config.batteryThresholdPercent()
+                || alarmModeChanged;
+        if (config.isTrackingEnabled() && gpsScheduleChanged) {
+            AlarmScheduler.scheduleGpsPost(this, "gps-config-live");
+        }
+        if (alarmModeChanged) {
+            // These two features share the GPS exact/idle alarm policy. Only
+            // reschedule them here; applying the current volume rule would be
+            // a surprising side effect of editing an unrelated GPS field.
+            AlarmScheduler.scheduleNextVolumeRule(this, "alarm-policy-live");
+            RebootManager.sync(this, "alarm-policy-live");
         }
         refreshStatusAndLog();
+        return true;
     }
 
-    private void saveGpsConfigOnly() {
-        Config.get(this).saveGpsConfig(
-                text(serverBaseUrlField),
-                text(trackPathField),
-                text(ssidPatternField),
-                text(highBatteryIntervalField),
-                text(lowBatteryIntervalField),
-                text(batteryThresholdField),
-                text(locationTimeoutField),
-                text(desiredAccuracyField),
-                text(maxCachedLocationField),
-                text(httpTimeoutField),
-                text(fallbackLatitudeField),
-                text(fallbackLongitudeField),
+    private boolean saveGpsTogglesOnly() {
+        Config config = Config.get(this);
+        boolean alarmModeChanged = config.useExactAlarms() != useExactAlarmsSwitch.isChecked()
+                || config.allowIdleAlarms() != allowIdleAlarmsSwitch.isChecked();
+        config.saveGpsToggleConfig(
                 gpsUseRemoteLinkSwitch.isChecked(),
                 useExactAlarmsSwitch.isChecked(),
                 allowIdleAlarmsSwitch.isChecked(),
                 postOnStartupSwitch.isChecked(),
                 postOnWifiChangeSwitch.isChecked(),
-                showWifiMonitorNotificationSwitch.isChecked(),
                 useGpsProviderSwitch.isChecked(),
                 useNetworkProviderSwitch.isChecked(),
                 requestGpsOnSsidMismatchSwitch.isChecked(),
                 useFallbackOnSsidMatchSwitch.isChecked(),
                 useCachedBeforeFreshSwitch.isChecked(),
                 includeExtendedFieldsSwitch.isChecked(),
-                caseSensitiveSsidSwitch.isChecked(),
-                text(logMaxLinesField));
+                caseSensitiveSsidSwitch.isChecked());
         NetworkMonitorService.sync(this);
-        VolumeControlManager.sync(this, "gps-config-live");
-        RebootManager.sync(this, "gps-config-live");
+        if (config.isTrackingEnabled() && alarmModeChanged) {
+            AlarmScheduler.scheduleGpsPost(this, "gps-toggle-live");
+        }
+        if (alarmModeChanged) {
+            AlarmScheduler.scheduleNextVolumeRule(this, "alarm-policy-live");
+            RebootManager.sync(this, "alarm-policy-live");
+        }
         refreshStatusAndLog();
+        return true;
     }
 
-    private void saveGpsSettings() {
-        saveGpsConfigOnly();
-        LogStore.append(this, "ui", "GPS settings saved");
-        Toast.makeText(this, "GPS settings saved", Toast.LENGTH_SHORT).show();
-    }
-
-    private void saveHighPriorityConfigOnly() {
+    private boolean saveHighPriorityConfigOnly() {
+        if (!highPriorityEnabledSwitch.isChecked()) {
+            highPriorityPackageField.setError(null);
+        }
+        if ((highPriorityEnabledSwitch.isChecked()
+                    && !requireAppSelection(highPriorityPackageField, "High-priority app"))
+                || !requireInteger(highPriorityDedupeSecondsField, "Alert duplicate window", 0, 3600)
+                || !requireInteger(highPriorityRemoteDedupeSecondsField,
+                        "Remote alert duplicate window", 0, 3600)
+                || !requireInteger(highPriorityPlaySecondsField, "Alert play duration", 1, 300)
+                || !requireInteger(highPriorityAlarmVolumePercentField, "Alert volume", 1, 100)) {
+            return false;
+        }
         Config.get(this).saveHighPriorityConfig(
                 highPriorityEnabledSwitch.isChecked(),
                 appPackageFromField(highPriorityPackageField),
@@ -4157,6 +4538,16 @@ public final class MainActivity extends Activity {
                 highPriorityRaiseAlarmVolumeSwitch.isChecked(),
                 text(highPriorityAlarmVolumePercentField));
         refreshStatusAndLog();
+        return true;
+    }
+
+    private boolean saveHighPriorityTogglesOnly() {
+        Config.get(this).saveHighPriorityToggleConfig(
+                highPriorityEnabledSwitch.isChecked(),
+                highPriorityRemoteEnabledSwitch.isChecked(),
+                highPriorityRaiseAlarmVolumeSwitch.isChecked());
+        refreshStatusAndLog();
+        return true;
     }
 
     private AlertTextFilter highPriorityFilterFromFields() {
@@ -4175,28 +4566,48 @@ public final class MainActivity extends Activity {
                 text(highPriorityRemoteTextExcludeField));
     }
 
-    private void saveHighPrioritySettings() {
-        saveHighPriorityConfigOnly();
-        LogStore.append(this, "ui", "High priority settings saved");
-        Toast.makeText(this, "High priority settings saved", Toast.LENGTH_SHORT).show();
-    }
-
-    private void saveBatteryAlertConfigOnly() {
-        Config.get(this).saveBatteryAlertConfig(
+    private boolean saveBatteryAlertConfigOnly() {
+        if (!requireInteger(batteryAlertThresholdField, "Battery alert threshold", 1, 100)
+                || !requireInteger(batteryAlertCheckIntervalField,
+                        "Battery alert interval", 1, 1440)
+                || !requireInteger(batteryAlertVibrateSecondsField,
+                        "Battery alert vibration", 0, 60)) {
+            return false;
+        }
+        Config config = Config.get(this);
+        boolean scheduleChanged = config.batteryAlertEnabled() != batteryAlertEnabledSwitch.isChecked()
+                || config.batteryAlertCheckIntervalMinutes()
+                != Integer.parseInt(text(batteryAlertCheckIntervalField).trim())
+                || config.batteryAlertUseExactAlarms() != batteryAlertUseExactAlarmsSwitch.isChecked()
+                || config.batteryAlertAllowIdleAlarms() != batteryAlertAllowIdleAlarmsSwitch.isChecked();
+        config.saveBatteryAlertConfig(
                 batteryAlertEnabledSwitch.isChecked(),
                 text(batteryAlertThresholdField),
                 text(batteryAlertCheckIntervalField),
                 text(batteryAlertVibrateSecondsField),
                 batteryAlertUseExactAlarmsSwitch.isChecked(),
                 batteryAlertAllowIdleAlarmsSwitch.isChecked());
-        BatteryAlertManager.sync(this, "battery-config-live");
+        if (scheduleChanged) {
+            BatteryAlertManager.sync(this, "battery-config-live");
+        }
         refreshStatusAndLog();
+        return true;
     }
 
-    private void saveBatteryAlertSettings() {
-        saveBatteryAlertConfigOnly();
-        LogStore.append(this, "ui", "Battery alert settings saved");
-        Toast.makeText(this, "Battery alert settings saved", Toast.LENGTH_SHORT).show();
+    private boolean saveBatteryAlertTogglesOnly() {
+        Config config = Config.get(this);
+        boolean scheduleChanged = config.batteryAlertEnabled() != batteryAlertEnabledSwitch.isChecked()
+                || config.batteryAlertUseExactAlarms() != batteryAlertUseExactAlarmsSwitch.isChecked()
+                || config.batteryAlertAllowIdleAlarms() != batteryAlertAllowIdleAlarmsSwitch.isChecked();
+        config.saveBatteryAlertToggleConfig(
+                batteryAlertEnabledSwitch.isChecked(),
+                batteryAlertUseExactAlarmsSwitch.isChecked(),
+                batteryAlertAllowIdleAlarmsSwitch.isChecked());
+        if (scheduleChanged) {
+            BatteryAlertManager.sync(this, "battery-toggle-live");
+        }
+        refreshStatusAndLog();
+        return true;
     }
 
     private void addVolumeRule() {
@@ -4232,7 +4643,6 @@ public final class MainActivity extends Activity {
     }
 
     private void startTracking() {
-        saveConfig(false);
         Config config = Config.get(this);
         config.setTrackingEnabled(true);
         seedWifiStateAsync("manual-start");
@@ -4259,7 +4669,6 @@ public final class MainActivity extends Activity {
     }
 
     private void sendNow() {
-        saveGpsConfigOnly();
         LogStore.append(this, "ui", "Manual send requested");
         try {
             SystemTaskService.startTask(this, TaskIds.GPS_POST, "manual-send", false);
@@ -4360,7 +4769,6 @@ public final class MainActivity extends Activity {
     }
 
     private void testHighPriorityAlert() {
-        saveConfig(false);
         LogStore.append(this, "ui", "Manual high-priority alert test requested");
         HighPriorityAlertPlayer.play(this, "manual-test");
         Toast.makeText(this, "Alert test started", Toast.LENGTH_SHORT).show();
@@ -4368,7 +4776,6 @@ public final class MainActivity extends Activity {
     }
 
     private void testBatteryAlert() {
-        saveConfig(false);
         LogStore.append(this, "ui", "Manual battery alert test requested");
         BatteryAlertManager.sendTestNotification(this);
         Toast.makeText(this, "Battery alert test sent", Toast.LENGTH_SHORT).show();
@@ -4376,7 +4783,6 @@ public final class MainActivity extends Activity {
     }
 
     private void testRebootNow() {
-        saveConfig(false);
         LogStore.append(this, "ui", "Manual reboot test requested");
         boolean started = RebootManager.requestReboot(this, "manual-test");
         Toast.makeText(this, started ? "Reboot automation started" : "Enable Accessibility first", Toast.LENGTH_LONG).show();
@@ -4384,14 +4790,19 @@ public final class MainActivity extends Activity {
     }
 
     private void testRebootDelayed() {
-        saveConfig(false);
         LogStore.append(this, "ui", "Delayed reboot lock test requested");
         RebootManager.scheduleDelayedTest(this, "manual-delayed-test");
         Toast.makeText(this, "Lock the phone now", Toast.LENGTH_LONG).show();
         refreshStatusAndLog();
     }
 
-    private void saveRemoteLinkConfigOnly() {
+    private boolean saveRemoteLinkConfigOnly() {
+        if (!requireEndpoint(remoteLinkEndpointField, "Remote Link endpoint",
+                "http", "https", "ws", "wss")
+                || !requireInteger(remoteLinkHeartbeatSecondsField,
+                        "Remote Link heartbeat", 10, 3600)) {
+            return false;
+        }
         Config.get(this).saveRemoteLinkConfig(
                 remoteLinkEnabledSwitch.isChecked(),
                 text(remoteLinkEndpointField),
@@ -4401,21 +4812,28 @@ public final class MainActivity extends Activity {
                 remoteLinkAcceptAnySslCertSwitch.isChecked(),
                 remoteLinkShowNotificationSwitch.isChecked());
         LogStore.append(this, "ui", "Remote Link configuration saved");
+        return true;
     }
 
-    private void saveRemoteLinkConfigLive() {
-        saveRemoteLinkConfigOnly();
+    private boolean saveRemoteLinkConfigLive() {
+        if (!saveRemoteLinkConfigOnly()) {
+            return false;
+        }
         RemoteLinkManager.restart(this, "remote-link-config-live");
         refreshStatusAndLog();
+        return true;
     }
 
-    private void saveRemoteLinkSettings() {
-        saveRemoteLinkConfigLive();
-        Toast.makeText(this, "Remote Link settings saved", Toast.LENGTH_SHORT).show();
+    private boolean saveRemoteLinkTogglesOnly() {
+        Config.get(this).saveRemoteLinkToggleConfig(
+                remoteLinkEnabledSwitch.isChecked(),
+                remoteLinkAcceptAnySslCertSwitch.isChecked());
+        RemoteLinkManager.restart(this, "remote-link-toggle-live");
+        refreshStatusAndLog();
+        return true;
     }
 
     private void reconnectRemoteLink() {
-        saveRemoteLinkConfigOnly();
         LogStore.append(this, "ui", "Manual Remote Link reconnect requested");
         RemoteLinkManager.restart(this, "manual-reconnect");
         Toast.makeText(this, "Remote Link reconnect requested", Toast.LENGTH_SHORT).show();
@@ -4429,8 +4847,34 @@ public final class MainActivity extends Activity {
         refreshStatusAndLog();
     }
 
-    private void saveRebootConfigOnly() {
-        Config.get(this).saveRebootConfig(
+    private boolean saveRebootConfigOnly() {
+        if (!rebootNotificationTriggerEnabledSwitch.isChecked()) {
+            rebootTriggerPackageField.setError(null);
+        }
+        if ((rebootNotificationTriggerEnabledSwitch.isChecked()
+                    && !requireAppSelection(rebootTriggerPackageField, "Reboot trigger app"))
+                || !requireText(rebootTriggerTitleField, "Reboot trigger title")
+                || !requireText(rebootTriggerTextField, "Reboot trigger text")
+                || !requireText(rebootWifiPatternField, "Reboot SSID pattern")
+                || !requireInteger(rebootScheduleHourField, "Reboot hour", 0, 23)
+                || !requireInteger(rebootScheduleMinuteField, "Reboot minute", 0, 59)
+                || !requireInteger(rebootDelayedTestSecondsField,
+                        "Reboot test delay", 5, 300)
+                || !requireInteger(rebootPowerDialogWaitMsField,
+                        "Power dialog wait", 250, 10000)
+                || !requireInteger(rebootStepWaitMsField,
+                        "Reboot step wait", 250, 10000)) {
+            return false;
+        }
+        Config config = Config.get(this);
+        boolean scheduleChanged = config.rebootAutomationEnabled()
+                != rebootAutomationEnabledSwitch.isChecked()
+                || config.rebootScheduleEnabled() != rebootScheduleEnabledSwitch.isChecked()
+                || config.rebootScheduleHour()
+                != Integer.parseInt(text(rebootScheduleHourField).trim())
+                || config.rebootScheduleMinute()
+                != Integer.parseInt(text(rebootScheduleMinuteField).trim());
+        config.saveRebootConfig(
                 rebootAutomationEnabledSwitch.isChecked(),
                 rebootNotificationTriggerEnabledSwitch.isChecked(),
                 rebootRemoteTriggerEnabledSwitch.isChecked(),
@@ -4446,27 +4890,50 @@ public final class MainActivity extends Activity {
                 text(rebootDelayedTestSecondsField),
                 text(rebootPowerDialogWaitMsField),
                 text(rebootStepWaitMsField));
-        RebootManager.sync(this, "reboot-config-live");
+        if (scheduleChanged) {
+            RebootManager.sync(this, "reboot-config-live");
+        }
         refreshStatusAndLog();
+        return true;
     }
 
-    private void saveRebootSettings() {
-        saveRebootConfigOnly();
-        LogStore.append(this, "ui", "Reboot settings saved");
-        Toast.makeText(this, "Reboot settings saved", Toast.LENGTH_SHORT).show();
+    private boolean saveRebootTogglesOnly() {
+        Config config = Config.get(this);
+        boolean scheduleChanged = config.rebootAutomationEnabled()
+                != rebootAutomationEnabledSwitch.isChecked()
+                || config.rebootScheduleEnabled() != rebootScheduleEnabledSwitch.isChecked();
+        config.saveRebootToggleConfig(
+                rebootAutomationEnabledSwitch.isChecked(),
+                rebootNotificationTriggerEnabledSwitch.isChecked(),
+                rebootRemoteTriggerEnabledSwitch.isChecked(),
+                rebootScheduleEnabledSwitch.isChecked(),
+                rebootOnlyWhenWifiNotMatchingSwitch.isChecked());
+        if (scheduleChanged) {
+            RebootManager.sync(this, "reboot-toggle-live");
+        }
+        refreshStatusAndLog();
+        return true;
     }
 
-    private void saveLogSettings() {
+    private boolean saveLogConfigOnly() {
+        if (!requireInteger(logMaxLinesField, "Log retention", 50, 5000)) {
+            return false;
+        }
         Config.get(this).saveLogConfig(
                 logEnabledSwitch.isChecked(),
                 text(logMaxLinesField));
         LogStore.append(this, "ui", "Log settings saved");
         refreshStatusAndLog();
-        Toast.makeText(this, "Log settings saved", Toast.LENGTH_SHORT).show();
+        return true;
+    }
+
+    private boolean saveLogToggleOnly() {
+        Config.get(this).saveLogEnabledConfig(logEnabledSwitch.isChecked());
+        refreshStatusAndLog();
+        return true;
     }
 
     private void exportSettingsXml() {
-        saveConfig(false);
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("application/xml");
@@ -4543,6 +5010,9 @@ public final class MainActivity extends Activity {
         VolumeControlManager.sync(this, "settings-import");
         RebootManager.sync(this, "settings-import");
         RemoteLinkManager.restart(this, "settings-import");
+        BeaconManager.refresh(this, "settings-import");
+        SystemTaskService.refreshNotification();
+        OpenVpnService.refreshNotification(this);
         // VPN prefs round-trip through Settings XML; profile files do not, so
         // the pill stays DISABLED until a profile is re-imported.
         OpenVpnManager.sync(this, "settings-import");
@@ -4637,26 +5107,20 @@ public final class MainActivity extends Activity {
         return new View.OnClickListener() {
             @Override
             public void onClick(View view) {
+                // A quick tap after typing should act on the latest value, not
+                // wait for the normal debounce window to expire.
+                boolean remoteLinkRestartedBySave = "remote_link_reconnect".equals(command)
+                        && remoteLinkSettingsSave != null
+                        && remoteLinkSettingsSave.isPending();
+                if (!flushSettingsForAction(command)) {
+                    return;
+                }
                 if ("start".equals(command)) {
                     startTracking();
                 } else if ("stop".equals(command)) {
                     stopTracking();
                 } else if ("send".equals(command)) {
                     sendNow();
-                } else if ("save".equals(command)) {
-                    saveConfig(true);
-                } else if ("save_gps".equals(command)) {
-                    saveGpsSettings();
-                } else if ("save_high_priority".equals(command)) {
-                    saveHighPrioritySettings();
-                } else if ("save_battery_alert".equals(command)) {
-                    saveBatteryAlertSettings();
-                } else if ("save_reboot".equals(command)) {
-                    saveRebootSettings();
-                } else if ("save_remote_link".equals(command)) {
-                    saveRemoteLinkSettings();
-                } else if ("save_log".equals(command)) {
-                    saveLogSettings();
                 } else if ("export_settings".equals(command)) {
                     exportSettingsXml();
                 } else if ("import_settings".equals(command)) {
@@ -4690,7 +5154,9 @@ public final class MainActivity extends Activity {
                 } else if ("test_reboot_delayed".equals(command)) {
                     testRebootDelayed();
                 } else if ("remote_link_reconnect".equals(command)) {
-                    reconnectRemoteLink();
+                    if (!remoteLinkRestartedBySave) {
+                        reconnectRemoteLink();
+                    }
                 } else if ("remote_link_ping".equals(command)) {
                     pingRemoteLink();
                 } else if ("vpn_import_profile".equals(command)) {
@@ -4703,10 +5169,6 @@ public final class MainActivity extends Activity {
                     vpnConnect();
                 } else if ("vpn_disconnect".equals(command)) {
                     vpnDisconnect();
-                } else if ("save_vpn".equals(command)) {
-                    saveVpnSettings();
-                } else if ("save_beacon".equals(command)) {
-                    saveBeaconSettings();
                 } else if ("add_beacon_rule".equals(command)) {
                     addBeaconRule();
                 } else if ("beacon_copy_uuid".equals(command)) {

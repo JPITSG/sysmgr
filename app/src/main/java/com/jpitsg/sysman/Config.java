@@ -374,7 +374,8 @@ final class Config {
     }
 
     boolean highPriorityEnabled() {
-        return prefs.getBoolean(KEY_HIGH_PRIORITY_ENABLED, true);
+        boolean hasPackage = !highPriorityPackage().isEmpty();
+        return hasPackage && prefs.getBoolean(KEY_HIGH_PRIORITY_ENABLED, hasPackage);
     }
 
     String highPriorityPackage() {
@@ -697,6 +698,12 @@ final class Config {
                 .apply();
     }
 
+    void saveWifiMonitorNotificationConfig(boolean showNotification) {
+        prefs.edit()
+                .putBoolean(KEY_SHOW_WIFI_MONITOR_NOTIFICATION, showNotification)
+                .apply();
+    }
+
     // ---- BLE beacon ---------------------------------------------------------
 
     boolean beaconEnabled() {
@@ -973,8 +980,7 @@ final class Config {
             boolean useFallbackOnSsidMatch,
             boolean useCachedBeforeFresh,
             boolean includeExtendedFields,
-            boolean caseSensitiveSsid,
-            String logMaxLines) {
+            boolean caseSensitiveSsid) {
         prefs.edit()
                 .putString(KEY_SERVER_BASE_URL, clean(serverBaseUrl, "https://server:1234"))
                 .putString(KEY_TRACK_PATH, clean(trackPath, "/track.php"))
@@ -1002,7 +1008,35 @@ final class Config {
                 .putBoolean(KEY_USE_CACHED_BEFORE_FRESH, useCachedBeforeFresh)
                 .putBoolean(KEY_INCLUDE_EXTENDED_FIELDS, includeExtendedFields)
                 .putBoolean(KEY_CASE_SENSITIVE_SSID, caseSensitiveSsid)
-                .putInt(KEY_LOG_MAX_LINES, parseInt(logMaxLines, 500, 50, 5000))
+                .apply();
+    }
+
+    void saveGpsToggleConfig(
+            boolean gpsUseRemoteLink,
+            boolean useExactAlarms,
+            boolean allowIdleAlarms,
+            boolean postOnStartup,
+            boolean postOnWifiChange,
+            boolean useGpsProvider,
+            boolean useNetworkProvider,
+            boolean requestGpsOnSsidMismatch,
+            boolean useFallbackOnSsidMatch,
+            boolean useCachedBeforeFresh,
+            boolean includeExtendedFields,
+            boolean caseSensitiveSsid) {
+        prefs.edit()
+                .putBoolean(KEY_GPS_USE_REMOTE_LINK, gpsUseRemoteLink)
+                .putBoolean(KEY_USE_EXACT_ALARMS, useExactAlarms)
+                .putBoolean(KEY_ALLOW_IDLE_ALARMS, allowIdleAlarms)
+                .putBoolean(KEY_POST_ON_STARTUP, postOnStartup)
+                .putBoolean(KEY_POST_ON_WIFI_CHANGE, postOnWifiChange)
+                .putBoolean(KEY_USE_GPS_PROVIDER, useGpsProvider)
+                .putBoolean(KEY_USE_NETWORK_PROVIDER, useNetworkProvider)
+                .putBoolean(KEY_REQUEST_GPS_ON_SSID_MISMATCH, requestGpsOnSsidMismatch)
+                .putBoolean(KEY_USE_FALLBACK_ON_SSID_MATCH, useFallbackOnSsidMatch)
+                .putBoolean(KEY_USE_CACHED_BEFORE_FRESH, useCachedBeforeFresh)
+                .putBoolean(KEY_INCLUDE_EXTENDED_FIELDS, includeExtendedFields)
+                .putBoolean(KEY_CASE_SENSITIVE_SSID, caseSensitiveSsid)
                 .apply();
     }
 
@@ -1039,6 +1073,17 @@ final class Config {
                 .apply();
     }
 
+    void saveHighPriorityToggleConfig(
+            boolean enabled,
+            boolean remoteEnabled,
+            boolean raiseAlarmVolume) {
+        prefs.edit()
+                .putBoolean(KEY_HIGH_PRIORITY_ENABLED, enabled)
+                .putBoolean(KEY_HIGH_PRIORITY_REMOTE_ENABLED, remoteEnabled)
+                .putBoolean(KEY_HIGH_PRIORITY_RAISE_ALARM_VOLUME, raiseAlarmVolume)
+                .apply();
+    }
+
     void saveBatteryAlertConfig(
             boolean enabled,
             String thresholdPercent,
@@ -1051,6 +1096,17 @@ final class Config {
                 .putInt(KEY_BATTERY_ALERT_THRESHOLD_PERCENT, parseInt(thresholdPercent, 20, 1, 100))
                 .putInt(KEY_BATTERY_ALERT_CHECK_INTERVAL_MINUTES, parseInt(checkIntervalMinutes, 5, 1, 1440))
                 .putInt(KEY_BATTERY_ALERT_VIBRATE_SECONDS, parseInt(vibrateSeconds, 10, 0, 60))
+                .putBoolean(KEY_BATTERY_ALERT_USE_EXACT_ALARMS, useExactAlarms)
+                .putBoolean(KEY_BATTERY_ALERT_ALLOW_IDLE_ALARMS, allowIdleAlarms)
+                .apply();
+    }
+
+    void saveBatteryAlertToggleConfig(
+            boolean enabled,
+            boolean useExactAlarms,
+            boolean allowIdleAlarms) {
+        prefs.edit()
+                .putBoolean(KEY_BATTERY_ALERT_ENABLED, enabled)
                 .putBoolean(KEY_BATTERY_ALERT_USE_EXACT_ALARMS, useExactAlarms)
                 .putBoolean(KEY_BATTERY_ALERT_ALLOW_IDLE_ALARMS, allowIdleAlarms)
                 .apply();
@@ -1096,6 +1152,19 @@ final class Config {
                 .apply();
     }
 
+    void saveRemoteLinkToggleConfig(boolean enabled, boolean acceptAnySslCert) {
+        prefs.edit()
+                .putBoolean(KEY_REMOTE_LINK_ENABLED, enabled)
+                .putBoolean(KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT, acceptAnySslCert)
+                .apply();
+    }
+
+    void saveRemoteLinkNotificationConfig(boolean showNotification) {
+        prefs.edit()
+                .putBoolean(KEY_REMOTE_LINK_SHOW_NOTIFICATION, showNotification)
+                .apply();
+    }
+
     void saveVpnConfig(
             String username,
             String password,
@@ -1115,10 +1184,22 @@ final class Config {
                 .apply();
     }
 
+    void saveVpnRemoteCommandConfig(boolean remoteCommandEnabled) {
+        prefs.edit()
+                .putBoolean(KEY_VPN_REMOTE_COMMAND_ENABLED, remoteCommandEnabled)
+                .apply();
+    }
+
     void saveLogConfig(boolean enabled, String logMaxLines) {
         prefs.edit()
                 .putBoolean(KEY_LOG_ENABLED, enabled)
                 .putInt(KEY_LOG_MAX_LINES, parseInt(logMaxLines, 500, 50, 5000))
+                .apply();
+    }
+
+    void saveLogEnabledConfig(boolean enabled) {
+        prefs.edit()
+                .putBoolean(KEY_LOG_ENABLED, enabled)
                 .apply();
     }
 
@@ -1167,6 +1248,21 @@ final class Config {
                 .putInt(KEY_REBOOT_DELAYED_TEST_SECONDS, parseInt(delayedTestSeconds, 20, 5, 300))
                 .putInt(KEY_REBOOT_POWER_DIALOG_WAIT_MS, parseInt(powerDialogWaitMs, 1200, 250, 10000))
                 .putInt(KEY_REBOOT_STEP_WAIT_MS, parseInt(stepWaitMs, 900, 250, 10000))
+                .apply();
+    }
+
+    void saveRebootToggleConfig(
+            boolean automationEnabled,
+            boolean notificationTriggerEnabled,
+            boolean remoteTriggerEnabled,
+            boolean scheduleEnabled,
+            boolean onlyWhenWifiNotMatching) {
+        prefs.edit()
+                .putBoolean(KEY_REBOOT_AUTOMATION_ENABLED, automationEnabled)
+                .putBoolean(KEY_REBOOT_NOTIFICATION_TRIGGER_ENABLED, notificationTriggerEnabled)
+                .putBoolean(KEY_REBOOT_REMOTE_TRIGGER_ENABLED, remoteTriggerEnabled)
+                .putBoolean(KEY_REBOOT_SCHEDULE_ENABLED, scheduleEnabled)
+                .putBoolean(KEY_REBOOT_ONLY_WHEN_WIFI_NOT_MATCHING, onlyWhenWifiNotMatching)
                 .apply();
     }
 

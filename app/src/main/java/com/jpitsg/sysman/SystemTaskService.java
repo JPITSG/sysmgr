@@ -20,9 +20,13 @@ public final class SystemTaskService extends Service {
     private static final String EXTRA_RESCHEDULE = "reschedule";
     private static final String CHANNEL_ID = "system_manager_task_service";
     private static final int NOTIFICATION_ID = 0x5301;
+    private static volatile SystemTaskService activeService;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private volatile boolean stopping;
     private ExecutorService executor;
+    private String activeTaskId = TaskIds.GPS_POST;
+    private String activeReason = "unknown";
     /** Re-resolved before every foreground start, so the toggle applies at once. */
     private String channelId = CHANNEL_ID;
 
@@ -39,9 +43,18 @@ public final class SystemTaskService extends Service {
         }
     }
 
+    /** Moves a running task's foreground notification to the newly selected channel. */
+    static void refreshNotification() {
+        SystemTaskService service = activeService;
+        if (service != null && service.running.get() && !service.stopping) {
+            service.startForegroundForTask(service.activeTaskId, service.activeReason);
+        }
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        activeService = this;
         executor = Executors.newSingleThreadExecutor();
         ensureNotificationChannel();
     }
@@ -58,23 +71,23 @@ public final class SystemTaskService extends Service {
             reason = "unknown";
         }
 
-        startForegroundForTask(taskId, reason);
         if (reschedule && TaskIds.GPS_POST.equals(taskId)) {
             AlarmScheduler.scheduleGpsPost(this, "after-start");
         }
 
         if (!running.compareAndSet(false, true)) {
             LogStore.append(this, "service", "Task already running; ignored " + taskId + " reason=" + reason);
-            stopSelf(startId);
             return START_NOT_STICKY;
         }
+        stopping = false;
+        startForegroundForTask(taskId, reason);
 
         final String finalTaskId = taskId;
         final String finalReason = reason;
         executor.execute(new Runnable() {
             @Override
             public void run() {
-                runTask(finalTaskId, finalReason, startId);
+                runTask(finalTaskId, finalReason);
             }
         });
         return START_NOT_STICKY;
@@ -87,13 +100,18 @@ public final class SystemTaskService extends Service {
 
     @Override
     public void onDestroy() {
+        running.set(false);
+        stopping = true;
+        if (activeService == this) {
+            activeService = null;
+        }
         if (executor != null) {
             executor.shutdownNow();
         }
         super.onDestroy();
     }
 
-    private void runTask(String taskId, String reason, int startId) {
+    private void runTask(String taskId, String reason) {
         PowerManager.WakeLock wakeLock = null;
         try {
             PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
@@ -116,17 +134,19 @@ public final class SystemTaskService extends Service {
             if (wakeLock != null && wakeLock.isHeld()) {
                 wakeLock.release();
             }
-            running.set(false);
+            stopping = true;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE);
             } else {
                 stopForeground(true);
             }
-            stopSelf(startId);
+            stopSelf();
         }
     }
 
     private void startForegroundForTask(String taskId, String reason) {
+        activeTaskId = taskId;
+        activeReason = reason;
         boolean shown = ServiceNotifications.shown(this, ServiceNotifications.TASK_RUNNER);
         ensureNotificationChannel();
         Notification.Builder builder = new Notification.Builder(this, channelId)
