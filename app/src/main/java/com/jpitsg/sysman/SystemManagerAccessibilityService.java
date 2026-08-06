@@ -1,6 +1,7 @@
 package com.jpitsg.sysman;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
 import android.content.Context;
 import android.content.Intent;
@@ -9,12 +10,14 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.DisplayMetrics;
+import android.view.KeyEvent;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
 public final class SystemManagerAccessibilityService extends AccessibilityService {
     private static volatile SystemManagerAccessibilityService instance;
+    private static volatile boolean highPriorityKeyCaptureWanted;
     // On this device the power menu no longer has a Restart button; rebooting is
     // triggered by a press-and-hold at screen center swiped up to the top.
     private static final long REBOOT_SWIPE_HOLD_MILLIS = 400L;
@@ -55,6 +58,23 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
         }
     }
 
+    static void setHighPriorityKeyCaptureEnabled(boolean enabled) {
+        if (highPriorityKeyCaptureWanted == enabled) {
+            return;
+        }
+        highPriorityKeyCaptureWanted = enabled;
+
+        final SystemManagerAccessibilityService service = instance;
+        if (service != null) {
+            service.handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    service.syncHighPriorityKeyCapture();
+                }
+            });
+        }
+    }
+
     static boolean requestReboot(Context context, String reason) {
         SystemManagerAccessibilityService service = instance;
         if (service == null) {
@@ -71,12 +91,41 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
         instance = this;
         monitor = new WifiChangeMonitor(this, "accessibility");
         LogStore.append(this, "accessibility", "Accessibility service connected");
+        syncHighPriorityKeyCapture();
         syncMonitor();
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         // Reboot automation reads the active window only while a reboot sequence is running.
+    }
+
+    @Override
+    protected boolean onKeyEvent(KeyEvent event) {
+        if (!highPriorityKeyCaptureWanted
+                || event == null
+                || event.getAction() != KeyEvent.ACTION_DOWN
+                || event.getRepeatCount() != 0) {
+            return false;
+        }
+
+        String reason;
+        switch (event.getKeyCode()) {
+            case KeyEvent.KEYCODE_VOLUME_UP:
+                reason = "hardware-volume-up-accessibility";
+                break;
+            case KeyEvent.KEYCODE_VOLUME_DOWN:
+                reason = "hardware-volume-down-accessibility";
+                break;
+            case KeyEvent.KEYCODE_POWER:
+                reason = "hardware-power-accessibility";
+                break;
+            default:
+                return false;
+        }
+
+        HighPriorityAlertPlayer.stopHighPriorityForHardwareButton(this, reason);
+        return false;
     }
 
     @Override
@@ -107,6 +156,34 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
             monitor.start();
         } else {
             monitor.stop();
+        }
+    }
+
+    private void syncHighPriorityKeyCapture() {
+        AccessibilityServiceInfo info = getServiceInfo();
+        if (info == null) {
+            return;
+        }
+
+        int oldFlags = info.flags;
+        int newFlags;
+        if (highPriorityKeyCaptureWanted) {
+            newFlags = oldFlags | AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+        } else {
+            newFlags = oldFlags & ~AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+        }
+        if (newFlags == oldFlags) {
+            return;
+        }
+
+        info.flags = newFlags;
+        try {
+            setServiceInfo(info);
+            LogStore.append(this, "accessibility", "High-priority hardware key capture "
+                    + (highPriorityKeyCaptureWanted ? "enabled" : "disabled"));
+        } catch (RuntimeException e) {
+            LogStore.append(this, "accessibility", "Could not update hardware key capture: "
+                    + e.getMessage());
         }
     }
 
