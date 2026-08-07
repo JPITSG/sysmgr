@@ -303,6 +303,7 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
         LogStore.append(this, "accessibility", "Accessibility service connected");
         syncHighPriorityKeyCapture();
         syncMonitor();
+        VncManager.sync(this, "accessibility-connected");
     }
 
     @Override
@@ -353,6 +354,10 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
             monitor = null;
         }
         instance = null;
+        // An Accessibility-backed session otherwise keeps serving its last
+        // frame until the client idle timeout expires, and a blocked server
+        // does not notice when Accessibility later comes back.
+        VncManager.sync(this, "accessibility-disconnected");
         LogStore.append(this, "accessibility", "Accessibility service destroyed");
         super.onDestroy();
     }

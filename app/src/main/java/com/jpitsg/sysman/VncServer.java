@@ -171,12 +171,22 @@ final class VncServer implements VncSession.Listener {
     // ---- Session callbacks --------------------------------------------------
 
     @Override
-    public void onAuthenticated(VncSession authenticated, String clientAddress) {
+    public void onCredentialsAccepted(VncSession authenticated, String clientAddress) {
+        if (!running || session.get() != authenticated) {
+            return;
+        }
         synchronized (authFailures) {
             authFailures.remove(hostOf(clientAddress));
         }
         if (Config.get(context).vncWakeOnConnect()) {
             SystemManagerAccessibilityService.wakeScreenForVnc();
+        }
+    }
+
+    @Override
+    public void onAuthenticated(VncSession authenticated, String clientAddress) {
+        if (!running || session.get() != authenticated) {
+            return;
         }
         LogStore.append(context, "vnc", "Client authenticated: " + clientAddress);
         listener.onClientConnected(clientAddress);
@@ -184,9 +194,14 @@ final class VncServer implements VncSession.Listener {
 
     @Override
     public void onClosed(VncSession closed, String clientAddress, String reason) {
-        session.compareAndSet(closed, null);
+        boolean wasCurrent = session.compareAndSet(closed, null);
         LogStore.append(context, "vnc", "Client " + clientAddress + " closed: " + reason);
-        listener.onClientDisconnected(clientAddress, reason);
+        // stop() clears the slot before closing its socket. In that case the
+        // service has already cleared the client state, and this late callback
+        // must not overwrite a replacement server that is now listening.
+        if (wasCurrent && running) {
+            listener.onClientDisconnected(clientAddress, reason);
+        }
     }
 
     @Override

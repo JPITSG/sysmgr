@@ -88,32 +88,34 @@ final class VncInputInjector {
     // ---- Pointer ------------------------------------------------------------
 
     void onPointerEvent(int buttonMask, int frameX, int frameY) {
-        if (isViewOnly()) {
-            return;
-        }
+        boolean viewOnly = isViewOnly();
         int x = clampX(frameX * displayWidth / frameWidth);
         int y = clampY(frameY * displayHeight / frameHeight);
         synchronized (lock) {
             if (stopped) {
                 return;
             }
-            pendingX = x;
-            pendingY = y;
-            // Buttons act on the press edge; RFB reports a wheel notch as a
-            // press and release of the same button, which would otherwise
-            // scroll twice.
-            int pressed = buttonMask & ~previousMask;
-            previousMask = buttonMask;
-            pendingMask = buttonMask;
-            if (!touchDown) {
-                if ((pressed & BUTTON_RIGHT) != 0) {
-                    pendingLongPress = true;
-                }
-                if ((pressed & WHEEL_UP) != 0 && pendingScroll < MAX_QUEUED_SCROLL) {
-                    pendingScroll++;
-                }
-                if ((pressed & WHEEL_DOWN) != 0 && pendingScroll > -MAX_QUEUED_SCROLL) {
-                    pendingScroll--;
+            if (viewOnly) {
+                clearPendingPointerInput();
+            } else {
+                pendingX = x;
+                pendingY = y;
+                // Buttons act on the press edge; RFB reports a wheel notch as a
+                // press and release of the same button, which would otherwise
+                // scroll twice.
+                int pressed = buttonMask & ~previousMask;
+                previousMask = buttonMask;
+                pendingMask = buttonMask;
+                if (!touchDown) {
+                    if ((pressed & BUTTON_RIGHT) != 0) {
+                        pendingLongPress = true;
+                    }
+                    if ((pressed & WHEEL_UP) != 0 && pendingScroll < MAX_QUEUED_SCROLL) {
+                        pendingScroll++;
+                    }
+                    if ((pressed & WHEEL_DOWN) != 0 && pendingScroll > -MAX_QUEUED_SCROLL) {
+                        pendingScroll--;
+                    }
                 }
             }
         }
@@ -121,10 +123,17 @@ final class VncInputInjector {
     }
 
     private void pump() {
+        boolean viewOnly = isViewOnly();
         GestureDescription gesture;
         synchronized (lock) {
             if (stopped || dispatchInFlight) {
                 return;
+            }
+            if (viewOnly) {
+                // A view-only toggle can land in the middle of a continued
+                // drag. Turn the next segment into a release instead of
+                // ignoring the client's button-up and holding a finger down.
+                clearPendingPointerInput();
             }
             try {
                 gesture = nextGesture();
@@ -264,6 +273,14 @@ final class VncInputInjector {
     private void resetTouch() {
         touchDown = false;
         lastStroke = null;
+    }
+
+    /** Called with {@link #lock} held. Keeps touchDown so nextGesture can release it. */
+    private void clearPendingPointerInput() {
+        pendingMask = 0;
+        previousMask = 0;
+        pendingScroll = 0;
+        pendingLongPress = false;
     }
 
     // ---- Keyboard -----------------------------------------------------------

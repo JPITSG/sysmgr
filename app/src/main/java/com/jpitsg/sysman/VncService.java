@@ -57,9 +57,10 @@ public final class VncService extends Service
 
     private static volatile boolean active;
     /**
-     * Held here rather than in the frame source because a consent token is
-     * single-use from Android 14: releasing it on disconnect would cost a tap
-     * on every connection, which is exactly what the engine choice is about.
+     * Held here so a client can claim the authorised projection when it starts
+     * capturing. Android 14 permits one virtual-display creation per projection;
+     * the frame source therefore ends that projection when its capture session
+     * ends instead of trying to reuse an already-spent token.
      */
     private static volatile MediaProjection projection;
 
@@ -257,9 +258,12 @@ public final class VncService extends Service
         boolean wantsProjection = Config.VNC_ENGINE_PROJECTION.equals(Config.get(this).vncEngine());
         if (!wantsProjection && projection != null) {
             // Switched back to Accessibility: drop the token so the system's
-            // screen-recording indicator does not linger over nothing.
+            // screen-recording indicator does not linger over nothing. The
+            // connected session also owns that projection, so it must be
+            // replaced rather than left frozen on its last frame.
             LogStore.append(this, "vnc", "Releasing screen capture; engine is now Accessibility");
             releaseProjection();
+            stopServer();
         }
         if (wantsProjection && projection == null) {
             // Not BLOCKED: nothing is wrong, it just needs a tap that cannot be
@@ -294,24 +298,31 @@ public final class VncService extends Service
         }
         releaseProjection();
         try {
-            MediaProjection adopted = manager.getMediaProjection(resultCode, resultData);
+            final MediaProjection adopted = manager.getMediaProjection(resultCode, resultData);
             if (adopted == null) {
                 LogStore.append(this, "vnc", "Screen capture consent produced no projection");
                 return;
             }
+            // Publish before registering: if the system has already stopped the
+            // session, an immediate callback must be able to invalidate it.
+            projection = adopted;
             adopted.registerCallback(new MediaProjection.Callback() {
                 @Override
                 public void onStop() {
                     // The user revoked it from the system UI, or the platform
-                    // took it back. Either way it cannot be reused.
+                    // took it back. Ignore a late callback from a projection
+                    // that was replaced by a newer authorisation.
+                    if (projection != adopted) {
+                        return;
+                    }
                     LogStore.append(VncService.this, "vnc", "Screen capture stopped by the system");
                     projection = null;
                     requestEvaluation("projection-stopped");
                 }
             }, null);
-            projection = adopted;
             LogStore.append(this, "vnc", "Screen capture authorised");
         } catch (RuntimeException e) {
+            releaseProjection();
             LogStore.append(this, "vnc", "Screen capture token rejected: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());
             VncStateStore.setState(this, VncStateStore.STATE_ERROR,
@@ -432,11 +443,19 @@ public final class VncService extends Service
 
     private boolean startForegroundServer() {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
                 if (pendingProjectionType || projection != null) {
                     // Only claimed when there is or is about to be a projection:
                     // no reason to wear the screen-recording type otherwise.
+                    type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+                }
+                startForeground(NOTIFICATION_ID, buildNotification(), type);
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // specialUse was added in API 34. dataSync has no duration cap
+                // on these releases and is the compatible network-server type.
+                int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+                if (pendingProjectionType || projection != null) {
                     type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
                 }
                 startForeground(NOTIFICATION_ID, buildNotification(), type);

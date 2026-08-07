@@ -69,7 +69,7 @@ final class VncKeymap {
             case KEYSYM_F2:
                 return AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS;
             case KEYSYM_F3:
-                return sinceTiramisu(AccessibilityService.GLOBAL_ACTION_MENU);
+                return sinceBaklava(AccessibilityService.GLOBAL_ACTION_MENU);
             case KEYSYM_F4:
                 return AccessibilityService.GLOBAL_ACTION_POWER_DIALOG;
             case KEYSYM_F5:
@@ -116,6 +116,10 @@ final class VncKeymap {
 
     private static int sinceTiramisu(int action) {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ? action : GLOBAL_ACTION_NONE;
+    }
+
+    private static int sinceBaklava(int action) {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA ? action : GLOBAL_ACTION_NONE;
     }
 
     /** Human-readable name for the log, so a keysym that does nothing says so. */

@@ -197,6 +197,13 @@ final class VncNetworkWatcher {
             connectivityManager.registerNetworkCallback(wifiRequest, wifiCallback);
             LogStore.append(context, "vnc", "Network watcher registered");
         } catch (RuntimeException e) {
+            // Registration is not atomic: the default callback may already be
+            // live when registering the Wi-Fi callback fails. Remove both or a
+            // later retry leaks the first callback and duplicates evaluations.
+            unregister(defaultCallback);
+            unregister(wifiCallback);
+            defaultCallback = null;
+            wifiCallback = null;
             registered.set(false);
             shutdownExecutor();
             LogStore.append(context, "vnc", "Network watcher registration failed: "

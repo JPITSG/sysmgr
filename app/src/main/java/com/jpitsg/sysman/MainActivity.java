@@ -29,6 +29,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.location.LocationManager;
+import android.media.projection.MediaProjectionConfig;
 import android.media.projection.MediaProjectionManager;
 import android.net.ConnectivityManager;
 import android.net.Uri;
@@ -551,6 +552,11 @@ public final class MainActivity extends Activity {
         NotificationCleaner.clearOnAppOpen(this);
         OpenVpnManager.syncStateOnLaunch(this);
         VncManager.syncStateOnLaunch(this);
+        // Accessibility, location visibility and the process hosting the VNC
+        // service can all change while an Android settings screen is on top.
+        // Re-evaluate on every return so an armed server does not stay blocked
+        // or stopped until an unrelated setting is edited.
+        VncManager.sync(this, "activity-resume");
         consumeProjectionRequest(getIntent());
         refreshStatusAndLog();
         refreshNotificationHistory();
@@ -2724,7 +2730,11 @@ public final class MainActivity extends Activity {
             return;
         }
         try {
-            startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_PROJECTION_CONSENT);
+            Intent request = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+                    ? manager.createScreenCaptureIntent(
+                            MediaProjectionConfig.createConfigForDefaultDisplay())
+                    : manager.createScreenCaptureIntent();
+            startActivityForResult(request, REQUEST_PROJECTION_CONSENT);
         } catch (RuntimeException e) {
             LogStore.append(this, "vnc", "Could not ask for screen capture consent: " + e.getMessage());
             Toast.makeText(this, "Could not open the screen capture prompt", Toast.LENGTH_LONG).show();
@@ -5743,6 +5753,7 @@ public final class MainActivity extends Activity {
         // VPN prefs round-trip through Settings XML; profile files do not, so
         // the pill stays DISABLED until a profile is re-imported.
         OpenVpnManager.sync(this, "settings-import");
+        VncManager.sync(this, "settings-import");
     }
 
     private void openIntent(Intent intent) {

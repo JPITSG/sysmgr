@@ -7,6 +7,7 @@ import android.hardware.display.VirtualDisplay;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.projection.MediaProjection;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
@@ -26,10 +27,10 @@ import java.nio.IntBuffer;
  * Accessibility engine, which cannot avoid one.
  *
  * <p>The projection token itself belongs to {@link VncService}, not to this
- * source. A disconnecting client releases the virtual display, which stops the
- * mirroring work, but leaves the projection alive so the next client does not
- * have to be authorised again. That is the whole reason the token is held
- * anywhere at all.
+ * source. Android 14 and newer permit one virtual display per projection, so a
+ * rotation resizes that display and swaps its surface in place. Ending the
+ * source also ends the projection on those releases; the next capture session
+ * needs fresh consent instead of failing while trying to reuse the token.
  */
 final class ProjectionFrameSource implements FrameSource {
     private static final String DISPLAY_NAME = "SystemManagerVnc";
@@ -97,15 +98,14 @@ final class ProjectionFrameSource implements FrameSource {
 
     /** Builds the reader and mirror at a given display size, replacing any existing pair. */
     private boolean configure(int width, int height) {
-        releaseDisplay();
-        sourceWidth = width;
-        sourceHeight = height;
-        scaledWidth = Math.max(1, width * scalePercent / 100);
-        scaledHeight = Math.max(1, height * scalePercent / 100);
+        int nextScaledWidth = Math.max(1, width * scalePercent / 100);
+        int nextScaledHeight = Math.max(1, height * scalePercent / 100);
+        ImageReader nextReader = null;
 
         try {
-            imageReader = ImageReader.newInstance(scaledWidth, scaledHeight, PixelFormat.RGBA_8888, 2);
-            imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
+            nextReader = ImageReader.newInstance(
+                    nextScaledWidth, nextScaledHeight, PixelFormat.RGBA_8888, 2);
+            nextReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
                 @Override
                 public void onImageAvailable(ImageReader reader) {
                     synchronized (frameLock) {
@@ -114,22 +114,41 @@ final class ProjectionFrameSource implements FrameSource {
                     }
                 }
             }, handler);
-            virtualDisplay = projection.createVirtualDisplay(DISPLAY_NAME,
-                    scaledWidth, scaledHeight, densityDpi(),
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    imageReader.getSurface(), null, handler);
+            if (virtualDisplay == null) {
+                virtualDisplay = projection.createVirtualDisplay(DISPLAY_NAME,
+                        nextScaledWidth, nextScaledHeight, densityDpi(),
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        nextReader.getSurface(), null, handler);
+                if (virtualDisplay == null) {
+                    blockedReason = "Could not mirror the display";
+                    closeReader(nextReader);
+                    return false;
+                }
+            } else {
+                // Android 14 rejects a second createVirtualDisplay() on the
+                // same projection. resize()+setSurface() is the supported
+                // configuration-change path on every version we support.
+                virtualDisplay.resize(nextScaledWidth, nextScaledHeight, densityDpi());
+                virtualDisplay.setSurface(nextReader.getSurface());
+            }
         } catch (RuntimeException e) {
             blockedReason = "Could not mirror the display: " + e.getClass().getSimpleName()
                     + ": " + e.getMessage();
-            releaseDisplay();
-            return false;
-        }
-        if (virtualDisplay == null) {
-            blockedReason = "Could not mirror the display";
+            closeReader(nextReader);
             releaseDisplay();
             return false;
         }
 
+        ImageReader previousReader = imageReader;
+        imageReader = nextReader;
+        if (previousReader != null) {
+            closeReader(previousReader);
+        }
+
+        sourceWidth = width;
+        sourceHeight = height;
+        scaledWidth = nextScaledWidth;
+        scaledHeight = nextScaledHeight;
         buffers = new int[][]{new int[scaledWidth * scaledHeight], new int[scaledWidth * scaledHeight]};
         rowPixels = new int[scaledWidth];
         bufferIndex = 0;
@@ -248,13 +267,7 @@ final class ProjectionFrameSource implements FrameSource {
     }
 
     private int densityDpi() {
-        Display display = defaultDisplay();
-        if (display == null) {
-            return DisplayMetrics.DENSITY_DEFAULT;
-        }
-        DisplayMetrics metrics = new DisplayMetrics();
-        display.getRealMetrics(metrics);
-        return Math.max(1, metrics.densityDpi);
+        return Math.max(1, context.getResources().getConfiguration().densityDpi);
     }
 
     @SuppressWarnings("deprecation")
@@ -297,9 +310,8 @@ final class ProjectionFrameSource implements FrameSource {
 
     @Override
     public void stop() {
+        MediaProjection currentProjection = projection;
         releaseDisplay();
-        // Deliberately not stopped: the token belongs to the service, and
-        // stopping it here would cost the user a consent tap per connection.
         projection = null;
         if (handlerThread != null) {
             handlerThread.quitSafely();
@@ -312,6 +324,13 @@ final class ProjectionFrameSource implements FrameSource {
         scaledHeight = 0;
         sourceWidth = 0;
         sourceHeight = 0;
+        if (currentProjection != null
+                && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                currentProjection.stop();
+            } catch (RuntimeException ignored) {
+            }
+        }
     }
 
     private void releaseDisplay() {
@@ -331,6 +350,16 @@ final class ProjectionFrameSource implements FrameSource {
         }
         synchronized (frameLock) {
             imagePending = false;
+        }
+    }
+
+    private static void closeReader(ImageReader reader) {
+        if (reader == null) {
+            return;
+        }
+        try {
+            reader.close();
+        } catch (RuntimeException ignored) {
         }
     }
 }

@@ -37,6 +37,8 @@ final class VncSession implements Runnable {
     private static final long FRAME_WAIT_MILLIS = 500L;
 
     interface Listener {
+        void onCredentialsAccepted(VncSession session, String clientAddress);
+
         void onAuthenticated(VncSession session, String clientAddress);
 
         void onClosed(VncSession session, String clientAddress, String reason);
@@ -54,6 +56,7 @@ final class VncSession implements Runnable {
     private final Object updateLock = new Object();
     private long requestSeq;
     private long servedSeq;
+    private long fullUpdateVersion;
     private boolean fullUpdateRequested;
     private Rect requestedRegion;
 
@@ -64,7 +67,8 @@ final class VncSession implements Runnable {
     private DataInputStream in;
     private OutputStream out;
     private FrameSource source;
-    private VncInputInjector injector;
+    private FrameSource.Frame initialFrame;
+    private volatile VncInputInjector injector;
     private Thread frameThread;
     // Written by the frame thread on a resize, read by the reader thread when
     // it clamps an update request.
@@ -175,6 +179,14 @@ final class VncSession implements Runnable {
             listener.onAuthFailed(clientAddress);
             return false;
         }
+        // The password has been proven even if capture subsequently fails.
+        // Wake before the first capture so the setting can help a sleeping
+        // display, and clear any earlier failures for this host immediately.
+        listener.onCredentialsAccepted(this, clientAddress);
+        if (!running) {
+            closeReason = "server stopped";
+            return false;
+        }
         // Brought up before the security result is sent, because that result is
         // the last message with room for an explanation. Once it says OK the
         // client is waiting for ServerInit, and a server that cannot produce
@@ -219,6 +231,11 @@ final class VncSession implements Runnable {
         }
         frameWidth = first.width;
         frameHeight = first.height;
+        // Do not throw the first capture away merely to learn its dimensions.
+        // Projection only produces another buffer when the display is composed
+        // again, so a static screen could otherwise leave the client's initial
+        // framebuffer request unanswered indefinitely.
+        initialFrame = first;
         source.consumeSizeChanged();
         // Client coordinates are in the scaled framebuffer; gestures have to be
         // dispatched in real display pixels.
@@ -307,7 +324,9 @@ final class VncSession implements Runnable {
                     + clientAddress + ": " + format);
             return;
         }
-        pendingFormat = format;
+        synchronized (updateLock) {
+            pendingFormat = format;
+        }
         LogStore.append(context, "vnc", "Pixel format from " + clientAddress + ": " + format);
         // The client expects the next update in the new format, so anything
         // already on its screen is stale.
@@ -408,6 +427,7 @@ final class VncSession implements Runnable {
                 }
                 long seq;
                 boolean full;
+                long fullVersion;
                 Rect region;
                 synchronized (updateLock) {
                     while (running && requestSeq == servedSeq) {
@@ -422,12 +442,17 @@ final class VncSession implements Runnable {
                     }
                     seq = requestSeq;
                     full = fullUpdateRequested;
+                    fullVersion = fullUpdateVersion;
                     region = requestedRegion == null
                             ? new Rect(0, 0, frameWidth, frameHeight)
                             : new Rect(requestedRegion);
                 }
 
-                FrameSource.Frame frame = source.acquire(5_000L);
+                FrameSource.Frame frame = initialFrame;
+                initialFrame = null;
+                if (frame == null) {
+                    frame = source.acquire(5_000L);
+                }
                 if (frame == null) {
                     if (isIdle(idleMillis)) {
                         stop("idle timeout");
@@ -453,6 +478,7 @@ final class VncSession implements Runnable {
                     synchronized (updateLock) {
                         servedSeq = seq;
                         fullUpdateRequested = true;
+                        fullUpdateVersion++;
                         requestedRegion = null;
                     }
                     continue;
@@ -463,7 +489,9 @@ final class VncSession implements Runnable {
                         : differ.diff(frame.pixels, previous.pixels);
                 previous = frame;
                 boolean hadDamage = !dirty.isEmpty();
-                dirty = clip(dirty, region);
+                List<Rect> clipped = clip(dirty, region);
+                boolean damageOutsideRegion = FrameDiffer.area(clipped) < FrameDiffer.area(dirty);
+                dirty = clipped;
                 if (dirty.isEmpty()) {
                     if (hadDamage) {
                         // Something changed outside the requested region. The
@@ -484,8 +512,17 @@ final class VncSession implements Runnable {
                 synchronized (updateLock) {
                     servedSeq = seq;
                     if (requestSeq == seq) {
-                        fullUpdateRequested = false;
+                        if (fullUpdateVersion == fullVersion) {
+                            fullUpdateRequested = false;
+                        }
                         requestedRegion = null;
+                    }
+                    if (damageOutsideRegion) {
+                        // The current request has been answered, but pixels the
+                        // client did not request must not disappear from the
+                        // differ's history before a later region asks for them.
+                        fullUpdateRequested = true;
+                        fullUpdateVersion++;
                     }
                 }
             }
@@ -500,10 +537,13 @@ final class VncSession implements Runnable {
 
     private void sendUpdate(FrameSource.Frame frame, List<Rect> rects) throws IOException {
         // Applied here, between rectangles, where a format change is safe.
-        RfbEncoder.PixelFormat requested = pendingFormat;
+        RfbEncoder.PixelFormat requested;
+        synchronized (updateLock) {
+            requested = pendingFormat;
+            pendingFormat = null;
+        }
         if (requested != null) {
             encoder.setFormat(requested);
-            pendingFormat = null;
         }
 
         boolean zrle = supportsZrle;
@@ -548,8 +588,8 @@ final class VncSession implements Runnable {
 
     private void requestFullUpdate() {
         synchronized (updateLock) {
-            requestSeq++;
             fullUpdateRequested = true;
+            fullUpdateVersion++;
             updateLock.notifyAll();
         }
     }
@@ -572,7 +612,14 @@ final class VncSession implements Runnable {
         synchronized (updateLock) {
             updateLock.notifyAll();
         }
+        // Unblock a frame writer before waiting for it. Waiting first leaves a
+        // non-reading client in control of teardown for the full join timeout.
+        closeQuietly();
         if (frameThread != null && frameThread != Thread.currentThread()) {
+            // Capture can itself be waiting for a frame for five seconds. Its
+            // two implementations both honour interruption, so wake it before
+            // the shorter join instead of stopping its buffers underneath it.
+            frameThread.interrupt();
             try {
                 frameThread.join(2_000L);
             } catch (InterruptedException e) {
@@ -589,8 +636,8 @@ final class VncSession implements Runnable {
             source.stop();
             source = null;
         }
+        initialFrame = null;
         encoder.close();
-        closeQuietly();
     }
 
     private void closeQuietly() {
