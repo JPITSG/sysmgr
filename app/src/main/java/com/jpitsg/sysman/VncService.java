@@ -8,6 +8,8 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.IBinder;
 
@@ -44,12 +46,27 @@ public final class VncService extends Service
     static final String ACTION_START = "com.jpitsg.sysman.action.VNC_START";
     /** Explicit user stop while still armed; sets a manual hold. */
     static final String ACTION_HOLD = "com.jpitsg.sysman.action.VNC_HOLD";
+    /** Carries a fresh MediaProjection consent result in from the activity. */
+    static final String ACTION_AUTHORIZE = "com.jpitsg.sysman.action.VNC_AUTHORIZE";
     static final String EXTRA_REASON = "reason";
+    static final String EXTRA_RESULT_CODE = "result_code";
+    static final String EXTRA_RESULT_DATA = "result_data";
 
     private static final String CHANNEL_ID = "system_manager_vnc";
     private static final int NOTIFICATION_ID = 0x5306;
 
     private static volatile boolean active;
+    /**
+     * Held here rather than in the frame source because a consent token is
+     * single-use from Android 14: releasing it on disconnect would cost a tap
+     * on every connection, which is exactly what the engine choice is about.
+     */
+    private static volatile MediaProjection projection;
+
+    /** The live projection, or null when screen capture has not been authorised. */
+    static MediaProjection activeProjection() {
+        return projection;
+    }
 
     /**
      * Set when the user stops the server by hand while it is still armed, so
@@ -59,6 +76,8 @@ public final class VncService extends Service
     private volatile boolean manualHold;
     /** Stops an evaluation that was already in flight from writing after teardown. */
     private volatile boolean destroyed;
+    /** Set for the one startForeground that has to precede getMediaProjection. */
+    private volatile boolean pendingProjectionType;
 
     private VncNetworkWatcher watcher;
     private VncServer server;
@@ -93,9 +112,20 @@ public final class VncService extends Service
             LogStore.append(this, "vnc", "Held by hand reason=" + reason);
         }
 
+        boolean authorizing = ACTION_AUTHORIZE.equals(action) && intent != null;
+        if (authorizing) {
+            // The foreground service has to already be running with the
+            // mediaProjection type before getMediaProjection is called, or
+            // Android 14 and up refuses the token outright.
+            pendingProjectionType = true;
+        }
         if (!startForegroundServer()) {
             stopSelf(startId);
             return START_NOT_STICKY;
+        }
+        if (authorizing) {
+            adoptProjection(intent.getIntExtra(EXTRA_RESULT_CODE, 0),
+                    (Intent) intent.getParcelableExtra(EXTRA_RESULT_DATA));
         }
         requestEvaluation(reason);
         return START_STICKY;
@@ -118,6 +148,7 @@ public final class VncService extends Service
         if (closing != null) {
             closing.stop(false);
         }
+        releaseProjection();
         if (watcher != null) {
             watcher.stop();
         }
@@ -223,6 +254,20 @@ public final class VncService extends Service
             settle(VncStateStore.STATE_OFF, "Stopped by hand; the next network change re-arms it", reason);
             return;
         }
+        boolean wantsProjection = Config.VNC_ENGINE_PROJECTION.equals(Config.get(this).vncEngine());
+        if (!wantsProjection && projection != null) {
+            // Switched back to Accessibility: drop the token so the system's
+            // screen-recording indicator does not linger over nothing.
+            LogStore.append(this, "vnc", "Releasing screen capture; engine is now Accessibility");
+            releaseProjection();
+        }
+        if (wantsProjection && projection == null) {
+            // Not BLOCKED: nothing is wrong, it just needs a tap that cannot be
+            // automated because the token is single-use.
+            stopServer();
+            settle(VncStateStore.STATE_CONSENT, "Tap to authorise screen capture", reason);
+            return;
+        }
 
         VncNetworkWatcher.Verdict verdict = VncNetworkWatcher.evaluate(this, snapshot);
         if (!verdict.shouldRun) {
@@ -231,6 +276,58 @@ public final class VncService extends Service
             return;
         }
         startServer(reason);
+    }
+
+    // ---- Screen capture consent ---------------------------------------------
+
+    /** Turns a consent result into a live projection, once. */
+    private void adoptProjection(int resultCode, Intent resultData) {
+        pendingProjectionType = false;
+        if (resultData == null) {
+            LogStore.append(this, "vnc", "Screen capture consent arrived with no token");
+            return;
+        }
+        MediaProjectionManager manager =
+                (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        if (manager == null) {
+            return;
+        }
+        releaseProjection();
+        try {
+            MediaProjection adopted = manager.getMediaProjection(resultCode, resultData);
+            if (adopted == null) {
+                LogStore.append(this, "vnc", "Screen capture consent produced no projection");
+                return;
+            }
+            adopted.registerCallback(new MediaProjection.Callback() {
+                @Override
+                public void onStop() {
+                    // The user revoked it from the system UI, or the platform
+                    // took it back. Either way it cannot be reused.
+                    LogStore.append(VncService.this, "vnc", "Screen capture stopped by the system");
+                    projection = null;
+                    requestEvaluation("projection-stopped");
+                }
+            }, null);
+            projection = adopted;
+            LogStore.append(this, "vnc", "Screen capture authorised");
+        } catch (RuntimeException e) {
+            LogStore.append(this, "vnc", "Screen capture token rejected: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            VncStateStore.setState(this, VncStateStore.STATE_ERROR,
+                    "Screen capture was not authorised: " + e.getMessage());
+        }
+    }
+
+    private void releaseProjection() {
+        MediaProjection current = projection;
+        projection = null;
+        if (current != null) {
+            try {
+                current.stop();
+            } catch (RuntimeException ignored) {
+            }
+        }
     }
 
     // ---- Server lifecycle ---------------------------------------------------
@@ -336,8 +433,13 @@ public final class VncService extends Service
     private boolean startForegroundServer() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, buildNotification(),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
+                if (pendingProjectionType || projection != null) {
+                    // Only claimed when there is or is about to be a projection:
+                    // no reason to wear the screen-recording type otherwise.
+                    type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+                }
+                startForeground(NOTIFICATION_ID, buildNotification(), type);
             } else {
                 startForeground(NOTIFICATION_ID, buildNotification());
             }
@@ -366,6 +468,11 @@ public final class VncService extends Service
     private Notification buildNotification() {
         Intent open = new Intent(this, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        if (VncStateStore.STATE_CONSENT.equals(VncStateStore.state(this))) {
+            // The only route back to a consent dialog is an activity, so the
+            // notification is what an unattended start has to fall back to.
+            open.putExtra(MainActivity.EXTRA_REQUEST_PROJECTION, true);
+        }
         PendingIntent pending = PendingIntent.getActivity(this, 0, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 

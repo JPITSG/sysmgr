@@ -70,9 +70,12 @@ final class VncCaptureProbe {
     }
 
     private static String measure(Context context) {
-        int scalePercent = Config.get(context).vncScalePercent();
+        Config config = Config.get(context);
+        int scalePercent = config.vncScalePercent();
+        // Always the Accessibility engine: the probe is a diagnostic that has to
+        // work without spending a single-use screen-capture consent.
         AccessibilityFrameSource source = new AccessibilityFrameSource(context);
-        if (!source.start(scalePercent)) {
+        if (!source.start(scalePercent, config.vncMaxFps())) {
             return "Cannot capture: " + source.blockedReason();
         }
 

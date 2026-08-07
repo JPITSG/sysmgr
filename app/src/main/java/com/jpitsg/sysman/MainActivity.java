@@ -29,6 +29,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.location.LocationManager;
+import android.media.projection.MediaProjectionManager;
 import android.net.ConnectivityManager;
 import android.net.Uri;
 import android.net.VpnService;
@@ -87,6 +88,10 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_IMPORT_VPN_PROFILE = 23;
     private static final int REQUEST_IMPORT_VPN_CERT = 24;
     private static final int REQUEST_VPN_CONSENT = 25;
+    private static final int REQUEST_PROJECTION_CONSENT = 26;
+
+    /** Set on the intent when a notification is asking for screen-capture consent. */
+    static final String EXTRA_REQUEST_PROJECTION = "request_projection";
 
     /** Single spacing unit used for every margin and every padding in the UI. */
     private static final int GAP = Ui.GAP;
@@ -275,6 +280,7 @@ public final class MainActivity extends Activity {
     private Button vncStopButton;
     private Button vncTestCaptureButton;
     private TextView vncProbeText;
+    private LinearLayout vncAuthorizeRow;
     private String vncEngine = Config.VNC_ENGINE_ACCESSIBILITY;
     private int vncScalePercent = Config.VNC_SCALE_FULL;
     private BroadcastReceiver vncStateReceiver;
@@ -545,10 +551,33 @@ public final class MainActivity extends Activity {
         NotificationCleaner.clearOnAppOpen(this);
         OpenVpnManager.syncStateOnLaunch(this);
         VncManager.syncStateOnLaunch(this);
+        consumeProjectionRequest(getIntent());
         refreshStatusAndLog();
         refreshNotificationHistory();
         liveStatusHandler.removeCallbacks(liveStatusTicker);
         liveStatusHandler.post(liveStatusTicker);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // The notification uses CLEAR_TOP, so a running activity is handed the
+        // request here rather than through onCreate.
+        setIntent(intent);
+    }
+
+    /**
+     * Raises the consent dialog when the activity was opened by the "tap to
+     * authorise" notification. Cleared from the intent so a later resume — a
+     * rotation, or coming back from the dialog — does not ask again.
+     */
+    private void consumeProjectionRequest(Intent intent) {
+        if (intent == null || !intent.getBooleanExtra(EXTRA_REQUEST_PROJECTION, false)) {
+            return;
+        }
+        intent.removeExtra(EXTRA_REQUEST_PROJECTION);
+        setIntent(intent);
+        requestProjectionConsent();
     }
 
     @Override
@@ -1033,6 +1062,10 @@ public final class MainActivity extends Activity {
         vncStopButton = neutralButton("Stop", action("vnc_stop"));
         addRowButton(controlRow, vncStartButton);
         addRowButton(controlRow, vncStopButton);
+
+        vncAuthorizeRow = newRow();
+        frame.content.addView(vncAuthorizeRow, stack(frame.content));
+        addRowButton(vncAuthorizeRow, tonalButton("Authorise Screen Capture", action("vnc_authorize")));
     }
 
     private void addVncEngineInput(LinearLayout root) {
@@ -1091,7 +1124,9 @@ public final class MainActivity extends Activity {
             note = "Screen Capture needs a tap to authorise each time it starts, so auto-enable will "
                     + "notify you instead of starting silently. Use Accessibility for unattended start.";
         } else if (projection) {
-            note = "Screen Capture: full frame rate, but needs a tap to authorise each time it starts.";
+            note = "Screen Capture: full frame rate, but needs a tap to authorise each time it "
+                    + "starts. Input still needs the Accessibility service; raise the frame rate "
+                    + "below to make use of it.";
         } else {
             note = "Accessibility: about 3 frames per second, but starts unattended. "
                     + "Needs the Accessibility service enabled.";
@@ -2664,8 +2699,36 @@ public final class MainActivity extends Activity {
                 || VncStateStore.STATE_ERROR.equals(state);
         applyButtonState(vncStartButton, enabled && retryable, COLOR_PRIMARY, Color.WHITE);
         applyButtonState(vncStopButton, running, COLOR_DANGER, Color.WHITE);
+        if (vncAuthorizeRow != null) {
+            vncAuthorizeRow.setVisibility(
+                    Config.VNC_ENGINE_PROJECTION.equals(vncEngine) ? View.VISIBLE : View.GONE);
+        }
         updateVncEngineNote();
         refreshVncProbeText();
+    }
+
+    /**
+     * The consent dialog can only be raised from an activity, and the token it
+     * returns is single-use, so this is the one unavoidable manual step of the
+     * Screen Capture engine.
+     */
+    private void requestProjectionConsent() {
+        MediaProjectionManager manager =
+                (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        if (manager == null) {
+            Toast.makeText(this, "Screen capture is unavailable on this device", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!Config.get(this).vncEnabled()) {
+            Toast.makeText(this, "Enable the VNC server first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_PROJECTION_CONSENT);
+        } catch (RuntimeException e) {
+            LogStore.append(this, "vnc", "Could not ask for screen capture consent: " + e.getMessage());
+            Toast.makeText(this, "Could not open the screen capture prompt", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void refreshVncProbeText() {
@@ -2680,7 +2743,9 @@ public final class MainActivity extends Activity {
         }
         String result = VncStateStore.probeResult(this);
         vncProbeText.setText(result.isEmpty()
-                ? "Measures frame rate and how much of the screen changes between frames."
+                ? "Measures the Accessibility engine's frame rate and how much of the screen "
+                        + "changes between frames. Never uses Screen Capture, whose consent is "
+                        + "single-use and worth saving for a real session."
                 : result);
     }
 
@@ -5715,6 +5780,24 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_PROJECTION_CONSENT) {
+            if (resultCode == RESULT_OK && data != null) {
+                // Handed straight to the service: it has to be foreground with
+                // the mediaProjection type before it may consume the token.
+                Intent authorize = new Intent(this, VncService.class)
+                        .setAction(VncService.ACTION_AUTHORIZE)
+                        .putExtra(VncService.EXTRA_REASON, "ui-consent")
+                        .putExtra(VncService.EXTRA_RESULT_CODE, resultCode)
+                        .putExtra(VncService.EXTRA_RESULT_DATA, data);
+                startForegroundService(authorize);
+                LogStore.append(this, "vnc", "Screen capture consent granted");
+            } else {
+                LogStore.append(this, "vnc", "Screen capture consent declined");
+                Toast.makeText(this, "Screen capture was not authorised", Toast.LENGTH_LONG).show();
+            }
+            refreshStatusAndLog();
+            return;
+        }
         if (requestCode == REQUEST_VPN_CONSENT) {
             // Consent returns RESULT_OK with a null data intent, so it must be
             // handled before the data-null guard below.
@@ -5837,6 +5920,8 @@ public final class MainActivity extends Activity {
                     stopVncServer();
                 } else if ("vnc_test_capture".equals(command)) {
                     testVncCapture();
+                } else if ("vnc_authorize".equals(command)) {
+                    requestProjectionConsent();
                 } else if ("add_beacon_rule".equals(command)) {
                     addBeaconRule();
                 } else if ("beacon_copy_uuid".equals(command)) {

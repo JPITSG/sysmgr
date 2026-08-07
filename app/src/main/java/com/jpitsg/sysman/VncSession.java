@@ -198,17 +198,15 @@ final class VncSession implements Runnable {
     }
 
     private boolean startFrameSource() {
-        String engine = Config.get(context).vncEngine();
-        if (!Config.VNC_ENGINE_ACCESSIBILITY.equals(engine)) {
-            closeReason = "the Screen Capture engine is not implemented yet";
+        Config config = Config.get(context);
+        FrameSource engine = Config.VNC_ENGINE_PROJECTION.equals(config.vncEngine())
+                ? new ProjectionFrameSource(context)
+                : new AccessibilityFrameSource(context);
+        if (!engine.start(config.vncScalePercent(), config.vncMaxFps())) {
+            closeReason = engine.blockedReason();
             return false;
         }
-        AccessibilityFrameSource accessibilitySource = new AccessibilityFrameSource(context);
-        if (!accessibilitySource.start(Config.get(context).vncScalePercent())) {
-            closeReason = accessibilitySource.blockedReason();
-            return false;
-        }
-        source = accessibilitySource;
+        source = engine;
 
         // ServerInit has to carry the framebuffer size, and the source only
         // knows it once it has seen a frame.

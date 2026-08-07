@@ -73,7 +73,7 @@ final class AccessibilityFrameSource implements FrameSource {
     }
 
     @Override
-    public boolean start(int scalePercent) {
+    public boolean start(int scalePercent, int maxFps) {
         String blocked = SystemManagerAccessibilityService.screenshotBlockedReason(context);
         if (blocked != null) {
             blockedReason = blocked;
@@ -82,7 +82,10 @@ final class AccessibilityFrameSource implements FrameSource {
         this.scalePercent = scalePercent < Config.VNC_SCALE_HALF || scalePercent > Config.VNC_SCALE_FULL
                 ? Config.VNC_SCALE_FULL
                 : scalePercent;
-        this.minIntervalMillis = MIN_CAPTURE_INTERVAL_MILLIS;
+        // The platform floor wins: asking for more than three frames a second
+        // here only earns rate-limit errors.
+        this.minIntervalMillis = Math.max(MIN_CAPTURE_INTERVAL_MILLIS,
+                maxFps > 0 ? 1000L / maxFps : MIN_CAPTURE_INTERVAL_MILLIS);
         this.lastCaptureAt = 0L;
         this.failureCount = 0;
         this.lastFailure = "";

@@ -31,9 +31,11 @@ interface FrameSource {
     /**
      * Brings the engine up at the requested scale.
      *
+     * @param maxFps an upper bound the engine paces itself to. An engine with a
+     *               lower ceiling of its own keeps the lower one.
      * @return false when it could not start; {@link #blockedReason} says why.
      */
-    boolean start(int scalePercent);
+    boolean start(int scalePercent, int maxFps);
 
     /**
      * Blocks for the next frame, honouring the engine's own frame-rate limit.

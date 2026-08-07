@@ -101,9 +101,10 @@ final class VncManager {
             return "Set a VNC password";
         }
         if (!Config.VNC_ENGINE_ACCESSIBILITY.equals(Config.get(app).vncEngine())) {
-            // Better to refuse to listen than to accept a client and drop it
-            // once it discovers there is no engine behind the socket.
-            return "The Screen Capture engine is not implemented yet; use Accessibility";
+            // Screen Capture needs no Accessibility service to see the screen —
+            // only to inject input, which the panel says. Whether it has been
+            // authorised is a separate state, not a blockage.
+            return null;
         }
         // Asks the service itself rather than only checking the settings flag:
         // adding the screenshot capability can leave an older grant in place
