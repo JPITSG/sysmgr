@@ -273,6 +273,8 @@ public final class MainActivity extends Activity {
     private Button vncScaleHalfButton;
     private Button vncStartButton;
     private Button vncStopButton;
+    private Button vncTestCaptureButton;
+    private TextView vncProbeText;
     private String vncEngine = Config.VNC_ENGINE_ACCESSIBILITY;
     private int vncScalePercent = Config.VNC_SCALE_FULL;
     private BroadcastReceiver vncStateReceiver;
@@ -1001,6 +1003,13 @@ public final class MainActivity extends Activity {
                 InputType.TYPE_CLASS_NUMBER);
         LinearLayout captureGroup = addToggleGroup(frame.content);
         vncWakeOnConnectSwitch = addGroupedToggle(captureGroup, "Wake the screen when a client connects");
+
+        LinearLayout probeRow = newRow();
+        frame.content.addView(probeRow, stack(frame.content));
+        vncTestCaptureButton = tonalButton("Test Capture", action("vnc_test_capture"));
+        addRowButton(probeRow, vncTestCaptureButton);
+        vncProbeText = historyText("", 11, COLOR_TEXT_FAINT, false);
+        frame.content.addView(vncProbeText, stack(frame.content));
 
         addSubsectionLabel(frame.content, "Status");
         vncStatusText = historyText("Off", 13, COLOR_TEXT_DIM, false);
@@ -2646,6 +2655,46 @@ public final class MainActivity extends Activity {
         applyButtonState(vncStartButton, enabled && retryable, COLOR_PRIMARY, Color.WHITE);
         applyButtonState(vncStopButton, running, COLOR_DANGER, Color.WHITE);
         updateVncEngineNote();
+        refreshVncProbeText();
+    }
+
+    private void refreshVncProbeText() {
+        if (vncProbeText == null) {
+            return;
+        }
+        boolean probing = VncCaptureProbe.isRunning();
+        applyButtonState(vncTestCaptureButton, !probing, COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+        if (probing) {
+            vncProbeText.setText("Capturing for " + VncCaptureProbe.DURATION_SECONDS + "s…");
+            return;
+        }
+        String result = VncStateStore.probeResult(this);
+        vncProbeText.setText(result.isEmpty()
+                ? "Measures frame rate and how much of the screen changes between frames."
+                : result);
+    }
+
+    /**
+     * Bounded on purpose: capture costs battery and there is no client to serve
+     * yet, so it runs on demand rather than continuously.
+     */
+    private void testVncCapture() {
+        String blocking = SystemManagerAccessibilityService.screenshotBlockedReason(this);
+        if (blocking != null) {
+            Toast.makeText(this, blocking, Toast.LENGTH_LONG).show();
+            VncStateStore.setProbeResult(this, "Cannot capture: " + blocking);
+            refreshVncProbeText();
+            return;
+        }
+        if (!VncCaptureProbe.start(this, new VncCaptureProbe.Callback() {
+            @Override
+            public void onFinished(String summary) {
+                refreshVncProbeText();
+            }
+        })) {
+            return;
+        }
+        refreshVncProbeText();
     }
 
     private void setVncPill(boolean enabled, String state) {
@@ -4710,7 +4759,8 @@ public final class MainActivity extends Activity {
         if ("vpn_connect".equals(command)) {
             return flushLiveSaveGroup(vpnSettingsSave);
         }
-        if ("vnc_start".equals(command) || "vnc_stop".equals(command)) {
+        if ("vnc_start".equals(command) || "vnc_stop".equals(command)
+                || "vnc_test_capture".equals(command)) {
             return flushLiveSaveGroup(vncSettingsSave);
         }
         return true;
@@ -5775,6 +5825,8 @@ public final class MainActivity extends Activity {
                     startVncServer();
                 } else if ("vnc_stop".equals(command)) {
                     stopVncServer();
+                } else if ("vnc_test_capture".equals(command)) {
+                    testVncCapture();
                 } else if ("add_beacon_rule".equals(command)) {
                     addBeaconRule();
                 } else if ("beacon_copy_uuid".equals(command)) {

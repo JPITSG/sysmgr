@@ -38,6 +38,7 @@ final class VncStateStore {
     private static final String KEY_RX = "rx";
     private static final String KEY_TX = "tx";
     private static final String KEY_STARTED_AT = "started_at";
+    private static final String KEY_PROBE_RESULT = "probe_result";
 
     private VncStateStore() {
     }
@@ -121,6 +122,16 @@ final class VncStateStore {
 
     static long startedAtMillis(Context context) {
         return prefs(context).getLong(KEY_STARTED_AT, 0L);
+    }
+
+    /** Last capture-probe summary, kept so the panel can show it after a rebuild. */
+    static void setProbeResult(Context context, String summary) {
+        prefs(context).edit().putString(KEY_PROBE_RESULT, summary == null ? "" : summary).apply();
+        broadcast(context);
+    }
+
+    static String probeResult(Context context) {
+        return prefs(context).getString(KEY_PROBE_RESULT, "");
     }
 
     /** True while the service is expected to be running. */

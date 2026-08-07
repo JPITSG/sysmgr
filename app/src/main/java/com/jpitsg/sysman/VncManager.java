@@ -100,9 +100,12 @@ final class VncManager {
         if (!VncSecretStore.hasPassword(app)) {
             return "Set a VNC password";
         }
-        if (Config.VNC_ENGINE_ACCESSIBILITY.equals(Config.get(app).vncEngine())
-                && !PermissionState.accessibilityServiceEnabled(app)) {
-            return "Enable the Accessibility service";
+        if (Config.VNC_ENGINE_ACCESSIBILITY.equals(Config.get(app).vncEngine())) {
+            // Asks the service itself rather than only checking the settings
+            // flag: adding the screenshot capability can leave an older grant
+            // in place that no longer covers it, and the two cases need
+            // different fixes.
+            return SystemManagerAccessibilityService.screenshotBlockedReason(app);
         }
         return null;
     }

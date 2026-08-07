@@ -8,12 +8,16 @@ import android.content.Intent;
 import android.graphics.Path;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Build;
 import android.os.PowerManager;
 import android.util.DisplayMetrics;
+import android.view.Display;
 import android.view.KeyEvent;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+
+import java.util.concurrent.Executor;
 
 public final class SystemManagerAccessibilityService extends AccessibilityService {
     private static volatile SystemManagerAccessibilityService instance;
@@ -72,6 +76,54 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
                     service.syncHighPriorityKeyCapture();
                 }
             });
+        }
+    }
+
+    /**
+     * Why the service cannot take a screenshot, or null when it can. Screen
+     * capture through Accessibility needs no per-session consent, which is what
+     * lets the VNC server start unattended.
+     */
+    static String screenshotBlockedReason(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return "Screen capture through Accessibility needs Android 11 or newer";
+        }
+        SystemManagerAccessibilityService service = instance;
+        if (service == null) {
+            return "Accessibility service is not connected";
+        }
+        AccessibilityServiceInfo info = service.getServiceInfo();
+        if (info == null) {
+            return "Accessibility service info unavailable";
+        }
+        if ((info.getCapabilities() & AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT) == 0) {
+            // The capability is declared in accessibility_service.xml, so this
+            // means the grant is stale: turn the service off and on again.
+            return "Screenshot capability not granted; re-enable the Accessibility service";
+        }
+        return null;
+    }
+
+    /**
+     * Takes one screenshot of the default display. The platform rate-limits
+     * this to roughly one call every 333 ms and reports
+     * {@code ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT} when called faster, so
+     * the caller has to pace itself.
+     *
+     * @return false when the service is not connected; the callback will not run.
+     */
+    static boolean takeScreenshotForVnc(Executor executor, TakeScreenshotCallback callback) {
+        SystemManagerAccessibilityService service = instance;
+        if (service == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return false;
+        }
+        try {
+            service.takeScreenshot(Display.DEFAULT_DISPLAY, executor, callback);
+            return true;
+        } catch (RuntimeException e) {
+            LogStore.append(service, "vnc", "takeScreenshot rejected: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return false;
         }
     }
 
