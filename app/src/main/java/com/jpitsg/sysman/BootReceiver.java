@@ -20,6 +20,7 @@ public final class BootReceiver extends BroadcastReceiver {
         RemoteLinkManager.sync(context, "boot:" + action);
         VolumeControlManager.sync(context, "boot:" + action);
         BeaconManager.sync(context, "boot:" + action);
+        VncManager.sync(context, "boot:" + action);
         if (config.isTrackingEnabled()) {
             NetworkStateStore.seedIfMissing(context, WifiInfoReader.read(context), "boot");
             NetworkMonitorService.sync(context);

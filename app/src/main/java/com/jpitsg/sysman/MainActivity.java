@@ -257,6 +257,26 @@ public final class MainActivity extends Activity {
     private boolean openVpnProfileReady;
     private static volatile String cachedVpnEngineVersion;
 
+    private TextView vncPill;
+    private TextView vncStatusText;
+    private TextView vncEngineNoteText;
+    private EditText vncPasswordField;
+    private EditText vncPortField;
+    private EditText vncAllowedClientsField;
+    private EditText vncAutoWifiSsidField;
+    private EditText vncMaxFpsField;
+    private EditText vncIdleTimeoutField;
+    private Button vncEngineAccessibilityButton;
+    private Button vncEngineProjectionButton;
+    private Button vncScaleFullButton;
+    private Button vncScaleThreeQuarterButton;
+    private Button vncScaleHalfButton;
+    private Button vncStartButton;
+    private Button vncStopButton;
+    private String vncEngine = Config.VNC_ENGINE_ACCESSIBILITY;
+    private int vncScalePercent = Config.VNC_SCALE_FULL;
+    private BroadcastReceiver vncStateReceiver;
+
     private TextView beaconPill;
     private LinearLayout beaconStatusList;
     private LinearLayout beaconRuleList;
@@ -305,6 +325,11 @@ public final class MainActivity extends Activity {
     private Switch vpnNotificationSwitch;
     private Switch beaconNotificationSwitch;
     private Switch beaconEnabledSwitch;
+    private Switch vncEnabledSwitch;
+    private Switch vncViewOnlySwitch;
+    private Switch vncAutoWifiEnabledSwitch;
+    private Switch vncStopOnCellularSwitch;
+    private Switch vncWakeOnConnectSwitch;
     private Switch logEnabledSwitch;
     private Switch clearNotificationsOnOpenSwitch;
     private Switch notificationBackupEnabledSwitch;
@@ -319,6 +344,7 @@ public final class MainActivity extends Activity {
     private LiveSaveGroup rebootSettingsSave;
     private LiveSaveGroup remoteLinkSettingsSave;
     private LiveSaveGroup vpnSettingsSave;
+    private LiveSaveGroup vncSettingsSave;
     private LiveSaveGroup beaconSettingsSave;
     private Toast settingsFeedbackToast;
     private BroadcastReceiver remoteLinkStateReceiver;
@@ -510,11 +536,13 @@ public final class MainActivity extends Activity {
         registerNotificationBackupReceiver();
         registerOpenVpnStateReceiver();
         registerBeaconStateReceiver();
+        registerVncStateReceiver();
         registerLogChangedReceiver();
         registerNetworkStateReceiver();
         registerSystemStateReceiver();
         NotificationCleaner.clearOnAppOpen(this);
         OpenVpnManager.syncStateOnLaunch(this);
+        VncManager.syncStateOnLaunch(this);
         refreshStatusAndLog();
         refreshNotificationHistory();
         liveStatusHandler.removeCallbacks(liveStatusTicker);
@@ -530,6 +558,7 @@ public final class MainActivity extends Activity {
         unregisterRemoteLinkStateReceiver();
         unregisterOpenVpnStateReceiver();
         unregisterBeaconStateReceiver();
+        unregisterVncStateReceiver();
         unregisterLogChangedReceiver();
         unregisterNetworkStateReceiver();
         unregisterSystemStateReceiver();
@@ -618,6 +647,7 @@ public final class MainActivity extends Activity {
         buildBatteryAlertPanel(root);
         buildVolumeControlPanel(root);
         buildOpenVpnPanel(root);
+        buildVncPanel(root);
         buildBeaconPanel(root);
         buildRebootPanel(root);
         buildSettingsTransferPanel(root);
@@ -935,6 +965,165 @@ public final class MainActivity extends Activity {
 
         openVpnEngineVersionText = historyText("OpenVPN engine: resolving…", 11, COLOR_TEXT_FAINT, false);
         frame.content.addView(openVpnEngineVersionText, stack(frame.content));
+    }
+
+    private void buildVncPanel(LinearLayout root) {
+        Panel frame = addExpandablePanel(root, "VNC Server", true);
+        vncPill = frame.pill;
+
+        LinearLayout enableGroup = addToggleGroup(frame.content);
+        vncEnabledSwitch = addGroupedToggle(enableGroup, "Enable VNC server");
+
+        addSubsectionLabel(frame.content, "Engine");
+        addVncEngineInput(frame.content);
+        vncEngineNoteText = historyText("", 11, COLOR_TEXT_FAINT, false);
+        frame.content.addView(vncEngineNoteText, stack(frame.content));
+
+        addSubsectionLabel(frame.content, "Access");
+        vncPasswordField = addField(frame.content, "Password (VNC uses the first 8 characters)",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        vncPortField = addField(frame.content, "Port", InputType.TYPE_CLASS_NUMBER);
+        vncAllowedClientsField = addField(frame.content,
+                "Allowed clients (blank = any; IP or CIDR, comma separated)", InputType.TYPE_CLASS_TEXT);
+        LinearLayout accessGroup = addToggleGroup(frame.content);
+        vncViewOnlySwitch = addGroupedToggle(accessGroup, "View only (no input)");
+
+        addSubsectionLabel(frame.content, "Auto-Enable");
+        LinearLayout autoGroup = addToggleGroup(frame.content);
+        vncAutoWifiEnabledSwitch = addGroupedToggle(autoGroup, "Start on matching Wi-Fi SSID");
+        vncStopOnCellularSwitch = addGroupedToggle(autoGroup, "Stop when Wi-Fi drops to cellular");
+        vncAutoWifiSsidField = addField(frame.content, "SSID pattern (* wildcard)", InputType.TYPE_CLASS_TEXT);
+
+        addSubsectionLabel(frame.content, "Capture");
+        addVncScaleInput(frame.content);
+        vncMaxFpsField = addField(frame.content, "Max frames per second", InputType.TYPE_CLASS_NUMBER);
+        vncIdleTimeoutField = addField(frame.content, "Idle timeout (minutes, 0 = never)",
+                InputType.TYPE_CLASS_NUMBER);
+        LinearLayout captureGroup = addToggleGroup(frame.content);
+        vncWakeOnConnectSwitch = addGroupedToggle(captureGroup, "Wake the screen when a client connects");
+
+        addSubsectionLabel(frame.content, "Status");
+        vncStatusText = historyText("Off", 13, COLOR_TEXT_DIM, false);
+        vncStatusText.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        vncStatusText.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        frame.content.addView(vncStatusText, stack(frame.content));
+
+        LinearLayout controlRow = newRow();
+        frame.content.addView(controlRow, stack(frame.content));
+        vncStartButton = primaryButton("Start", action("vnc_start"));
+        vncStopButton = neutralButton("Stop", action("vnc_stop"));
+        addRowButton(controlRow, vncStartButton);
+        addRowButton(controlRow, vncStopButton);
+    }
+
+    private void addVncEngineInput(LinearLayout root) {
+        LinearLayout row = newRow();
+        root.addView(row, stack(root));
+        vncEngineAccessibilityButton = tonalButton("Accessibility", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setVncEngine(Config.VNC_ENGINE_ACCESSIBILITY);
+            }
+        });
+        vncEngineProjectionButton = tonalButton("Screen Capture", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setVncEngine(Config.VNC_ENGINE_PROJECTION);
+            }
+        });
+        addRowButton(row, vncEngineAccessibilityButton);
+        addRowButton(row, vncEngineProjectionButton);
+        updateVncEngineButtons();
+    }
+
+    private void setVncEngine(String engine) {
+        String previous = vncEngine;
+        vncEngine = engine;
+        updateVncEngineButtons();
+        if (!loadingConfig && vncSettingsSave != null) {
+            if (!vncSettingsSave.saveNow()) {
+                vncEngine = previous;
+                updateVncEngineButtons();
+            }
+        }
+    }
+
+    private void updateVncEngineButtons() {
+        styleChoiceButton(vncEngineAccessibilityButton,
+                Config.VNC_ENGINE_ACCESSIBILITY.equals(vncEngine));
+        styleChoiceButton(vncEngineProjectionButton,
+                Config.VNC_ENGINE_PROJECTION.equals(vncEngine));
+        updateVncEngineNote();
+    }
+
+    /**
+     * Screen Capture cannot start unattended — from Android 14 the consent
+     * token is single-use — so pairing it with the Wi-Fi rule is worth calling
+     * out where the choice is made rather than leaving it to be discovered.
+     */
+    private void updateVncEngineNote() {
+        if (vncEngineNoteText == null) {
+            return;
+        }
+        boolean projection = Config.VNC_ENGINE_PROJECTION.equals(vncEngine);
+        boolean autoWifi = vncAutoWifiEnabledSwitch != null && vncAutoWifiEnabledSwitch.isChecked();
+        String note;
+        if (projection && autoWifi) {
+            note = "Screen Capture needs a tap to authorise each time it starts, so auto-enable will "
+                    + "notify you instead of starting silently. Use Accessibility for unattended start.";
+        } else if (projection) {
+            note = "Screen Capture: full frame rate, but needs a tap to authorise each time it starts.";
+        } else {
+            note = "Accessibility: about 3 frames per second, but starts unattended. "
+                    + "Needs the Accessibility service enabled.";
+        }
+        vncEngineNoteText.setText(note);
+    }
+
+    private void addVncScaleInput(LinearLayout root) {
+        addFieldLabel(root, "Scale");
+        LinearLayout row = newRow();
+        root.addView(row, stack(root));
+        vncScaleFullButton = tonalButton("100%", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setVncScale(Config.VNC_SCALE_FULL);
+            }
+        });
+        vncScaleThreeQuarterButton = tonalButton("75%", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setVncScale(Config.VNC_SCALE_THREE_QUARTER);
+            }
+        });
+        vncScaleHalfButton = tonalButton("50%", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setVncScale(Config.VNC_SCALE_HALF);
+            }
+        });
+        addRowButton(row, vncScaleFullButton);
+        addRowButton(row, vncScaleThreeQuarterButton);
+        addRowButton(row, vncScaleHalfButton);
+        updateVncScaleButtons();
+    }
+
+    private void setVncScale(int percent) {
+        int previous = vncScalePercent;
+        vncScalePercent = percent;
+        updateVncScaleButtons();
+        if (!loadingConfig && vncSettingsSave != null) {
+            if (!vncSettingsSave.saveNow()) {
+                vncScalePercent = previous;
+                updateVncScaleButtons();
+            }
+        }
+    }
+
+    private void updateVncScaleButtons() {
+        styleChoiceButton(vncScaleFullButton, vncScalePercent == Config.VNC_SCALE_FULL);
+        styleChoiceButton(vncScaleThreeQuarterButton, vncScalePercent == Config.VNC_SCALE_THREE_QUARTER);
+        styleChoiceButton(vncScaleHalfButton, vncScalePercent == Config.VNC_SCALE_HALF);
     }
 
     private void buildBeaconPanel(LinearLayout root) {
@@ -1745,6 +1934,35 @@ public final class MainActivity extends Activity {
         beaconStateReceiver = null;
     }
 
+    private void registerVncStateReceiver() {
+        if (vncStateReceiver != null) {
+            return;
+        }
+        vncStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                refreshVncPanel();
+            }
+        };
+        IntentFilter filter = new IntentFilter(VncStateStore.ACTION_STATE_CHANGED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(vncStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(vncStateReceiver, filter);
+        }
+    }
+
+    private void unregisterVncStateReceiver() {
+        if (vncStateReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(vncStateReceiver);
+        } catch (RuntimeException ignored) {
+        }
+        vncStateReceiver = null;
+    }
+
     // ---- OpenVPN import / connect ------------------------------------------
 
     private void importVpnProfile() {
@@ -2404,6 +2622,123 @@ public final class MainActivity extends Activity {
         }
         int contentHeight = logView.getLayout().getHeight() + logView.getPaddingTop() + logView.getPaddingBottom();
         return Math.max(0, contentHeight - logView.getHeight());
+    }
+
+    // ============================================================
+    //  VNC panel
+    // ============================================================
+
+    private void refreshVncPanel() {
+        if (vncPill == null || vncStatusText == null) {
+            return;
+        }
+        String state = VncStateStore.state(this);
+        boolean enabled = switchValue(vncEnabledSwitch, Config.get(this).vncEnabled());
+        setVncPill(enabled, state);
+        vncStatusText.setText(vncStatusLine(enabled, state));
+        applyButtonState(vncStartButton, !VncStateStore.isLiveState(state), COLOR_PRIMARY, Color.WHITE);
+        applyButtonState(vncStopButton, VncStateStore.isLiveState(state), COLOR_DANGER, Color.WHITE);
+        updateVncEngineNote();
+    }
+
+    private void setVncPill(boolean enabled, String state) {
+        if (!enabled) {
+            setPillState(vncPill, "DISABLED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+            return;
+        }
+        if (VncStateStore.STATE_LISTENING.equals(state) || VncStateStore.STATE_CONNECTED.equals(state)) {
+            setPillState(vncPill, VncStateStore.pillLabel(state),
+                    COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+        } else if (VncStateStore.STATE_BLOCKED.equals(state) || VncStateStore.STATE_ERROR.equals(state)) {
+            setPillState(vncPill, VncStateStore.pillLabel(state),
+                    COLOR_DANGER_CONTAINER, COLOR_DANGER_ON_CONTAINER);
+        } else if (VncStateStore.STATE_OFF.equals(state)) {
+            // Armed but not running: stopped by hand, not disabled.
+            setPillState(vncPill, "STOPPED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+        } else {
+            setPillState(vncPill, VncStateStore.pillLabel(state),
+                    COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+        }
+    }
+
+    private String vncStatusLine(boolean enabled, String state) {
+        StringBuilder text = new StringBuilder();
+        if (!enabled) {
+            text.append("Off");
+        } else if (VncStateStore.STATE_OFF.equals(state)) {
+            text.append("Stopped");
+        } else {
+            text.append(VncStateStore.label(state));
+            String detail = VncStateStore.detail(this);
+            if (!detail.isEmpty()) {
+                text.append(" — ").append(detail);
+            }
+        }
+
+        String listen = VncStateStore.listenAddress(this);
+        if (!listen.isEmpty()) {
+            text.append("\n").append(listen);
+        }
+        String client = VncStateStore.clientAddress(this);
+        text.append("\n").append(client.isEmpty() ? "No client connected" : "Client " + client);
+        text.append("\nEngine: ").append(Config.vncEngineLabel(vncEngine))
+                .append(" · ").append(vncScalePercent).append("%");
+
+        if (VncSecretStore.isTruncated(this)) {
+            text.append("\nPassword is longer than 8 characters; VNC will use the first 8.");
+        }
+        return text.toString();
+    }
+
+    private boolean saveVncConfigOnly() {
+        if (!requireInteger(vncPortField, "VNC port", 1024, 65535)
+                || !requireInteger(vncMaxFpsField, "VNC max frames per second", 1, 60)
+                || !requireInteger(vncIdleTimeoutField, "VNC idle timeout", 0, 1440)) {
+            return false;
+        }
+        Config.get(this).saveVncConfig(
+                vncEnabledSwitch.isChecked(),
+                vncEngine,
+                text(vncPortField),
+                vncViewOnlySwitch.isChecked(),
+                text(vncAllowedClientsField),
+                vncAutoWifiEnabledSwitch.isChecked(),
+                text(vncAutoWifiSsidField),
+                vncStopOnCellularSwitch.isChecked(),
+                vncScalePercent,
+                text(vncMaxFpsField),
+                vncWakeOnConnectSwitch.isChecked(),
+                text(vncIdleTimeoutField));
+        VncSecretStore.setPassword(this, text(vncPasswordField));
+        VncManager.sync(this, "settings-live");
+        refreshStatusAndLog();
+        return true;
+    }
+
+    /** Disabling must persist even when another field on the panel is invalid. */
+    private boolean saveVncDisabledOnly() {
+        Config.get(this).setVncEnabled(false);
+        VncManager.sync(this, "vnc-disabled-live");
+        refreshStatusAndLog();
+        return true;
+    }
+
+    private void startVncServer() {
+        if (!Config.get(this).vncEnabled()) {
+            Toast.makeText(this, "Enable the VNC server first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String blocking = VncManager.blockingReason(this);
+        if (blocking != null) {
+            Toast.makeText(this, blocking, Toast.LENGTH_LONG).show();
+        }
+        VncManager.start(this, "ui-start");
+        refreshStatusAndLog();
+    }
+
+    private void stopVncServer() {
+        VncManager.stop(this, "ui-stop");
+        refreshStatusAndLog();
     }
 
     // ============================================================
@@ -3422,6 +3757,7 @@ public final class MainActivity extends Activity {
         setEnabledPill(batteryAlertPill, switchValue(batteryAlertEnabledSwitch, config.batteryAlertEnabled()));
         refreshVolumeControlPanel();
         refreshOpenVpnPanel();
+        refreshVncPanel();
         refreshBeaconPanel();
         setEnabledPill(rebootPill, switchValue(rebootAutomationEnabledSwitch, config.rebootAutomationEnabled()));
         setRemoteLinkPill(RemoteLinkStateStore.isConnected(this));
@@ -3957,6 +4293,21 @@ public final class MainActivity extends Activity {
             vpnTapNetmaskField.setText(config.vpnTapNetmask());
             vpnTapGatewayField.setText(config.vpnTapGateway());
             vpnRemoteCommandEnabledSwitch.setChecked(config.vpnRemoteCommandEnabled());
+            vncEnabledSwitch.setChecked(config.vncEnabled());
+            vncEngine = config.vncEngine();
+            updateVncEngineButtons();
+            vncPasswordField.setText(VncSecretStore.password(this));
+            vncPortField.setText(Integer.toString(config.vncPort()));
+            vncAllowedClientsField.setText(config.vncAllowedClients());
+            vncViewOnlySwitch.setChecked(config.vncViewOnly());
+            vncAutoWifiEnabledSwitch.setChecked(config.vncAutoWifiEnabled());
+            vncAutoWifiSsidField.setText(config.vncAutoWifiSsid());
+            vncStopOnCellularSwitch.setChecked(config.vncStopOnCellular());
+            vncScalePercent = config.vncScalePercent();
+            updateVncScaleButtons();
+            vncMaxFpsField.setText(Integer.toString(config.vncMaxFps()));
+            vncIdleTimeoutField.setText(Integer.toString(config.vncIdleTimeoutMinutes()));
+            vncWakeOnConnectSwitch.setChecked(config.vncWakeOnConnect());
             beaconEnabledSwitch.setChecked(config.beaconEnabled());
             beaconUuidValue.setText(config.beaconUuid().toString());
             beaconMajorField.setText(Integer.toString(config.beaconMajor()));
@@ -4137,6 +4488,26 @@ public final class MainActivity extends Activity {
                 return saveVpnTogglesOnly();
             }
         }, vpnRemoteCommandEnabledSwitch);
+
+        vncSettingsSave = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveVncConfigOnly();
+            }
+        });
+        bindLiveEdits(vncSettingsSave,
+                vncPasswordField, vncPortField, vncAllowedClientsField,
+                vncAutoWifiSsidField, vncMaxFpsField, vncIdleTimeoutField);
+        // Only the master switch gets the disable fallback: the others must just
+        // revert when a sibling field is invalid, not take the server down.
+        bindLiveToggles(vncSettingsSave, new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveVncDisabledOnly();
+            }
+        }, vncEnabledSwitch);
+        bindLiveToggles(vncSettingsSave, vncViewOnlySwitch, vncAutoWifiEnabledSwitch,
+                vncStopOnCellularSwitch, vncWakeOnConnectSwitch);
 
         beaconSettingsSave = liveSaveGroup(new LiveSaveAction() {
             @Override
@@ -4326,6 +4697,9 @@ public final class MainActivity extends Activity {
         }
         if ("vpn_connect".equals(command)) {
             return flushLiveSaveGroup(vpnSettingsSave);
+        }
+        if ("vnc_start".equals(command) || "vnc_stop".equals(command)) {
+            return flushLiveSaveGroup(vncSettingsSave);
         }
         return true;
     }
@@ -5385,6 +5759,10 @@ public final class MainActivity extends Activity {
                     vpnConnect();
                 } else if ("vpn_disconnect".equals(command)) {
                     vpnDisconnect();
+                } else if ("vnc_start".equals(command)) {
+                    startVncServer();
+                } else if ("vnc_stop".equals(command)) {
+                    stopVncServer();
                 } else if ("add_beacon_rule".equals(command)) {
                     addBeaconRule();
                 } else if ("beacon_copy_uuid".equals(command)) {

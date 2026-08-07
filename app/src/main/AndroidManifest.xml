@@ -106,6 +106,20 @@
                 android:value="vpn" />
         </service>
 
+        <!--
+            specialUse for the same reason as the Remote Link: a dataSync
+            foreground service is force-stopped after six hours a day from
+            Android 15, which a server meant to stay reachable cannot live with.
+        -->
+        <service
+            android:name=".VncService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vnc" />
+        </service>
+
         <service
             android:name=".HighPriorityNotificationListener"
             android:exported="false"

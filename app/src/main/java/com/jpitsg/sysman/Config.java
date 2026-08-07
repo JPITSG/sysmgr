@@ -126,6 +126,21 @@ final class Config {
     private static final String KEY_TASK_SERVICE_NOTIFICATION = "task_service_notification";
     private static final String KEY_VPN_NOTIFICATION = "vpn_notification";
     private static final String KEY_BEACON_NOTIFICATION = "beacon_notification";
+    // The VNC password is deliberately absent: it lives in VncSecretStore's own
+    // preferences file so the settings export never sees it and the settings
+    // import never clears it.
+    private static final String KEY_VNC_ENABLED = "vnc_enabled";
+    private static final String KEY_VNC_ENGINE = "vnc_engine";
+    private static final String KEY_VNC_PORT = "vnc_port";
+    private static final String KEY_VNC_VIEW_ONLY = "vnc_view_only";
+    private static final String KEY_VNC_ALLOWED_CLIENTS = "vnc_allowed_clients";
+    private static final String KEY_VNC_AUTO_WIFI_ENABLED = "vnc_auto_wifi_enabled";
+    private static final String KEY_VNC_AUTO_WIFI_SSID = "vnc_auto_wifi_ssid";
+    private static final String KEY_VNC_STOP_ON_CELLULAR = "vnc_stop_on_cellular";
+    private static final String KEY_VNC_SCALE_PERCENT = "vnc_scale_percent";
+    private static final String KEY_VNC_MAX_FPS = "vnc_max_fps";
+    private static final String KEY_VNC_WAKE_ON_CONNECT = "vnc_wake_on_connect";
+    private static final String KEY_VNC_IDLE_TIMEOUT_MINUTES = "vnc_idle_timeout_minutes";
 
     private static final Object BEACON_UUID_LOCK = new Object();
 
@@ -135,6 +150,22 @@ final class Config {
     static final int DND_UNCHANGED = 0;
     static final int DND_ENABLE = 1;
     static final int DND_DISABLE = 2;
+
+    /**
+     * Screen capture through the Accessibility service. No per-session consent,
+     * so it can start unattended, but the platform rate-limits it to roughly
+     * three frames a second.
+     */
+    static final String VNC_ENGINE_ACCESSIBILITY = "accessibility";
+    /**
+     * Screen capture through MediaProjection. Full frame rate, but the consent
+     * token is single-use from Android 14, so every start needs a fresh tap.
+     */
+    static final String VNC_ENGINE_PROJECTION = "projection";
+
+    static final int VNC_SCALE_FULL = 100;
+    static final int VNC_SCALE_THREE_QUARTER = 75;
+    static final int VNC_SCALE_HALF = 50;
 
     /** A beacon rule interval of 0 means "matched, but stay silent". */
     static final int BEACON_INTERVAL_OFF = 0;
@@ -670,6 +701,102 @@ final class Config {
 
     boolean vpnRemoteCommandEnabled() {
         return prefs.getBoolean(KEY_VPN_REMOTE_COMMAND_ENABLED, false);
+    }
+
+    // ---- VNC server ---------------------------------------------------------
+
+    boolean vncEnabled() {
+        return prefs.getBoolean(KEY_VNC_ENABLED, false);
+    }
+
+    void setVncEnabled(boolean enabled) {
+        prefs.edit().putBoolean(KEY_VNC_ENABLED, enabled).apply();
+    }
+
+    String vncEngine() {
+        String value = string(KEY_VNC_ENGINE, VNC_ENGINE_ACCESSIBILITY);
+        return VNC_ENGINE_PROJECTION.equals(value) ? VNC_ENGINE_PROJECTION : VNC_ENGINE_ACCESSIBILITY;
+    }
+
+    int vncPort() {
+        return intValue(KEY_VNC_PORT, 5900, 1024, 65535);
+    }
+
+    boolean vncViewOnly() {
+        return prefs.getBoolean(KEY_VNC_VIEW_ONLY, false);
+    }
+
+    /** Comma-separated IP or CIDR entries; blank means any client may connect. */
+    String vncAllowedClients() {
+        return string(KEY_VNC_ALLOWED_CLIENTS, "");
+    }
+
+    boolean vncAutoWifiEnabled() {
+        return prefs.getBoolean(KEY_VNC_AUTO_WIFI_ENABLED, false);
+    }
+
+    /** SSID pattern matched by {@link PatternMatcher#simpleMatch}; {@code *} is the only wildcard. */
+    String vncAutoWifiSsid() {
+        return string(KEY_VNC_AUTO_WIFI_SSID, "");
+    }
+
+    boolean vncStopOnCellular() {
+        return prefs.getBoolean(KEY_VNC_STOP_ON_CELLULAR, true);
+    }
+
+    int vncScalePercent() {
+        int value = intValue(KEY_VNC_SCALE_PERCENT, VNC_SCALE_FULL, VNC_SCALE_HALF, VNC_SCALE_FULL);
+        if (value == VNC_SCALE_HALF || value == VNC_SCALE_THREE_QUARTER) {
+            return value;
+        }
+        return VNC_SCALE_FULL;
+    }
+
+    int vncMaxFps() {
+        return intValue(KEY_VNC_MAX_FPS, 3, 1, 60);
+    }
+
+    boolean vncWakeOnConnect() {
+        return prefs.getBoolean(KEY_VNC_WAKE_ON_CONNECT, true);
+    }
+
+    /** Minutes of client inactivity before the session is dropped; 0 disables the timeout. */
+    int vncIdleTimeoutMinutes() {
+        return intValue(KEY_VNC_IDLE_TIMEOUT_MINUTES, 30, 0, 1440);
+    }
+
+    void saveVncConfig(
+            boolean enabled,
+            String engine,
+            String port,
+            boolean viewOnly,
+            String allowedClients,
+            boolean autoWifiEnabled,
+            String autoWifiSsid,
+            boolean stopOnCellular,
+            int scalePercent,
+            String maxFps,
+            boolean wakeOnConnect,
+            String idleTimeoutMinutes) {
+        prefs.edit()
+                .putBoolean(KEY_VNC_ENABLED, enabled)
+                .putString(KEY_VNC_ENGINE, VNC_ENGINE_PROJECTION.equals(engine)
+                        ? VNC_ENGINE_PROJECTION : VNC_ENGINE_ACCESSIBILITY)
+                .putInt(KEY_VNC_PORT, parseInt(port, 5900, 1024, 65535))
+                .putBoolean(KEY_VNC_VIEW_ONLY, viewOnly)
+                .putString(KEY_VNC_ALLOWED_CLIENTS, clean(allowedClients, ""))
+                .putBoolean(KEY_VNC_AUTO_WIFI_ENABLED, autoWifiEnabled)
+                .putString(KEY_VNC_AUTO_WIFI_SSID, clean(autoWifiSsid, ""))
+                .putBoolean(KEY_VNC_STOP_ON_CELLULAR, stopOnCellular)
+                .putInt(KEY_VNC_SCALE_PERCENT, clamp(scalePercent, VNC_SCALE_HALF, VNC_SCALE_FULL))
+                .putInt(KEY_VNC_MAX_FPS, parseInt(maxFps, 3, 1, 60))
+                .putBoolean(KEY_VNC_WAKE_ON_CONNECT, wakeOnConnect)
+                .putInt(KEY_VNC_IDLE_TIMEOUT_MINUTES, parseInt(idleTimeoutMinutes, 30, 0, 1440))
+                .apply();
+    }
+
+    static String vncEngineLabel(String engine) {
+        return VNC_ENGINE_PROJECTION.equals(engine) ? "Screen Capture" : "Accessibility";
     }
 
     // ---- Foreground service notifications -----------------------------------
