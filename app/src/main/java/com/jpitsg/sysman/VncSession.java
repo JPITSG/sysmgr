@@ -164,6 +164,17 @@ final class VncSession implements Runnable {
             listener.onAuthFailed(clientAddress);
             return false;
         }
+        // Brought up before the security result is sent, because that result is
+        // the last message with room for an explanation. Once it says OK the
+        // client is waiting for ServerInit, and a server that cannot produce
+        // one can only hang up — which a client reports as the connection
+        // being closed, with no hint as to why.
+        if (!startFrameSource()) {
+            failSecurity(closeReason);
+            LogStore.append(context, "vnc", "Cannot serve " + clientAddress + ": " + closeReason);
+            return false;
+        }
+
         RfbEncoder.writeInt(out, SECURITY_RESULT_OK);
         out.flush();
 
@@ -171,10 +182,6 @@ final class VncSession implements Runnable {
         // one client at a time either way.
         in.readUnsignedByte();
 
-        if (!startFrameSource()) {
-            failInit(closeReason);
-            return false;
-        }
         writeServerInit();
         return true;
     }
@@ -228,10 +235,6 @@ final class VncSession implements Runnable {
             out.flush();
         } catch (IOException ignored) {
         }
-    }
-
-    private void failInit(String reason) {
-        LogStore.append(context, "vnc", "Cannot serve " + clientAddress + ": " + reason);
     }
 
     // ---- Client messages ----------------------------------------------------

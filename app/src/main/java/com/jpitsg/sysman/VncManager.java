@@ -100,14 +100,15 @@ final class VncManager {
         if (!VncSecretStore.hasPassword(app)) {
             return "Set a VNC password";
         }
-        if (Config.VNC_ENGINE_ACCESSIBILITY.equals(Config.get(app).vncEngine())) {
-            // Asks the service itself rather than only checking the settings
-            // flag: adding the screenshot capability can leave an older grant
-            // in place that no longer covers it, and the two cases need
-            // different fixes.
-            return SystemManagerAccessibilityService.screenshotBlockedReason(app);
+        if (!Config.VNC_ENGINE_ACCESSIBILITY.equals(Config.get(app).vncEngine())) {
+            // Better to refuse to listen than to accept a client and drop it
+            // once it discovers there is no engine behind the socket.
+            return "The Screen Capture engine is not implemented yet; use Accessibility";
         }
-        return null;
+        // Asks the service itself rather than only checking the settings flag:
+        // adding the screenshot capability can leave an older grant in place
+        // that no longer covers it, and the two cases need different fixes.
+        return SystemManagerAccessibilityService.screenshotBlockedReason(app);
     }
 
     private static void send(Context app, String action, String reason) {

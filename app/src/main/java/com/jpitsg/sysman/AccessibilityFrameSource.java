@@ -27,7 +27,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * metrics, so a rotation is just another size change and there is no second
  * source of truth to keep in step. Two pixel buffers alternate so a frame stays
  * readable while its successor is captured, which is exactly the lifetime the
- * differ needs and saves a full copy per frame.
+ * differ needs and saves a copy per frame.
+ *
+ * <p>The screenshot arrives as a hardware bitmap, whose pixels cannot be read
+ * and cannot be drawn onto a software canvas either — that throws "software
+ * rendering doesn't support hardware bitmaps". {@link Bitmap#copy} is the only
+ * supported way to reach them, and it allocates, so there is one unavoidable
+ * full-size allocation per frame. {@code PixelCopy} would allow a reusable
+ * destination but only accepts a Surface, Window or SurfaceView as its source.
  */
 final class AccessibilityFrameSource implements FrameSource {
     /** Platform limit is 333 ms; the margin keeps us off the error path. */
@@ -159,19 +166,34 @@ final class AccessibilityFrameSource implements FrameSource {
                 noteFailure("could not wrap hardware buffer");
                 return null;
             }
+            Bitmap software;
             try {
-                ensureBuffers(wrapped.getWidth(), wrapped.getHeight());
-                // Hardware bitmaps cannot be read directly, so this draw into a
-                // reused software bitmap is both the copy and the downscale.
-                canvas.drawBitmap(wrapped, null, destRect, paint);
+                // The only supported route off a hardware bitmap. Drawing it
+                // onto the software canvas instead throws.
+                software = wrapped.copy(Bitmap.Config.ARGB_8888, false);
             } finally {
                 wrapped.recycle();
             }
+            if (software == null) {
+                noteFailure("could not copy the captured bitmap");
+                return null;
+            }
 
-            bufferIndex ^= 1;
-            int[] pixels = buffers[bufferIndex];
-            target.getPixels(pixels, 0, scaledWidth, 0, 0, scaledWidth, scaledHeight);
-            return new Frame(pixels, scaledWidth, scaledHeight, System.currentTimeMillis());
+            try {
+                ensureBuffers(software.getWidth(), software.getHeight());
+                bufferIndex ^= 1;
+                int[] pixels = buffers[bufferIndex];
+                if (target != null) {
+                    canvas.drawBitmap(software, null, destRect, paint);
+                    target.getPixels(pixels, 0, scaledWidth, 0, 0, scaledWidth, scaledHeight);
+                } else {
+                    // Unscaled: the copy is already the frame we want.
+                    software.getPixels(pixels, 0, scaledWidth, 0, 0, scaledWidth, scaledHeight);
+                }
+                return new Frame(pixels, scaledWidth, scaledHeight, System.currentTimeMillis());
+            } finally {
+                software.recycle();
+            }
         } finally {
             hardwareBuffer.close();
         }
@@ -179,7 +201,7 @@ final class AccessibilityFrameSource implements FrameSource {
 
     /** Allocates, or reallocates after a rotation or display size change. */
     private void ensureBuffers(int srcWidth, int srcHeight) {
-        if (target != null && srcWidth == sourceWidth && srcHeight == sourceHeight) {
+        if (buffers != null && srcWidth == sourceWidth && srcHeight == sourceHeight) {
             return;
         }
         sourceWidth = srcWidth;
@@ -187,15 +209,26 @@ final class AccessibilityFrameSource implements FrameSource {
         scaledWidth = Math.max(1, srcWidth * scalePercent / 100);
         scaledHeight = Math.max(1, srcHeight * scalePercent / 100);
 
-        if (target != null) {
-            target.recycle();
+        releaseTarget();
+        if (scaledWidth != srcWidth || scaledHeight != srcHeight) {
+            // Only needed when scaling; at full size the captured copy is
+            // already the right shape and the extra draw would be waste.
+            target = Bitmap.createBitmap(scaledWidth, scaledHeight, Bitmap.Config.ARGB_8888);
+            canvas = new Canvas(target);
+            destRect = new Rect(0, 0, scaledWidth, scaledHeight);
         }
-        target = Bitmap.createBitmap(scaledWidth, scaledHeight, Bitmap.Config.ARGB_8888);
-        canvas = new Canvas(target);
-        destRect = new Rect(0, 0, scaledWidth, scaledHeight);
         buffers = new int[][]{new int[scaledWidth * scaledHeight], new int[scaledWidth * scaledHeight]};
         bufferIndex = 0;
         sizeChanged = true;
+    }
+
+    private void releaseTarget() {
+        if (target != null) {
+            target.recycle();
+            target = null;
+        }
+        canvas = null;
+        destRect = null;
     }
 
     /** Sleeps out whatever is left of the platform's minimum interval. */
@@ -291,12 +324,7 @@ final class AccessibilityFrameSource implements FrameSource {
             }
             executor = null;
         }
-        if (target != null) {
-            target.recycle();
-            target = null;
-        }
-        canvas = null;
-        destRect = null;
+        releaseTarget();
         buffers = null;
         scaledWidth = 0;
         scaledHeight = 0;
