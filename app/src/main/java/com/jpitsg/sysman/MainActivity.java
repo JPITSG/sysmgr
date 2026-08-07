@@ -989,6 +989,16 @@ public final class MainActivity extends Activity {
                 "Allowed clients (blank = any; IP or CIDR, comma separated)", InputType.TYPE_CLASS_TEXT);
         LinearLayout accessGroup = addToggleGroup(frame.content);
         vncViewOnlySwitch = addGroupedToggle(accessGroup, "View only (no input)");
+        // The key mapping is not discoverable, and the typing limit is a real
+        // constraint rather than a bug: there is no key injection without a
+        // platform signature.
+        TextView inputNote = historyText(
+                "Touch, drag, scroll and right-click (long press) work anywhere. Typing only "
+                        + "reaches a focused text field.\nEsc Back · Home Home · End Recents · "
+                        + "arrows D-pad · F1 Notifications · F2 Quick Settings · F3 Menu · "
+                        + "F4 Power · F5 Lock · F6 Screenshot",
+                11, COLOR_TEXT_FAINT, false);
+        frame.content.addView(inputNote, stack(frame.content));
 
         addSubsectionLabel(frame.content, "Auto-Enable");
         LinearLayout autoGroup = addToggleGroup(frame.content);

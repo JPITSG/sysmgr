@@ -285,6 +285,16 @@ final class AccessibilityFrameSource implements FrameSource {
     }
 
     @Override
+    public int sourceWidth() {
+        return sourceWidth;
+    }
+
+    @Override
+    public int sourceHeight() {
+        return sourceHeight;
+    }
+
+    @Override
     public boolean consumeSizeChanged() {
         boolean changed = sizeChanged;
         sizeChanged = false;

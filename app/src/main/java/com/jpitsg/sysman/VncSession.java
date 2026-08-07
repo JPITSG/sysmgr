@@ -64,6 +64,7 @@ final class VncSession implements Runnable {
     private DataInputStream in;
     private OutputStream out;
     private FrameSource source;
+    private VncInputInjector injector;
     private Thread frameThread;
     private int frameWidth;
     private int frameHeight;
@@ -211,6 +212,10 @@ final class VncSession implements Runnable {
         frameWidth = first.width;
         frameHeight = first.height;
         source.consumeSizeChanged();
+        // Client coordinates are in the scaled framebuffer; gestures have to be
+        // dispatched in real display pixels.
+        injector = new VncInputInjector(context, frameWidth, frameHeight,
+                source.sourceWidth(), source.sourceHeight());
         return true;
     }
 
@@ -332,19 +337,23 @@ final class VncSession implements Runnable {
     }
 
     private void readKeyEvent() throws IOException {
-        in.readUnsignedByte();
+        boolean down = in.readUnsignedByte() != 0;
         skipFully(2);
-        in.readInt();
-        // Input injection arrives with the next phase; the bytes are consumed
-        // now so the stream stays framed.
+        int keysym = in.readInt();
         markProgress();
+        if (injector != null) {
+            injector.onKeyEvent(down, keysym);
+        }
     }
 
     private void readPointerEvent() throws IOException {
-        in.readUnsignedByte();
-        in.readUnsignedShort();
-        in.readUnsignedShort();
+        int buttonMask = in.readUnsignedByte();
+        int x = in.readUnsignedShort();
+        int y = in.readUnsignedShort();
         markProgress();
+        if (injector != null) {
+            injector.onPointerEvent(buttonMask, x, y);
+        }
     }
 
     private void readClientCutText() throws IOException {
@@ -505,6 +514,12 @@ final class VncSession implements Runnable {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+        if (injector != null) {
+            // Before the source goes: a disconnect mid-drag must not leave a
+            // finger held down on the phone.
+            injector.stop();
+            injector = null;
         }
         if (source != null) {
             source.stop();

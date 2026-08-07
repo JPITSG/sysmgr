@@ -48,6 +48,12 @@ interface FrameSource {
     /** Frame height after scaling; 0 before {@link #start}. */
     int height();
 
+    /** Display width before scaling; input coordinates map back onto this. */
+    int sourceWidth();
+
+    /** Display height before scaling. */
+    int sourceHeight();
+
     /** True when the last acquire found the display a different size. */
     boolean consumeSizeChanged();
 

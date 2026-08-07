@@ -9,6 +9,7 @@ import android.graphics.Path;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.PowerManager;
 import android.util.DisplayMetrics;
 import android.view.Display;
@@ -143,6 +144,145 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
                 service.wakeScreen("vnc-client", SCREEN_WAKE_MILLIS);
             }
         });
+    }
+
+    // ---- VNC input injection ------------------------------------------------
+
+    /**
+     * Dispatches one gesture on behalf of a VNC client. Callbacks land on this
+     * service's handler, which is also the only thread that dispatches, so a
+     * caller chaining continued strokes never races itself.
+     *
+     * @return false when the service is not connected; the callback will not run.
+     */
+    static boolean dispatchVncGesture(final GestureDescription gesture,
+                                      final GestureResultCallback callback) {
+        final SystemManagerAccessibilityService service = instance;
+        if (service == null) {
+            return false;
+        }
+        try {
+            return service.dispatchGesture(gesture, callback, service.handler);
+        } catch (RuntimeException e) {
+            LogStore.append(service, "vnc", "Gesture dispatch rejected: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    static boolean performVncGlobalAction(int action) {
+        SystemManagerAccessibilityService service = instance;
+        if (service == null || action < 0) {
+            return false;
+        }
+        try {
+            return service.performGlobalAction(action);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Types into whatever has input focus, at the cursor.
+     *
+     * <p>There is no key injection without a platform signature, so text is
+     * applied by rewriting the field's contents around its selection. That
+     * works in a text field and nowhere else, which is the honest limit of what
+     * an accessibility service can do.
+     */
+    static boolean insertVncText(String text) {
+        return editFocusedText(text, false);
+    }
+
+    /** Backspace: removes the selection, or the character before the cursor. */
+    static boolean deleteVncBackward() {
+        return editFocusedText("", true);
+    }
+
+    private static boolean editFocusedText(String insert, boolean deleteBackward) {
+        SystemManagerAccessibilityService service = instance;
+        if (service == null) {
+            return false;
+        }
+        AccessibilityNodeInfo focus = null;
+        try {
+            focus = service.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if (focus == null || !focus.isEditable()) {
+                return false;
+            }
+            CharSequence current = focus.getText() == null ? "" : focus.getText();
+            int length = current.length();
+            int start = clampIndex(focus.getTextSelectionStart(), length);
+            int end = clampIndex(focus.getTextSelectionEnd(), length);
+            if (start > end) {
+                int swap = start;
+                start = end;
+                end = swap;
+            }
+            if (deleteBackward && start == end) {
+                if (start == 0) {
+                    return true;
+                }
+                start--;
+            }
+
+            String next = current.subSequence(0, start) + insert + current.subSequence(end, length);
+            Bundle args = new Bundle();
+            args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, next);
+            if (!focus.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                return false;
+            }
+            // The node is stale after the edit, so the caret has to be placed
+            // through a refreshed copy or it snaps to the end of the field.
+            int caret = start + insert.length();
+            if (focus.refresh()) {
+                Bundle selection = new Bundle();
+                selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, caret);
+                selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, caret);
+                focus.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection);
+            }
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        } finally {
+            if (focus != null) {
+                focus.recycle();
+            }
+        }
+    }
+
+    /** Return key: asks the IME to act, falling back to clicking the field. */
+    static boolean submitVncText() {
+        SystemManagerAccessibilityService service = instance;
+        if (service == null) {
+            return false;
+        }
+        AccessibilityNodeInfo focus = null;
+        try {
+            focus = service.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if (focus == null) {
+                return false;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    && focus.performAction(
+                            AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId())) {
+                return true;
+            }
+            return focus.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+        } catch (RuntimeException e) {
+            return false;
+        } finally {
+            if (focus != null) {
+                focus.recycle();
+            }
+        }
+    }
+
+    private static int clampIndex(int index, int length) {
+        if (index < 0 || index > length) {
+            return length;
+        }
+        return index;
     }
 
     static boolean requestReboot(Context context, String reason) {
