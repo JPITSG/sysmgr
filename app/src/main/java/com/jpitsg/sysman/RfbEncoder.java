@@ -4,6 +4,8 @@ import android.graphics.Rect;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Arrays;
+import java.util.zip.Deflater;
 
 /**
  * Writes framebuffer rectangles in the client's requested pixel format.
@@ -17,7 +19,13 @@ import java.io.OutputStream;
 final class RfbEncoder {
     static final int ENCODING_RAW = 0;
     static final int ENCODING_COPY_RECT = 1;
+    static final int ENCODING_ZRLE = 16;
     static final int ENCODING_DESKTOP_SIZE = -223;
+
+    /** ZRLE always works in 64x64 tiles, whatever the rectangle's shape. */
+    private static final int ZRLE_TILE = 64;
+    /** Above this many distinct colours a tile is cheaper sent raw than as a palette. */
+    private static final int MAX_PALETTE = 16;
 
     /** The wire layout of one pixel, as negotiated by SetPixelFormat. */
     static final class PixelFormat {
@@ -66,6 +74,22 @@ final class RfbEncoder {
             return Math.max(1, bitsPerPixel / 8);
         }
 
+        /**
+         * ZRLE's "compressed pixel": three bytes instead of four whenever the
+         * fourth carries nothing, which is the usual case for 32bpp depth-24.
+         * A quarter off the wire before zlib even sees it.
+         */
+        int cpixelBytes() {
+            if (bitsPerPixel == 32 && depth <= 24 && (colourMask() & 0xFF000000) == 0) {
+                return 3;
+            }
+            return bytesPerPixel();
+        }
+
+        private int colourMask() {
+            return (redMax << redShift) | (greenMax << greenShift) | (blueMax << blueShift);
+        }
+
         boolean supported() {
             return trueColour && (bitsPerPixel == 8 || bitsPerPixel == 16 || bitsPerPixel == 32);
         }
@@ -98,6 +122,19 @@ final class RfbEncoder {
     private PixelFormat format = PixelFormat.serverDefault();
     private byte[] rowBuffer = new byte[0];
     private long bytesWritten;
+
+    /**
+     * One zlib stream for the whole connection, as ZRLE requires — the history
+     * it accumulates is most of where the compression comes from. Losing sync
+     * on it cannot be recovered, so nothing resets it mid-session.
+     */
+    private final Deflater deflater = new Deflater(Deflater.BEST_SPEED, false);
+    private byte[] compressed = new byte[1 << 16];
+    private int compressedLength;
+    private byte[] tileBuffer = new byte[1 << 14];
+    private int tileLength;
+    private final int[] palette = new int[MAX_PALETTE];
+    private byte[] paletteIndices = new byte[ZRLE_TILE * ZRLE_TILE];
 
     void setFormat(PixelFormat format) {
         this.format = format;
@@ -152,6 +189,189 @@ final class RfbEncoder {
             out.write(rowBuffer, 0, rowBytes);
             bytesWritten += rowBytes;
         }
+    }
+
+    // ---- ZRLE ---------------------------------------------------------------
+
+    /**
+     * ZRLE for one rectangle: 64x64 tiles fed through a zlib stream that lives
+     * for the whole connection, so the compressor keeps learning the screen.
+     *
+     * <p>Only three of the subencodings are emitted — solid, packed palette and
+     * raw. That is a server's choice to make; a client must decode all of them
+     * either way. The RLE variants would help on gradients, which phone UI has
+     * little of, and each one is another chance to corrupt a stream that has no
+     * way to resynchronise.
+     */
+    void writeZrle(OutputStream out, int[] pixels, int stride, Rect rect) throws IOException {
+        compressedLength = 0;
+        for (int tileY = rect.top; tileY < rect.bottom; tileY += ZRLE_TILE) {
+            int tileHeight = Math.min(ZRLE_TILE, rect.bottom - tileY);
+            for (int tileX = rect.left; tileX < rect.right; tileX += ZRLE_TILE) {
+                int tileWidth = Math.min(ZRLE_TILE, rect.right - tileX);
+                buildTile(pixels, stride, tileX, tileY, tileWidth, tileHeight);
+                compress(tileBuffer, tileLength, false);
+            }
+        }
+        // Flushed per rectangle so the client can decode it without waiting for
+        // whatever comes next.
+        compress(tileBuffer, 0, true);
+
+        writeInt(out, compressedLength);
+        out.write(compressed, 0, compressedLength);
+        bytesWritten += 4 + compressedLength;
+    }
+
+    /** Lays one tile out uncompressed into {@link #tileBuffer}. */
+    private void buildTile(int[] pixels, int stride, int tileX, int tileY, int width, int height) {
+        int count = width * height;
+        ensureTileCapacity(1 + MAX_PALETTE * 4 + count * 4);
+        if (paletteIndices.length < count) {
+            paletteIndices = new byte[count];
+        }
+
+        int paletteSize = 0;
+        boolean tooManyColours = false;
+        for (int y = 0; y < height; y++) {
+            int source = (tileY + y) * stride + tileX;
+            for (int x = 0; x < width; x++) {
+                int pixel = convertIfNeeded(pixels[source + x]);
+                int index = -1;
+                for (int i = 0; i < paletteSize; i++) {
+                    if (palette[i] == pixel) {
+                        index = i;
+                        break;
+                    }
+                }
+                if (index < 0) {
+                    if (paletteSize == MAX_PALETTE) {
+                        tooManyColours = true;
+                        break;
+                    }
+                    palette[paletteSize] = pixel;
+                    index = paletteSize++;
+                }
+                paletteIndices[y * width + x] = (byte) index;
+            }
+            if (tooManyColours) {
+                break;
+            }
+        }
+
+        tileLength = 0;
+        if (!tooManyColours && paletteSize == 1) {
+            tileBuffer[tileLength++] = 1;
+            putCPixel(palette[0]);
+            return;
+        }
+        if (!tooManyColours) {
+            tileBuffer[tileLength++] = (byte) paletteSize;
+            for (int i = 0; i < paletteSize; i++) {
+                putCPixel(palette[i]);
+            }
+            packIndices(paletteSize, width, height);
+            return;
+        }
+
+        // Raw, but still as CPIXELs — the fourth byte would only be padding.
+        tileBuffer[tileLength++] = 0;
+        for (int y = 0; y < height; y++) {
+            int source = (tileY + y) * stride + tileX;
+            for (int x = 0; x < width; x++) {
+                putCPixel(convertIfNeeded(pixels[source + x]));
+            }
+        }
+    }
+
+    /**
+     * Palette indices, most significant bit first, each row padded out to a
+     * whole byte.
+     */
+    private void packIndices(int paletteSize, int width, int height) {
+        int bitsPerIndex = paletteSize == 2 ? 1 : (paletteSize <= 4 ? 2 : 4);
+        for (int y = 0; y < height; y++) {
+            int accumulator = 0;
+            int bits = 0;
+            for (int x = 0; x < width; x++) {
+                accumulator = (accumulator << bitsPerIndex) | paletteIndices[y * width + x];
+                bits += bitsPerIndex;
+                if (bits == 8) {
+                    tileBuffer[tileLength++] = (byte) accumulator;
+                    accumulator = 0;
+                    bits = 0;
+                }
+            }
+            if (bits > 0) {
+                tileBuffer[tileLength++] = (byte) (accumulator << (8 - bits));
+            }
+        }
+    }
+
+    private void putCPixel(int value) {
+        int bytes = format.cpixelBytes();
+        if (bytes == 3) {
+            if (format.bigEndian) {
+                tileBuffer[tileLength++] = (byte) (value >> 16);
+                tileBuffer[tileLength++] = (byte) (value >> 8);
+                tileBuffer[tileLength++] = (byte) value;
+            } else {
+                tileBuffer[tileLength++] = (byte) value;
+                tileBuffer[tileLength++] = (byte) (value >> 8);
+                tileBuffer[tileLength++] = (byte) (value >> 16);
+            }
+            return;
+        }
+        tileLength = putPixel(tileBuffer, tileLength, value, bytes);
+    }
+
+    private void compress(byte[] input, int length, boolean flush) {
+        if (length > 0) {
+            deflater.setInput(input, 0, length);
+            while (!deflater.needsInput()) {
+                ensureCompressedCapacity();
+                int written = deflater.deflate(compressed, compressedLength,
+                        compressed.length - compressedLength);
+                if (written == 0) {
+                    break;
+                }
+                compressedLength += written;
+            }
+        }
+        if (!flush) {
+            return;
+        }
+        while (true) {
+            ensureCompressedCapacity();
+            int written = deflater.deflate(compressed, compressedLength,
+                    compressed.length - compressedLength, Deflater.SYNC_FLUSH);
+            if (written == 0) {
+                return;
+            }
+            compressedLength += written;
+        }
+    }
+
+    private void ensureCompressedCapacity() {
+        if (compressed.length - compressedLength >= 4096) {
+            return;
+        }
+        compressed = Arrays.copyOf(compressed, Math.max(compressed.length * 2, compressedLength + 8192));
+    }
+
+    private void ensureTileCapacity(int needed) {
+        if (tileBuffer.length < needed) {
+            tileBuffer = new byte[needed];
+        }
+    }
+
+    /** Skips the arithmetic when the client asked for the layout we already have. */
+    private int convertIfNeeded(int argb) {
+        return format.nativeLayout ? (argb & 0x00FFFFFF) : convert(argb);
+    }
+
+    /** Ends the zlib stream; the encoder is unusable afterwards. */
+    void close() {
+        deflater.end();
     }
 
     /** Scales each channel into the client's range and puts it at its shift. */

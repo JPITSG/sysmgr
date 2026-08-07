@@ -66,8 +66,18 @@ final class VncSession implements Runnable {
     private FrameSource source;
     private VncInputInjector injector;
     private Thread frameThread;
-    private int frameWidth;
-    private int frameHeight;
+    // Written by the frame thread on a resize, read by the reader thread when
+    // it clamps an update request.
+    private volatile int frameWidth;
+    private volatile int frameHeight;
+    private volatile boolean supportsZrle;
+    private volatile boolean supportsDesktopSize;
+    /**
+     * Handed over rather than applied in place: the encoder belongs to the
+     * frame thread, and swapping its format part way through a rectangle would
+     * put two layouts in one update.
+     */
+    private volatile RfbEncoder.PixelFormat pendingFormat;
 
     VncSession(Context context, Socket socket, Listener listener) {
         this.context = context.getApplicationContext();
@@ -299,7 +309,7 @@ final class VncSession implements Runnable {
                     + clientAddress + ": " + format);
             return;
         }
-        encoder.setFormat(format);
+        pendingFormat = format;
         LogStore.append(context, "vnc", "Pixel format from " + clientAddress + ": " + format);
         // The client expects the next update in the new format, so anything
         // already on its screen is stale.
@@ -313,6 +323,11 @@ final class VncSession implements Runnable {
         for (int i = 0; i < count; i++) {
             clientEncodings.add(in.readInt());
         }
+        supportsZrle = clientEncodings.contains(RfbEncoder.ENCODING_ZRLE);
+        supportsDesktopSize = clientEncodings.contains(RfbEncoder.ENCODING_DESKTOP_SIZE);
+        LogStore.append(context, "vnc", "Encodings from " + clientAddress
+                + ": using " + (supportsZrle ? "ZRLE" : "Raw")
+                + (supportsDesktopSize ? ", DesktopSize supported" : ", no DesktopSize"));
     }
 
     private void readFramebufferUpdateRequest() throws IOException {
@@ -424,11 +439,25 @@ final class VncSession implements Runnable {
                 }
                 if (source.consumeSizeChanged()
                         || frame.width != frameWidth || frame.height != frameHeight) {
-                    // Telling the client about a resize needs the DesktopSize
-                    // pseudo-encoding, which is not wired up yet. Ending the
-                    // session is honest; serving the old geometry is not.
-                    stop("display size changed to " + frame.width + "x" + frame.height);
-                    return;
+                    if (!supportsDesktopSize) {
+                        // Without DesktopSize there is no way to tell the client,
+                        // and serving the old geometry would be a lie.
+                        stop("display size changed to " + frame.width + "x" + frame.height
+                                + " and the client cannot be told");
+                        return;
+                    }
+                    resizeTo(frame.width, frame.height);
+                    differ = new FrameDiffer(frameWidth, frameHeight);
+                    previous = null;
+                    sendDesktopSize();
+                    // The client re-requests after any update, and that request
+                    // is the one that gets the repainted screen.
+                    synchronized (updateLock) {
+                        servedSeq = seq;
+                        fullUpdateRequested = true;
+                        requestedRegion = null;
+                    }
+                    continue;
                 }
 
                 List<Rect> dirty = (full || previous == null)
@@ -472,14 +501,51 @@ final class VncSession implements Runnable {
     }
 
     private void sendUpdate(FrameSource.Frame frame, List<Rect> rects) throws IOException {
+        // Applied here, between rectangles, where a format change is safe.
+        RfbEncoder.PixelFormat requested = pendingFormat;
+        if (requested != null) {
+            encoder.setFormat(requested);
+            pendingFormat = null;
+        }
+
+        boolean zrle = supportsZrle;
         out.write(0);
         out.write(0);
         RfbEncoder.writeShort(out, rects.size());
         for (Rect rect : rects) {
-            encoder.writeRectHeader(out, rect, RfbEncoder.ENCODING_RAW);
-            encoder.writeRaw(out, frame.pixels, frame.width, rect);
+            encoder.writeRectHeader(out, rect,
+                    zrle ? RfbEncoder.ENCODING_ZRLE : RfbEncoder.ENCODING_RAW);
+            if (zrle) {
+                encoder.writeZrle(out, frame.pixels, frame.width, rect);
+            } else {
+                encoder.writeRaw(out, frame.pixels, frame.width, rect);
+            }
         }
         out.flush();
+    }
+
+    /** One rectangle carrying the new size and no pixel data. */
+    private void sendDesktopSize() throws IOException {
+        out.write(0);
+        out.write(0);
+        RfbEncoder.writeShort(out, 1);
+        encoder.writeRectHeader(out, new Rect(0, 0, frameWidth, frameHeight),
+                RfbEncoder.ENCODING_DESKTOP_SIZE);
+        out.flush();
+        LogStore.append(context, "vnc", "Resized to " + frameWidth + "x" + frameHeight
+                + " for " + clientAddress);
+    }
+
+    /** Re-points the framebuffer and the input mapping at the new geometry. */
+    private void resizeTo(int width, int height) {
+        frameWidth = width;
+        frameHeight = height;
+        VncInputInjector previousInjector = injector;
+        injector = new VncInputInjector(context, width, height,
+                source.sourceWidth(), source.sourceHeight());
+        if (previousInjector != null) {
+            previousInjector.stop();
+        }
     }
 
     private void requestFullUpdate() {
@@ -525,6 +591,7 @@ final class VncSession implements Runnable {
             source.stop();
             source = null;
         }
+        encoder.close();
         closeQuietly();
     }
 
