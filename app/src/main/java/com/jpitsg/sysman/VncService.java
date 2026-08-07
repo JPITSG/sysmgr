@@ -36,7 +36,8 @@ import java.util.concurrent.Executors;
  * service is force-stopped after six hours in a day, which a server meant to
  * stay reachable cannot live with.
  */
-public final class VncService extends Service implements VncNetworkWatcher.Listener {
+public final class VncService extends Service
+        implements VncNetworkWatcher.Listener, VncServer.Listener {
     /** Re-evaluate; leaves a manual hold in place. */
     static final String ACTION_SYNC = "com.jpitsg.sysman.action.VNC_SYNC";
     /** Explicit user start; clears a manual hold. */
@@ -60,6 +61,7 @@ public final class VncService extends Service implements VncNetworkWatcher.Liste
     private volatile boolean destroyed;
 
     private VncNetworkWatcher watcher;
+    private VncServer server;
     private ExecutorService evaluationExecutor;
 
     static boolean isActive() {
@@ -108,6 +110,14 @@ public final class VncService extends Service implements VncNetworkWatcher.Liste
     public void onDestroy() {
         active = false;
         destroyed = true;
+        // No join here: onDestroy runs on the main thread and waiting on the
+        // accept and frame threads would risk an ANR. Closing the sockets is
+        // what ends them.
+        VncServer closing = server;
+        server = null;
+        if (closing != null) {
+            closing.stop(false);
+        }
         if (watcher != null) {
             watcher.stop();
         }
@@ -194,6 +204,7 @@ public final class VncService extends Service implements VncNetworkWatcher.Liste
         }
         if (!Config.get(this).vncEnabled()) {
             LogStore.append(this, "vnc", "Disabled; stopping reason=" + reason);
+            stopServer();
             syncWatcher();
             stopSelf();
             return;
@@ -203,24 +214,96 @@ public final class VncService extends Service implements VncNetworkWatcher.Liste
 
         String blocking = VncManager.blockingReason(this);
         if (blocking != null) {
+            stopServer();
             settle(VncStateStore.STATE_BLOCKED, blocking, reason);
             return;
         }
         if (manualHold) {
+            stopServer();
             settle(VncStateStore.STATE_OFF, "Stopped by hand; the next network change re-arms it", reason);
             return;
         }
 
         VncNetworkWatcher.Verdict verdict = VncNetworkWatcher.evaluate(this, snapshot);
         if (!verdict.shouldRun) {
+            stopServer();
             settle(VncStateStore.STATE_WAITING, verdict.reason, reason);
             return;
         }
+        startServer(reason);
+    }
 
-        // Phase 2 stops here. The capture engine, the listening socket and the
-        // RFB session arrive in later phases; this is where they hook in.
-        settle(VncStateStore.STATE_STARTING, "Rules satisfied (" + verdict.reason
-                + "); capture engine not started yet", reason);
+    // ---- Server lifecycle ---------------------------------------------------
+
+    private void startServer(String reason) {
+        int port = Config.get(this).vncPort();
+        if (server != null && server.isRunning() && server.port() == port) {
+            return;
+        }
+        stopServer();
+        settle(VncStateStore.STATE_STARTING, "", reason);
+        VncServer starting = new VncServer(this, this);
+        if (!starting.start(port)) {
+            // start() already reported the failure through onFailed.
+            return;
+        }
+        server = starting;
+    }
+
+    private void stopServer() {
+        VncServer current = server;
+        server = null;
+        if (current != null) {
+            current.stop();
+            VncStateStore.setListenAddress(this, "");
+            VncStateStore.setClientAddress(this, "");
+        }
+    }
+
+    @Override
+    public void onListening(final String address, final int port) {
+        submit(new Runnable() {
+            @Override
+            public void run() {
+                VncStateStore.setListenAddress(VncService.this,
+                        (address.isEmpty() ? "0.0.0.0" : address) + ":" + port);
+                settle(VncStateStore.STATE_LISTENING, "", "server-listening");
+            }
+        }, "server-listening");
+    }
+
+    @Override
+    public void onClientConnected(final String address) {
+        submit(new Runnable() {
+            @Override
+            public void run() {
+                VncStateStore.setClientAddress(VncService.this, address);
+                settle(VncStateStore.STATE_CONNECTED, "", "client-connected");
+            }
+        }, "client-connected");
+    }
+
+    @Override
+    public void onClientDisconnected(final String address, final String reason) {
+        submit(new Runnable() {
+            @Override
+            public void run() {
+                VncStateStore.setClientAddress(VncService.this, "");
+                if (server != null && server.isRunning()) {
+                    settle(VncStateStore.STATE_LISTENING, "Last client: " + reason, "client-closed");
+                }
+            }
+        }, "client-closed");
+    }
+
+    @Override
+    public void onFailed(final String message) {
+        submit(new Runnable() {
+            @Override
+            public void run() {
+                settle(VncStateStore.STATE_ERROR, message, "server-failed");
+            }
+        }, "server-failed");
     }
 
     private void settle(String state, String detail, String reason) {

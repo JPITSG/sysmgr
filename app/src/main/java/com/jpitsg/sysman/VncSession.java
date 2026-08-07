@@ -1,0 +1,558 @@
+package com.jpitsg.sysman;
+
+import android.content.Context;
+import android.graphics.Rect;
+import android.os.SystemClock;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.Socket;
+import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * One client's RFB 3.8 conversation: handshake, authentication, then a reader
+ * thread taking client messages while a frame thread answers update requests.
+ *
+ * <p>Two threads because RFB is request-driven in one direction and streamed in
+ * the other. Only the frame thread ever writes, so there is no write lock to
+ * get wrong. The frame thread also does the capturing, which means nothing is
+ * captured at all until a client asks for a frame — the cheapest possible idle.
+ */
+final class VncSession implements Runnable {
+    private static final Charset ASCII = Charset.forName("US-ASCII");
+    private static final String PROTOCOL_VERSION = "RFB 003.008\n";
+    private static final int SECURITY_VNC_AUTH = 2;
+    private static final int SECURITY_RESULT_OK = 0;
+    private static final int SECURITY_RESULT_FAILED = 1;
+    private static final int HANDSHAKE_TIMEOUT_MILLIS = 15_000;
+    private static final int MAX_CUT_TEXT_BYTES = 1 << 20;
+    private static final long FRAME_WAIT_MILLIS = 500L;
+
+    interface Listener {
+        void onAuthenticated(VncSession session, String clientAddress);
+
+        void onClosed(VncSession session, String clientAddress, String reason);
+
+        void onAuthFailed(String clientAddress);
+    }
+
+    private final Context context;
+    private final Socket socket;
+    private final Listener listener;
+    private final String clientAddress;
+    private final RfbEncoder encoder = new RfbEncoder();
+    private final Set<Integer> clientEncodings = new HashSet<>();
+
+    private final Object updateLock = new Object();
+    private long requestSeq;
+    private long servedSeq;
+    private boolean fullUpdateRequested;
+    private Rect requestedRegion;
+
+    private volatile boolean running = true;
+    private volatile String closeReason = "";
+    private volatile long lastProgressAt = SystemClock.elapsedRealtime();
+
+    private DataInputStream in;
+    private OutputStream out;
+    private FrameSource source;
+    private Thread frameThread;
+    private int frameWidth;
+    private int frameHeight;
+
+    VncSession(Context context, Socket socket, Listener listener) {
+        this.context = context.getApplicationContext();
+        this.socket = socket;
+        this.listener = listener;
+        this.clientAddress = describe(socket);
+    }
+
+    String clientAddress() {
+        return clientAddress;
+    }
+
+    @Override
+    public void run() {
+        String reason = "closed";
+        try {
+            socket.setTcpNoDelay(true);
+            socket.setKeepAlive(true);
+            socket.setSoTimeout(HANDSHAKE_TIMEOUT_MILLIS);
+            in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 8192));
+            out = new BufferedOutputStream(socket.getOutputStream(), 1 << 16);
+
+            if (!handshake()) {
+                reason = closeReason.isEmpty() ? "handshake failed" : closeReason;
+                return;
+            }
+            // Past the handshake a client may legitimately go quiet for a long
+            // time, so the read timeout comes off and liveness is left to TCP
+            // keepalive and the idle timeout.
+            socket.setSoTimeout(0);
+            listener.onAuthenticated(this, clientAddress);
+
+            startFrameThread();
+            readerLoop();
+            reason = closeReason.isEmpty() ? "client disconnected" : closeReason;
+        } catch (EOFException e) {
+            reason = closeReason.isEmpty() ? "client disconnected" : closeReason;
+        } catch (IOException e) {
+            reason = closeReason.isEmpty()
+                    ? e.getClass().getSimpleName() + ": " + e.getMessage()
+                    : closeReason;
+        } catch (RuntimeException e) {
+            reason = "session crashed: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+        } finally {
+            close(reason);
+            listener.onClosed(this, clientAddress, reason);
+        }
+    }
+
+    /** Ends the session from another thread; the socket close unblocks both loops. */
+    void stop(String reason) {
+        if (closeReason.isEmpty()) {
+            closeReason = reason;
+        }
+        running = false;
+        closeQuietly();
+        synchronized (updateLock) {
+            updateLock.notifyAll();
+        }
+    }
+
+    // ---- Handshake ----------------------------------------------------------
+
+    private boolean handshake() throws IOException {
+        out.write(PROTOCOL_VERSION.getBytes(ASCII));
+        out.flush();
+
+        byte[] clientVersion = new byte[12];
+        in.readFully(clientVersion);
+        String version = new String(clientVersion, ASCII).trim();
+        LogStore.append(context, "vnc", "Client " + clientAddress + " speaks " + version);
+
+        // Only VNC authentication is offered. Security type 1 is "none", which
+        // has no place on a server that also injects input.
+        out.write(1);
+        out.write(SECURITY_VNC_AUTH);
+        out.flush();
+
+        int chosen = in.readUnsignedByte();
+        if (chosen != SECURITY_VNC_AUTH) {
+            failSecurity("unsupported security type " + chosen);
+            closeReason = "client chose security type " + chosen;
+            return false;
+        }
+
+        byte[] challenge = VncAuth.newChallenge();
+        out.write(challenge);
+        out.flush();
+
+        byte[] response = new byte[VncAuth.CHALLENGE_LENGTH];
+        in.readFully(response);
+        if (!VncAuth.verify(VncSecretStore.password(context), challenge, response)) {
+            failSecurity("Authentication failed");
+            closeReason = "authentication failed";
+            listener.onAuthFailed(clientAddress);
+            return false;
+        }
+        RfbEncoder.writeInt(out, SECURITY_RESULT_OK);
+        out.flush();
+
+        // ClientInit: the shared flag is read and ignored — this server serves
+        // one client at a time either way.
+        in.readUnsignedByte();
+
+        if (!startFrameSource()) {
+            failInit(closeReason);
+            return false;
+        }
+        writeServerInit();
+        return true;
+    }
+
+    private boolean startFrameSource() {
+        String engine = Config.get(context).vncEngine();
+        if (!Config.VNC_ENGINE_ACCESSIBILITY.equals(engine)) {
+            closeReason = "the Screen Capture engine is not implemented yet";
+            return false;
+        }
+        AccessibilityFrameSource accessibilitySource = new AccessibilityFrameSource(context);
+        if (!accessibilitySource.start(Config.get(context).vncScalePercent())) {
+            closeReason = accessibilitySource.blockedReason();
+            return false;
+        }
+        source = accessibilitySource;
+
+        // ServerInit has to carry the framebuffer size, and the source only
+        // knows it once it has seen a frame.
+        FrameSource.Frame first = source.acquire(5_000L);
+        if (first == null) {
+            source.stop();
+            source = null;
+            closeReason = "could not capture the screen";
+            return false;
+        }
+        frameWidth = first.width;
+        frameHeight = first.height;
+        source.consumeSizeChanged();
+        return true;
+    }
+
+    private void writeServerInit() throws IOException {
+        RfbEncoder.writeShort(out, frameWidth);
+        RfbEncoder.writeShort(out, frameHeight);
+        encoder.format().write(out);
+        byte[] name = ("System Manager (" + android.os.Build.MODEL + ")").getBytes(ASCII);
+        RfbEncoder.writeInt(out, name.length);
+        out.write(name);
+        out.flush();
+        LogStore.append(context, "vnc", "Serving " + frameWidth + "x" + frameHeight
+                + " to " + clientAddress);
+    }
+
+    private void failSecurity(String reason) {
+        try {
+            RfbEncoder.writeInt(out, SECURITY_RESULT_FAILED);
+            byte[] text = reason.getBytes(ASCII);
+            RfbEncoder.writeInt(out, text.length);
+            out.write(text);
+            out.flush();
+        } catch (IOException ignored) {
+        }
+    }
+
+    private void failInit(String reason) {
+        LogStore.append(context, "vnc", "Cannot serve " + clientAddress + ": " + reason);
+    }
+
+    // ---- Client messages ----------------------------------------------------
+
+    private void readerLoop() throws IOException {
+        while (running) {
+            int type = in.read();
+            if (type < 0) {
+                return;
+            }
+            switch (type) {
+                case 0:
+                    readSetPixelFormat();
+                    break;
+                case 2:
+                    readSetEncodings();
+                    break;
+                case 3:
+                    readFramebufferUpdateRequest();
+                    break;
+                case 4:
+                    readKeyEvent();
+                    break;
+                case 5:
+                    readPointerEvent();
+                    break;
+                case 6:
+                    readClientCutText();
+                    break;
+                default:
+                    // The stream is framed by message type; an unknown one means
+                    // we have lost sync and cannot safely skip ahead.
+                    closeReason = "unknown client message type " + type;
+                    return;
+            }
+        }
+    }
+
+    private void readSetPixelFormat() throws IOException {
+        skipFully(3);
+        int bitsPerPixel = in.readUnsignedByte();
+        int depth = in.readUnsignedByte();
+        boolean bigEndian = in.readUnsignedByte() != 0;
+        boolean trueColour = in.readUnsignedByte() != 0;
+        int redMax = in.readUnsignedShort();
+        int greenMax = in.readUnsignedShort();
+        int blueMax = in.readUnsignedShort();
+        int redShift = in.readUnsignedByte();
+        int greenShift = in.readUnsignedByte();
+        int blueShift = in.readUnsignedByte();
+        skipFully(3);
+
+        RfbEncoder.PixelFormat format = new RfbEncoder.PixelFormat(bitsPerPixel, depth, bigEndian,
+                trueColour, redMax, greenMax, blueMax, redShift, greenShift, blueShift);
+        if (!format.supported()) {
+            LogStore.append(context, "vnc", "Ignoring unsupported pixel format from "
+                    + clientAddress + ": " + format);
+            return;
+        }
+        encoder.setFormat(format);
+        LogStore.append(context, "vnc", "Pixel format from " + clientAddress + ": " + format);
+        // The client expects the next update in the new format, so anything
+        // already on its screen is stale.
+        requestFullUpdate();
+    }
+
+    private void readSetEncodings() throws IOException {
+        skipFully(1);
+        int count = in.readUnsignedShort();
+        clientEncodings.clear();
+        for (int i = 0; i < count; i++) {
+            clientEncodings.add(in.readInt());
+        }
+    }
+
+    private void readFramebufferUpdateRequest() throws IOException {
+        boolean incremental = in.readUnsignedByte() != 0;
+        int x = in.readUnsignedShort();
+        int y = in.readUnsignedShort();
+        int width = in.readUnsignedShort();
+        int height = in.readUnsignedShort();
+
+        Rect requested = new Rect(x, y, x + width, y + height);
+        if (!requested.intersect(0, 0, frameWidth, frameHeight)) {
+            return;
+        }
+        synchronized (updateLock) {
+            requestSeq++;
+            if (!incremental) {
+                fullUpdateRequested = true;
+            }
+            requestedRegion = requestedRegion == null ? requested : union(requestedRegion, requested);
+            updateLock.notifyAll();
+        }
+    }
+
+    private void readKeyEvent() throws IOException {
+        in.readUnsignedByte();
+        skipFully(2);
+        in.readInt();
+        // Input injection arrives with the next phase; the bytes are consumed
+        // now so the stream stays framed.
+        markProgress();
+    }
+
+    private void readPointerEvent() throws IOException {
+        in.readUnsignedByte();
+        in.readUnsignedShort();
+        in.readUnsignedShort();
+        markProgress();
+    }
+
+    private void readClientCutText() throws IOException {
+        skipFully(3);
+        int length = in.readInt();
+        if (length < 0 || length > MAX_CUT_TEXT_BYTES) {
+            closeReason = "client cut text too large (" + length + " bytes)";
+            running = false;
+            return;
+        }
+        skipFully(length);
+    }
+
+    // ---- Frame delivery -----------------------------------------------------
+
+    private void startFrameThread() {
+        frameThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                frameLoop();
+            }
+        }, "SystemManagerVncFrames");
+        frameThread.start();
+    }
+
+    private void frameLoop() {
+        FrameSource.Frame previous = null;
+        FrameDiffer differ = new FrameDiffer(frameWidth, frameHeight);
+        long idleMillis = Config.get(context).vncIdleTimeoutMinutes() * 60_000L;
+
+        try {
+            while (running) {
+                // Checked here as well as in the wait: a client watching a
+                // static screen leaves a request outstanding forever, so the
+                // waiting branch below is never reached.
+                if (isIdle(idleMillis)) {
+                    stop("idle timeout");
+                    return;
+                }
+                long seq;
+                boolean full;
+                Rect region;
+                synchronized (updateLock) {
+                    while (running && requestSeq == servedSeq) {
+                        updateLock.wait(FRAME_WAIT_MILLIS);
+                        if (isIdle(idleMillis)) {
+                            stop("idle timeout");
+                            return;
+                        }
+                    }
+                    if (!running) {
+                        return;
+                    }
+                    seq = requestSeq;
+                    full = fullUpdateRequested;
+                    region = requestedRegion == null
+                            ? new Rect(0, 0, frameWidth, frameHeight)
+                            : new Rect(requestedRegion);
+                }
+
+                FrameSource.Frame frame = source.acquire(5_000L);
+                if (frame == null) {
+                    if (isIdle(idleMillis)) {
+                        stop("idle timeout");
+                        return;
+                    }
+                    continue;
+                }
+                if (source.consumeSizeChanged()
+                        || frame.width != frameWidth || frame.height != frameHeight) {
+                    // Telling the client about a resize needs the DesktopSize
+                    // pseudo-encoding, which is not wired up yet. Ending the
+                    // session is honest; serving the old geometry is not.
+                    stop("display size changed to " + frame.width + "x" + frame.height);
+                    return;
+                }
+
+                List<Rect> dirty = (full || previous == null)
+                        ? differ.fullFrame()
+                        : differ.diff(frame.pixels, previous.pixels);
+                previous = frame;
+                boolean hadDamage = !dirty.isEmpty();
+                dirty = clip(dirty, region);
+                if (dirty.isEmpty()) {
+                    if (hadDamage) {
+                        // Something changed outside the requested region. The
+                        // frame it changed in is already gone — the source only
+                        // keeps two — so the next update has to be a full one or
+                        // those pixels are lost for good.
+                        synchronized (updateLock) {
+                            fullUpdateRequested = true;
+                        }
+                    }
+                    // The request stays outstanding: RFB lets the server hold an
+                    // incremental request until something actually changes.
+                    continue;
+                }
+
+                sendUpdate(frame, dirty);
+                markProgress();
+                synchronized (updateLock) {
+                    servedSeq = seq;
+                    if (requestSeq == seq) {
+                        fullUpdateRequested = false;
+                        requestedRegion = null;
+                    }
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (IOException e) {
+            stop("write failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+        } catch (RuntimeException e) {
+            stop("frame loop crashed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
+
+    private void sendUpdate(FrameSource.Frame frame, List<Rect> rects) throws IOException {
+        out.write(0);
+        out.write(0);
+        RfbEncoder.writeShort(out, rects.size());
+        for (Rect rect : rects) {
+            encoder.writeRectHeader(out, rect, RfbEncoder.ENCODING_RAW);
+            encoder.writeRaw(out, frame.pixels, frame.width, rect);
+        }
+        out.flush();
+    }
+
+    private void requestFullUpdate() {
+        synchronized (updateLock) {
+            requestSeq++;
+            fullUpdateRequested = true;
+            updateLock.notifyAll();
+        }
+    }
+
+    private boolean isIdle(long idleMillis) {
+        return idleMillis > 0L && SystemClock.elapsedRealtime() - lastProgressAt > idleMillis;
+    }
+
+    private void markProgress() {
+        lastProgressAt = SystemClock.elapsedRealtime();
+    }
+
+    // ---- Teardown -----------------------------------------------------------
+
+    private void close(String reason) {
+        running = false;
+        if (closeReason.isEmpty()) {
+            closeReason = reason;
+        }
+        synchronized (updateLock) {
+            updateLock.notifyAll();
+        }
+        if (frameThread != null && frameThread != Thread.currentThread()) {
+            try {
+                frameThread.join(2_000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (source != null) {
+            source.stop();
+            source = null;
+        }
+        closeQuietly();
+    }
+
+    private void closeQuietly() {
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    // ---- Helpers ------------------------------------------------------------
+
+    private final byte[] skipScratch = new byte[4096];
+
+    private void skipFully(int count) throws IOException {
+        int remaining = count;
+        while (remaining > 0) {
+            int read = in.read(skipScratch, 0, Math.min(remaining, skipScratch.length));
+            if (read < 0) {
+                throw new EOFException("stream ended while skipping");
+            }
+            remaining -= read;
+        }
+    }
+
+    private static List<Rect> clip(List<Rect> rects, Rect region) {
+        List<Rect> clipped = new ArrayList<>(rects.size());
+        for (Rect rect : rects) {
+            Rect copy = new Rect(rect);
+            if (copy.intersect(region)) {
+                clipped.add(copy);
+            }
+        }
+        return clipped;
+    }
+
+    private static Rect union(Rect left, Rect right) {
+        Rect result = new Rect(left);
+        result.union(right);
+        return result;
+    }
+
+    private static String describe(Socket socket) {
+        if (socket.getInetAddress() == null) {
+            return "unknown";
+        }
+        return socket.getInetAddress().getHostAddress() + ":" + socket.getPort();
+    }
+}

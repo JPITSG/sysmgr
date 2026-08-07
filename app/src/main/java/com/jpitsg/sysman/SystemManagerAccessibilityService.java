@@ -127,6 +127,24 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
         }
     }
 
+    /**
+     * Lights the screen when a VNC client attaches. A dark display captures as
+     * black, which looks like a broken server rather than a sleeping phone.
+     * Reuses the wake path the reboot automation already relies on.
+     */
+    static void wakeScreenForVnc() {
+        final SystemManagerAccessibilityService service = instance;
+        if (service == null) {
+            return;
+        }
+        service.handler.post(new Runnable() {
+            @Override
+            public void run() {
+                service.wakeScreen("vnc-client", SCREEN_WAKE_MILLIS);
+            }
+        });
+    }
+
     static boolean requestReboot(Context context, String reason) {
         SystemManagerAccessibilityService service = instance;
         if (service == null) {
