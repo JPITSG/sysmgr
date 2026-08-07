@@ -5,9 +5,14 @@ import android.content.Intent;
 import android.os.Build;
 
 /**
- * Static facade for the VNC server, mirroring {@link OpenVpnManager}. The UI,
- * the boot hook and (from a later phase) the network watcher all drive the
- * server through here rather than touching the service directly.
+ * Static facade for the VNC server, mirroring {@link OpenVpnManager}. The UI and
+ * the boot hook drive the server through here rather than touching the service
+ * directly.
+ *
+ * <p>Nothing outside the service evaluates the auto-enable rules. The service
+ * owns the network watcher and stays up for as long as the feature is armed,
+ * because a background network callback cannot start a foreground service on
+ * Android 12 and up.
  */
 final class VncManager {
 
@@ -19,6 +24,9 @@ final class VncManager {
      * toggle means <em>armed</em>, not running — a rule that is not satisfied
      * leaves the service up in {@link VncStateStore#STATE_WAITING} rather than
      * turning the user's own switch off behind their back.
+     *
+     * <p>Leaves a manual hold in place: a settings edit is not a request to
+     * undo the user's own Stop.
      */
     static void sync(Context context, String reason) {
         Context app = context.getApplicationContext();
@@ -26,26 +34,31 @@ final class VncManager {
             stop(app, reason);
             return;
         }
-        start(app, reason);
+        send(app, VncService.ACTION_SYNC, reason);
     }
 
+    /** Explicit user start. Clears a manual hold. */
     static void start(Context context, String reason) {
         Context app = context.getApplicationContext();
-        LogStore.append(app, "vnc", "Start requested reason=" + reason);
-        Intent intent = new Intent(app, VncService.class).setAction(VncService.ACTION_SYNC);
-        intent.putExtra(VncService.EXTRA_REASON, reason);
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                app.startForegroundService(intent);
-            } else {
-                app.startService(intent);
-            }
-        } catch (RuntimeException e) {
-            LogStore.append(app, "vnc", "Could not start service: "
-                    + e.getClass().getSimpleName() + ": " + e.getMessage());
-            VncStateStore.setState(app, VncStateStore.STATE_ERROR,
-                    "Service refused to start: " + e.getMessage());
+        if (!Config.get(app).vncEnabled()) {
+            LogStore.append(app, "vnc", "Start ignored; not enabled reason=" + reason);
+            return;
         }
+        send(app, VncService.ACTION_START, reason);
+    }
+
+    /**
+     * Explicit user stop while the feature is still armed. The service stays up
+     * holding the watcher so the next network change can re-arm it; only
+     * turning the master switch off takes the service down.
+     */
+    static void hold(Context context, String reason) {
+        Context app = context.getApplicationContext();
+        if (!Config.get(app).vncEnabled() || !VncService.isActive()) {
+            stop(app, reason);
+            return;
+        }
+        send(app, VncService.ACTION_HOLD, reason);
     }
 
     /**
@@ -79,7 +92,7 @@ final class VncManager {
 
     /**
      * The reason the server cannot run right now, or null when nothing is in
-     * the way. Checked before every start so the panel can say what to fix
+     * the way. Checked before the rules so the panel can say what to fix
      * instead of failing silently.
      */
     static String blockingReason(Context context) {
@@ -92,5 +105,22 @@ final class VncManager {
             return "Enable the Accessibility service";
         }
         return null;
+    }
+
+    private static void send(Context app, String action, String reason) {
+        Intent intent = new Intent(app, VncService.class).setAction(action);
+        intent.putExtra(VncService.EXTRA_REASON, reason);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                app.startForegroundService(intent);
+            } else {
+                app.startService(intent);
+            }
+        } catch (RuntimeException e) {
+            LogStore.append(app, "vnc", "Could not start service: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            VncStateStore.setState(app, VncStateStore.STATE_ERROR,
+                    "Service refused to start: " + e.getMessage());
+        }
     }
 }

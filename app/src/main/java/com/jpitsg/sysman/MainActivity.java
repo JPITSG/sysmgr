@@ -2636,8 +2636,15 @@ public final class MainActivity extends Activity {
         boolean enabled = switchValue(vncEnabledSwitch, Config.get(this).vncEnabled());
         setVncPill(enabled, state);
         vncStatusText.setText(vncStatusLine(enabled, state));
-        applyButtonState(vncStartButton, !VncStateStore.isLiveState(state), COLOR_PRIMARY, Color.WHITE);
-        applyButtonState(vncStopButton, VncStateStore.isLiveState(state), COLOR_DANGER, Color.WHITE);
+
+        // Stop is available whenever the service is up at all, waiting
+        // included, so the user can hold it before walking into range.
+        boolean running = enabled && !VncStateStore.STATE_OFF.equals(state);
+        boolean retryable = VncStateStore.STATE_OFF.equals(state)
+                || VncStateStore.STATE_BLOCKED.equals(state)
+                || VncStateStore.STATE_ERROR.equals(state);
+        applyButtonState(vncStartButton, enabled && retryable, COLOR_PRIMARY, Color.WHITE);
+        applyButtonState(vncStopButton, running, COLOR_DANGER, Color.WHITE);
         updateVncEngineNote();
     }
 
@@ -2736,8 +2743,13 @@ public final class MainActivity extends Activity {
         refreshStatusAndLog();
     }
 
+    /**
+     * Holds rather than stops: the service keeps the network watcher so the
+     * auto-enable rule can re-arm it, and a settings edit will not undo this.
+     * Turning the master switch off is what actually takes the service down.
+     */
     private void stopVncServer() {
-        VncManager.stop(this, "ui-stop");
+        VncManager.hold(this, "ui-stop");
         refreshStatusAndLog();
     }
 
