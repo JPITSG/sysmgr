@@ -532,9 +532,24 @@ public final class RemoteLinkService extends Service {
 
     private void sendHeartbeat(RemoteWebSocketClient current) throws IOException {
         int battery = BatteryReader.batteryPercent(this);
+        String vpnState = OpenVpnStateStore.state(this);
+        boolean vpnServiceActive = OpenVpnService.isActive();
+        boolean vpnEnabled = vpnServiceActive && OpenVpnStateStore.isLiveState(vpnState);
+        boolean vpnConnected = vpnServiceActive && OpenVpnStateStore.STATE_CONNECTED.equals(vpnState);
+        boolean vncEnabled = Config.get(this).vncEnabled();
+        boolean vncConnected = VncService.isActive()
+                && VncStateStore.STATE_CONNECTED.equals(VncStateStore.state(this));
         current.sendText("{\"type\":\"heartbeat\",\"ts\":" + (System.currentTimeMillis() / 1000L)
-                + ",\"battery\":" + battery + "}");
-        LogStore.append(this, "remote", "Heartbeat sent battery=" + battery);
+                + ",\"battery\":" + battery
+                + ",\"vpn_enabled\":" + vpnEnabled
+                + ",\"vpn_connected\":" + vpnConnected
+                + ",\"vnc_enabled\":" + vncEnabled
+                + ",\"vnc_connected\":" + vncConnected + "}");
+        LogStore.append(this, "remote", "Heartbeat sent battery=" + battery
+                + " vpn_enabled=" + vpnEnabled
+                + " vpn_connected=" + vpnConnected
+                + " vnc_enabled=" + vncEnabled
+                + " vnc_connected=" + vncConnected);
     }
 
     private boolean queueManualPing(String reason) {

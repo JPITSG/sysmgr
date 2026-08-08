@@ -632,7 +632,21 @@ function handleTextMessage(connectionId, socket, text) {
   }
 
   if (parsed.type === 'heartbeat') {
-    log(`heartbeat received connection=${connectionId} ts=${parsed.ts || ''} battery=${parsed.battery}`);
+    const client = clients.get(connectionId);
+    if (client) {
+      client.lastHeartbeatAt = Date.now();
+      if (Number.isFinite(parsed.battery)) client.battery = parsed.battery;
+      if (typeof parsed.vpn_enabled === 'boolean') client.vpnEnabled = parsed.vpn_enabled;
+      if (typeof parsed.vpn_connected === 'boolean') client.vpnConnected = parsed.vpn_connected;
+      if (typeof parsed.vnc_enabled === 'boolean') client.vncEnabled = parsed.vnc_enabled;
+      if (typeof parsed.vnc_connected === 'boolean') client.vncConnected = parsed.vnc_connected;
+    }
+    log(`heartbeat received connection=${connectionId}` +
+      ` ts=${logValue(parsed.ts)} battery=${logValue(parsed.battery)}` +
+      ` vpn_enabled=${logValue(parsed.vpn_enabled)}` +
+      ` vpn_connected=${logValue(parsed.vpn_connected)}` +
+      ` vnc_enabled=${logValue(parsed.vnc_enabled)}` +
+      ` vnc_connected=${logValue(parsed.vnc_connected)}`);
     sendJson(socket, {type: 'heartbeat_ack', ts: Math.floor(Date.now() / 1000), notif_backup: notificationStore.enabled});
     return;
   }
@@ -1256,7 +1270,13 @@ server.on('upgrade', (req, socket) => {
     socket,
     user: credentials.username,
     uuid: '',
-    from: clientAddress(req.socket)
+    from: clientAddress(req.socket),
+    lastHeartbeatAt: 0,
+    battery: null,
+    vpnEnabled: null,
+    vpnConnected: null,
+    vncEnabled: null,
+    vncConnected: null
   };
   clients.set(connectionId, client);
   socket.write(
