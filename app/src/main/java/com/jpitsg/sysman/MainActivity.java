@@ -987,9 +987,12 @@ public final class MainActivity extends Activity {
 
         addSubsectionLabel(frame.content, "Status");
         openVpnStatusText = historyText("Off", 13, COLOR_TEXT_DIM, false);
-        openVpnStatusText.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        openVpnStatusText.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
         openVpnStatusText.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
         frame.content.addView(openVpnStatusText, stack(frame.content));
+
+        openVpnEngineVersionText = historyText("OpenVPN engine: resolving…", 11, COLOR_TEXT_FAINT, false);
+        frame.content.addView(openVpnEngineVersionText, stack(frame.content));
 
         LinearLayout controlRow = newRow();
         frame.content.addView(controlRow, stack(frame.content));
@@ -997,9 +1000,6 @@ public final class MainActivity extends Activity {
         vpnDisconnectButton = neutralButton("Disconnect", action("vpn_disconnect"));
         addRowButton(controlRow, vpnConnectButton);
         addRowButton(controlRow, vpnDisconnectButton);
-
-        openVpnEngineVersionText = historyText("OpenVPN engine: resolving…", 11, COLOR_TEXT_FAINT, false);
-        frame.content.addView(openVpnEngineVersionText, stack(frame.content));
     }
 
     private void buildVncPanel(LinearLayout root) {
@@ -1064,11 +1064,6 @@ public final class MainActivity extends Activity {
                 11, COLOR_TEXT_FAINT, false);
         frame.content.addView(awakeNote, stack(frame.content));
 
-        addSubsectionLabel(frame.content, "Remote Control");
-        LinearLayout remoteGroup = addToggleGroup(frame.content);
-        vncRemoteCommandEnabledSwitch = addGroupedToggle(
-                remoteGroup, "Allow VNC control from Remote Link");
-
         LinearLayout probeRow = newRow();
         frame.content.addView(probeRow, stack(frame.content));
         vncTestCaptureButton = tonalButton("Test Capture", action("vnc_test_capture"));
@@ -1076,9 +1071,14 @@ public final class MainActivity extends Activity {
         vncProbeText = historyText("", 11, COLOR_TEXT_FAINT, false);
         frame.content.addView(vncProbeText, stack(frame.content));
 
+        addSubsectionLabel(frame.content, "Remote Control");
+        LinearLayout remoteGroup = addToggleGroup(frame.content);
+        vncRemoteCommandEnabledSwitch = addGroupedToggle(
+                remoteGroup, "Allow VNC control from Remote Link");
+
         addSubsectionLabel(frame.content, "Status");
         vncStatusText = historyText("Off", 13, COLOR_TEXT_DIM, false);
-        vncStatusText.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        vncStatusText.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
         vncStatusText.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
         frame.content.addView(vncStatusText, stack(frame.content));
 
@@ -1244,12 +1244,6 @@ public final class MainActivity extends Activity {
         beaconMeasuredPowerField = addField(frame.content, "Measured power at 1 m (dBm)",
                 InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
 
-        addSubsectionLabel(frame.content, "Battery Rules");
-        beaconRuleList = newColumn();
-        beaconRuleList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        beaconRuleList.setClipToOutline(true);
-        frame.content.addView(beaconRuleList, stack(frame.content));
-
         addSubsectionLabel(frame.content, "Add Battery Rule");
         beaconRuleBatteryField = addField(frame.content, "Battery at or above (%)", InputType.TYPE_CLASS_NUMBER);
         beaconRuleIntervalField = addField(frame.content, "Broadcast every (seconds, 0 = don't broadcast)",
@@ -1257,6 +1251,12 @@ public final class MainActivity extends Activity {
         LinearLayout addRuleRow = newRow();
         frame.content.addView(addRuleRow, stack(frame.content));
         addRowButton(addRuleRow, tonalButton("Add Rule", action("add_beacon_rule")));
+
+        addSubsectionLabel(frame.content, "Battery Rules");
+        beaconRuleList = newColumn();
+        beaconRuleList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        beaconRuleList.setClipToOutline(true);
+        frame.content.addView(beaconRuleList, stack(frame.content));
 
         addSubsectionLabel(frame.content, "Status");
         beaconStatusList = newColumn();
@@ -1374,8 +1374,8 @@ public final class MainActivity extends Activity {
         LinearLayout enableGroup = addToggleGroup(frame.content);
         remoteLinkEnabledSwitch = addGroupedToggle(enableGroup, "Enable Remote Link");
         remoteLinkAcceptAnySslCertSwitch = addGroupedToggle(enableGroup, "Accept any SSL cert");
-        // The Remote Link's own notification toggle lives with the other
-        // service notifications, under Permissions.
+        // The Remote Link notification is shown or hidden per channel in
+        // Android's notification settings.
 
         addSubsectionLabel(frame.content, "Connection");
         remoteLinkEndpointField = addField(frame.content, "Remote Link endpoint", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
