@@ -344,7 +344,7 @@ final class OpenVpnManagementThread implements Runnable {
     }
 
     private void handleOpenTun() {
-        if (!pending.hasIfconfig() && !hasStaticOverride()) {
+        if (!pending.hasIfconfig() && !hasStaticTapAddress()) {
             host.onFatal("server pushed no IP configuration");
             managementCommand("needok 'OPENTUN' cancel");
             return;
@@ -371,9 +371,10 @@ final class OpenVpnManagementThread implements Runnable {
         pending = new VpnTunConfig();
     }
 
-    private boolean hasStaticOverride() {
+    private boolean hasStaticTapAddress() {
         Config config = Config.get(context);
-        return !config.vpnTapStaticIp().trim().isEmpty();
+        return OpenVpnProfileStore.readMeta(context).isTap()
+                && !config.vpnTapStaticIp().trim().isEmpty();
     }
 
     private boolean protectAndClose(FileDescriptor fd) {

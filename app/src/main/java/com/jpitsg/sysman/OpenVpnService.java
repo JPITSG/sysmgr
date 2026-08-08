@@ -387,20 +387,26 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
         builder.setSession(meta.remoteHost.isEmpty() ? "System Manager VPN" : meta.remoteHost);
         builder.setMtu(config.mtu > 0 ? config.mtu : 1500);
 
-        String ip4 = config.ip4;
-        String netmask = config.netmask4;
-        if ((ip4 == null || ip4.isEmpty())) {
-            // tap static override
-            Config cfg = Config.get(this);
-            ip4 = cfg.vpnTapStaticIp().trim();
-            netmask = cfg.vpnTapNetmask().trim();
-        }
+        Config cfg = Config.get(this);
+        String configuredTapIp = tap ? cfg.vpnTapStaticIp().trim() : "";
+        boolean useStaticTapAddress = !configuredTapIp.isEmpty();
+        String ip4 = useStaticTapAddress ? configuredTapIp : config.ip4;
+        String netmask = useStaticTapAddress
+                ? cfg.vpnTapNetmask().trim()
+                : config.netmask4;
+        // A manual TAP address is an override, not merely a fallback. Treat it
+        // as subnet addressing too: a server-pushed net30/p2p topology belongs
+        // to the discarded server address and must not determine this prefix.
+        String topology = useStaticTapAddress ? "subnet" : config.topology;
         if (ip4 == null || ip4.isEmpty()) {
             onFatal(tap ? "tap: no IP configuration (set a static IP in the profile)" : "server pushed no IP config");
             return null;
         }
-        int prefix = prefixFor(config.topology, netmask);
+        int prefix = prefixFor(topology, netmask);
         builder.addAddress(ip4, prefix);
+        if (useStaticTapAddress) {
+            LogStore.append(this, "vpn", "using configured TAP address " + ip4 + "/" + prefix);
+        }
 
         if (config.ip6 != null && !config.ip6.isEmpty()) {
             String[] p = config.ip6.split("/");
@@ -414,7 +420,8 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
         // interface. Always install the interface's connected route as well so
         // replies to a VPN-side client return through the tunnel even when the
         // server also pushed unrelated routes (for example, a remote LAN).
-        addInterfaceRoutes(builder, installedRoutes, config, ip4, prefix);
+        addInterfaceRoutes(builder, installedRoutes, config,
+                ip4, netmask, topology, prefix);
 
         for (VpnTunConfig.Route4 r : config.routes4) {
             int net = TapBridge.parseIp(r.network) & TapBridge.parseIp(r.netmask);
@@ -456,13 +463,18 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
 
     private void startTapBridge(VpnTunConfig config, FileDescriptor tunFd, FileDescriptor appEnd) {
         Config cfg = Config.get(this);
-        String ipStr = config.hasIfconfig() ? config.ip4 : cfg.vpnTapStaticIp().trim();
-        String maskStr = config.hasIfconfig() ? config.netmask4 : cfg.vpnTapNetmask().trim();
+        String configuredIp = cfg.vpnTapStaticIp().trim();
+        boolean useStaticAddress = !configuredIp.isEmpty();
+        String ipStr = useStaticAddress ? configuredIp : config.ip4;
+        String maskStr = useStaticAddress ? cfg.vpnTapNetmask().trim() : config.netmask4;
         int ourIp = TapBridge.parseIp(ipStr);
         int netmask = TapBridge.parseIp(maskStr);
-        int gateway = config.firstGateway().isEmpty()
-                ? TapBridge.parseIp(cfg.vpnTapGateway().trim())
-                : TapBridge.parseIp(config.firstGateway());
+        String configuredGateway = cfg.vpnTapGateway().trim();
+        String pushedGateway = config.firstGateway();
+        String gatewayStr = useStaticAddress && !configuredGateway.isEmpty()
+                ? configuredGateway
+                : (pushedGateway.isEmpty() ? configuredGateway : pushedGateway);
+        int gateway = TapBridge.parseIp(gatewayStr);
         byte[] mac = OpenVpnProfileStore.tapMac(this);
         TapBridge bridge = new TapBridge(this, appEnd, tunFd, mac, ourIp, netmask, gateway,
                 config.mtu > 0 ? config.mtu : 1500);
@@ -626,13 +638,14 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
     }
 
     private void addInterfaceRoutes(VpnService.Builder builder, Set<String> installedRoutes,
-                                    VpnTunConfig config, String ip4, int prefix4) {
+                                    VpnTunConfig config, String ip4, String netmask4,
+                                    String topology4, int prefix4) {
         int local = TapBridge.parseIp(ip4);
-        if ("p2p".equals(config.topology)) {
+        if ("p2p".equals(topology4)) {
             // In p2p topology OpenVPN reports the peer in the IFCONFIG
             // "netmask" position. The local address is /32, so the peer needs
             // its own host route for replies to enter the tunnel.
-            int peer = TapBridge.parseIp(config.netmask4);
+            int peer = TapBridge.parseIp(netmask4);
             if (peer != 0) {
                 addVpnRoute(builder, installedRoutes,
                         TapBridge.ipToString(peer), 32, "VPN peer");
