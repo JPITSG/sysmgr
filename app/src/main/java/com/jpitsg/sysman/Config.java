@@ -130,6 +130,7 @@ final class Config {
     // preferences file so the settings export never sees it and the settings
     // import never clears it.
     private static final String KEY_VNC_ENABLED = "vnc_enabled";
+    private static final String KEY_VNC_REMOTE_COMMAND_ENABLED = "vnc_remote_command_enabled";
     private static final String KEY_VNC_ENGINE = "vnc_engine";
     private static final String KEY_VNC_PORT = "vnc_port";
     private static final String KEY_VNC_VIEW_ONLY = "vnc_view_only";
@@ -715,6 +716,14 @@ final class Config {
         prefs.edit().putBoolean(KEY_VNC_ENABLED, enabled).apply();
     }
 
+    boolean vncRemoteCommandEnabled() {
+        return prefs.getBoolean(KEY_VNC_REMOTE_COMMAND_ENABLED, false);
+    }
+
+    void saveVncRemoteCommandConfig(boolean enabled) {
+        prefs.edit().putBoolean(KEY_VNC_REMOTE_COMMAND_ENABLED, enabled).apply();
+    }
+
     String vncEngine() {
         String value = string(KEY_VNC_ENGINE, VNC_ENGINE_ACCESSIBILITY);
         return VNC_ENGINE_PROJECTION.equals(value) ? VNC_ENGINE_PROJECTION : VNC_ENGINE_ACCESSIBILITY;
@@ -773,6 +782,7 @@ final class Config {
 
     void saveVncConfig(
             boolean enabled,
+            boolean remoteCommandEnabled,
             String engine,
             String port,
             boolean viewOnly,
@@ -787,6 +797,7 @@ final class Config {
             boolean showListeningNotification) {
         prefs.edit()
                 .putBoolean(KEY_VNC_ENABLED, enabled)
+                .putBoolean(KEY_VNC_REMOTE_COMMAND_ENABLED, remoteCommandEnabled)
                 .putString(KEY_VNC_ENGINE, VNC_ENGINE_PROJECTION.equals(engine)
                         ? VNC_ENGINE_PROJECTION : VNC_ENGINE_ACCESSIBILITY)
                 .putInt(KEY_VNC_PORT, parseInt(port, 5900, 1024, 65535))

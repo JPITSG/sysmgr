@@ -3,6 +3,9 @@ package com.jpitsg.sysman;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
+import android.os.SystemClock;
+
+import java.util.Locale;
 
 /**
  * Static facade for the VNC server, mirroring {@link OpenVpnManager}. The UI and
@@ -15,6 +18,10 @@ import android.os.Build;
  * Android 12 and up.
  */
 final class VncManager {
+
+    interface ResultCallback {
+        void onResult(boolean ok, String state, String reason);
+    }
 
     private VncManager() {
     }
@@ -110,6 +117,94 @@ final class VncManager {
         // adding the screenshot capability can leave an older grant in place
         // that no longer covers it, and the two cases need different fixes.
         return SystemManagerAccessibilityService.screenshotBlockedReason(app);
+    }
+
+    /** Lowercase state used by Remote Link command acknowledgements. */
+    static String remoteState(Context context) {
+        Context app = context.getApplicationContext();
+        if (!Config.get(app).vncEnabled()) {
+            return "off";
+        }
+        if (!VncService.isActive()) {
+            return "off";
+        }
+        return VncStateStore.state(app).toLowerCase(Locale.US);
+    }
+
+    static boolean isConnected(Context context) {
+        Context app = context.getApplicationContext();
+        return VncService.isActive()
+                && VncStateStore.STATE_CONNECTED.equals(VncStateStore.state(app));
+    }
+
+    /**
+     * Executes a Remote Link enable/disable/status command away from the socket
+     * thread, then reports the state after the VNC service has evaluated its
+     * preconditions and auto-enable rules.
+     */
+    static void executeRemoteCommand(final Context context, final String cmd, final String reason,
+                                     final long verdictTimeoutMillis, final ResultCallback callback) {
+        final Context app = context.getApplicationContext();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                runRemoteCommand(app, cmd, reason, verdictTimeoutMillis, callback);
+            }
+        }, "SystemManagerVncRemote").start();
+    }
+
+    private static void runRemoteCommand(Context app, String cmd, String reason,
+                                         long verdictTimeoutMillis, ResultCallback callback) {
+        if ("status".equals(cmd)) {
+            callback.onResult(true, remoteState(app), stateReason(app, "state report"));
+            return;
+        }
+        if ("disable".equals(cmd)) {
+            Config.get(app).setVncEnabled(false);
+            sync(app, reason);
+            callback.onResult(true, remoteState(app), "disabled");
+            return;
+        }
+        if (!"enable".equals(cmd)) {
+            callback.onResult(false, remoteState(app), "unknown vnc command: " + cmd);
+            return;
+        }
+
+        Config.get(app).setVncEnabled(true);
+        syncStateOnLaunch(app);
+        String before = VncStateStore.state(app);
+        if (!VncService.isActive() || !VncStateStore.isLiveState(before)) {
+            // Mark an actual retry as in progress so the verdict wait cannot
+            // return an OFF/BLOCKED/ERROR left by the prior evaluation.
+            VncStateStore.setState(app, VncStateStore.STATE_STARTING, "");
+        }
+        start(app, reason);
+        waitForSettledState(app, verdictTimeoutMillis);
+        callback.onResult(true, remoteState(app), stateReason(app, "enabled"));
+    }
+
+    private static void waitForSettledState(Context app, long timeoutMillis) {
+        long deadline = SystemClock.elapsedRealtime() + timeoutMillis;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            String state = VncStateStore.state(app);
+            if (VncStateStore.STATE_WAITING.equals(state)
+                    || VncStateStore.STATE_LISTENING.equals(state)
+                    || VncStateStore.STATE_CONNECTED.equals(state)
+                    || VncStateStore.STATE_CONSENT.equals(state)
+                    || VncStateStore.STATE_BLOCKED.equals(state)
+                    || VncStateStore.STATE_ERROR.equals(state)) {
+                return;
+            }
+            SystemClock.sleep(100L);
+        }
+    }
+
+    private static String stateReason(Context app, String fallback) {
+        if (Config.get(app).vncEnabled() && !VncService.isActive()) {
+            return "service not running";
+        }
+        String detail = VncStateStore.detail(app);
+        return detail == null || detail.trim().isEmpty() ? fallback : detail;
     }
 
     private static void send(Context app, String action, String reason) {

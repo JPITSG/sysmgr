@@ -537,8 +537,7 @@ public final class RemoteLinkService extends Service {
         boolean vpnEnabled = vpnServiceActive && OpenVpnStateStore.isLiveState(vpnState);
         boolean vpnConnected = vpnServiceActive && OpenVpnStateStore.STATE_CONNECTED.equals(vpnState);
         boolean vncEnabled = Config.get(this).vncEnabled();
-        boolean vncConnected = VncService.isActive()
-                && VncStateStore.STATE_CONNECTED.equals(VncStateStore.state(this));
+        boolean vncConnected = VncManager.isConnected(this);
         current.sendText("{\"type\":\"heartbeat\",\"ts\":" + (System.currentTimeMillis() / 1000L)
                 + ",\"battery\":" + battery
                 + ",\"vpn_enabled\":" + vpnEnabled

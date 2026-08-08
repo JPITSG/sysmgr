@@ -18,6 +18,7 @@ import java.util.Locale;
 final class RemoteEventHandler {
     static final String CHANNEL_ID = "remote_notifications";
     private static final long VPN_REMOTE_VERDICT_TIMEOUT_MILLIS = 35_000L;
+    private static final long VNC_REMOTE_VERDICT_TIMEOUT_MILLIS = 10_000L;
 
     private RemoteEventHandler() {
     }
@@ -73,6 +74,7 @@ final class RemoteEventHandler {
         boolean rebootAction = "reboot".equalsIgnoreCase(action);
         boolean alarmAction = "alarm".equalsIgnoreCase(action);
         boolean vpnAction = "vpn".equalsIgnoreCase(action);
+        boolean vncAction = "vnc".equalsIgnoreCase(action);
         if (rebootAction && body.isEmpty()) {
             body = "Remote reboot requested";
         }
@@ -81,6 +83,9 @@ final class RemoteEventHandler {
         }
         if (vpnAction && body.isEmpty()) {
             body = "Remote VPN command";
+        }
+        if (vncAction && body.isEmpty()) {
+            body = "Remote VNC command";
         }
         if (id.isEmpty() || body.isEmpty()) {
             LogStore.append(context, "remote", "Notification message missing id or body");
@@ -94,6 +99,11 @@ final class RemoteEventHandler {
 
         if (vpnAction) {
             handleVpnAction(context, client, id, json);
+            return;
+        }
+
+        if (vncAction) {
+            handleVncAction(context, client, id, json);
             return;
         }
 
@@ -197,6 +207,68 @@ final class RemoteEventHandler {
             return true;
         } catch (Exception e) {
             LogStore.append(context, "vpn", "Remote VPN ack failed id=" + id + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static void handleVncAction(final Context context, final RemoteWebSocketClient client,
+                                        final String id, JSONObject json) {
+        final Context app = context.getApplicationContext();
+        String cmd = json.optString("vnc", "").trim().toLowerCase(Locale.US);
+        if (!Config.get(app).vncRemoteCommandEnabled()) {
+            LogStore.append(app, "vnc", "Remote VNC command ignored; remote control disabled id=" + id);
+            sendVncAck(context, client, id, false, VncManager.remoteState(app),
+                    "vnc remote control disabled");
+            return;
+        }
+        if (!"enable".equals(cmd) && !"disable".equals(cmd) && !"status".equals(cmd)) {
+            sendVncAck(context, client, id, false, VncManager.remoteState(app),
+                    "unknown vnc command: " + cmd);
+            return;
+        }
+        LogStore.append(app, "vnc", "Remote VNC command accepted id=" + id + " cmd=" + cmd);
+        if (!"status".equals(cmd)) {
+            NotificationHistoryStore.add(app, "VNC", "Remote VNC command",
+                    "cmd=" + cmd + " id=" + id, "remote", false);
+        }
+        VncManager.executeRemoteCommand(app, cmd, "remote:" + id, VNC_REMOTE_VERDICT_TIMEOUT_MILLIS,
+                new VncManager.ResultCallback() {
+                    @Override
+                    public void onResult(final boolean ok, final String state, final String reason) {
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                sendVncAck(context, client, id, ok, state, reason);
+                            }
+                        }, "RemoteVncAck").start();
+                    }
+                });
+    }
+
+    private static boolean sendVncAck(Context context, RemoteWebSocketClient client, String id,
+                                      boolean ok, String state, String reason) {
+        Context app = context.getApplicationContext();
+        boolean enabled = Config.get(app).vncEnabled();
+        boolean connected = VncManager.isConnected(app);
+        try {
+            JSONObject ack = new JSONObject();
+            ack.put("type", "ack");
+            ack.put("id", id);
+            ack.put("ok", ok);
+            ack.put("state", state);
+            ack.put("vnc_enabled", enabled);
+            ack.put("vnc_connected", connected);
+            if (reason != null && !reason.trim().isEmpty()) {
+                ack.put("reason", reason);
+            }
+            client.sendText(ack.toString());
+            LogStore.append(app, "vnc", "Acked remote VNC command id=" + id
+                    + " ok=" + ok + " state=" + state
+                    + " enabled=" + enabled
+                    + " connected=" + connected);
+            return true;
+        } catch (Exception e) {
+            LogStore.append(app, "vnc", "Remote VNC ack failed id=" + id + ": " + e.getMessage());
             return false;
         }
     }

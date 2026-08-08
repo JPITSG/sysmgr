@@ -23,7 +23,7 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
    │  Local automation    │  key=value on /tmp/sysmgrd.sock   │                  │
    │  (e.g. openHAB rules,│ ────────────────────────────────▶ │     sysmgrd      │
    │   cron, scripts)     │   action=message|reboot|alarm|    │  (Node.js daemon)│
-   └─────────────────────┘         ping|vpn                    │                  │
+   └─────────────────────┘         ping|vpn|vnc                │                  │
                                                                │  HTTPS + WSS     │
    ┌─────────────────────┐         WSS (Basic auth, TLS)       │  Basic auth      │
    │  Android phone       │ ◀───────────────────────────────▶ │  self-signed TLS │
@@ -96,7 +96,7 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
   at startup.
 - Persists GPS reports to MySQL with home-radius privacy redaction.
 - Local control socket for pushing `message` / `reboot` / `alarm` / `ping` /
-  `vpn` commands to the phone.
+  `vpn` / `vnc` commands to the phone.
 
 ---
 
@@ -176,6 +176,14 @@ for example:
 
 ```
 printf 'action=vpn\ncmd=connect\n' | socat -t 90 - UNIX-CONNECT:/tmp/sysmgrd.sock
+```
+
+VNC uses the same command path. Enable its on-device **Allow VNC control from
+Remote Link** switch first, then use `cmd=enable`, `cmd=disable`, or
+`cmd=status`:
+
+```
+printf 'action=vnc\ncmd=enable\n' | socat -t 90 - UNIX-CONNECT:/tmp/sysmgrd.sock
 ```
 
 ### App

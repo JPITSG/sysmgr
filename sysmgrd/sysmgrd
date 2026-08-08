@@ -12,8 +12,9 @@ const path = require('path');
 const CONTROL_SOCKET_PATH = '/tmp/sysmgrd.sock';
 const DELIVERY_ACK_TIMEOUT_MS = 10000;
 // A VPN connect verdict can take ~35s on the app side; the default ack window
-// is far too short for it, so vpn deliveries get their own longer timeout.
-const VPN_ACK_TIMEOUT_MS = 60000;
+// is far too short for it. VNC enable also waits for its service evaluation,
+// so interactive remote-control actions share the longer timeout.
+const REMOTE_CONTROL_ACK_TIMEOUT_MS = 60000;
 const PING_TIMEOUT_MS = 10000;
 // How long a preflight failure waits for the phone to reconnect before giving
 // up. Reconnects after a wifi-flap kill are observed to take 9-25s, so 5s
@@ -21,8 +22,8 @@ const PING_TIMEOUT_MS = 10000;
 const PING_RECONNECT_GRACE_MS = 30000;
 // Notifications that fail to deliver are queued and retried when the phone
 // reconnects, so a wifi flap delays them instead of dropping them. Per-action
-// TTL: an action missing here (vpn: interactive, the control caller has moved
-// on) is never queued.
+// TTL: an action missing here (vpn/vnc: interactive, the control caller has
+// moved on) is never queued.
 const REDELIVERY_TTL_MS = {
   message: 10 * 60000,
   reboot: 10 * 60000,
@@ -676,7 +677,8 @@ function handleTextMessage(connectionId, socket, text) {
     return;
   }
   if (parsed.type === 'ack' && parsed.id) {
-    handleAck(connectionId, String(parsed.id), parsed.ok, parsed.reason, parsed.state);
+    handleAck(connectionId, String(parsed.id), parsed.ok, parsed.reason, parsed.state,
+      parsed.vnc_enabled, parsed.vnc_connected);
     return;
   }
   if (parsed.type === 'ping') {
@@ -847,7 +849,8 @@ function insertGpsMessage(connectionId, message) {
   }
 }
 
-function handleAck(connectionId, messageId, okValue, reasonValue, stateValue) {
+function handleAck(connectionId, messageId, okValue, reasonValue, stateValue,
+                   vncEnabledValue, vncConnectedValue) {
   const pending = pendingDeliveries.get(messageId);
   if (!pending) {
     log(`ack ignored connection=${connectionId} id=${messageId}`);
@@ -858,9 +861,19 @@ function handleAck(connectionId, messageId, okValue, reasonValue, stateValue) {
   const ok = okValue !== false;
   const reason = reasonValue ? String(reasonValue) : '';
   const state = stateValue ? String(stateValue) : '';
+  const vncEnabled = typeof vncEnabledValue === 'boolean' ? vncEnabledValue : null;
+  const vncConnected = typeof vncConnectedValue === 'boolean' ? vncConnectedValue : null;
+  const client = clients.get(connectionId);
+  if (client) {
+    if (vncEnabled !== null) client.vncEnabled = vncEnabled;
+    if (vncConnected !== null) client.vncConnected = vncConnected;
+  }
   log(`message ${ok ? 'acked' : 'rejected'} id=${messageId} connection=${connectionId}`
-    + `${state ? ` state=${logValue(state)}` : ''}${reason ? ` reason=${logValue(reason)}` : ''}`);
-  pending.resolve(ok, reason, state);
+    + `${state ? ` state=${logValue(state)}` : ''}`
+    + `${vncEnabled !== null ? ` vnc_enabled=${vncEnabled}` : ''}`
+    + `${vncConnected !== null ? ` vnc_connected=${vncConnected}` : ''}`
+    + `${reason ? ` reason=${logValue(reason)}` : ''}`);
+  pending.resolve(ok, reason, state, vncEnabled, vncConnected);
 }
 
 function handlePong(connectionId, pingId) {
@@ -1102,6 +1115,9 @@ async function deliverNotification(notification) {
   if (action === 'vpn') {
     payload.vpn = notification.vpnCommand || 'status';
   }
+  if (action === 'vnc') {
+    payload.vnc = notification.vncCommand || 'status';
+  }
   if (availableClients.length === 0) {
     log(`message delivery failed id=${id} action=${action} reason=no-connected-clients`);
     return Promise.resolve({id, ok: false, reason: 'no connected clients'});
@@ -1123,7 +1139,8 @@ async function deliverNotification(notification) {
   }
 
   log(`message sent id=${id} action=${action} clients=${sentCount}`);
-  const ackTimeoutMs = action === 'vpn' ? VPN_ACK_TIMEOUT_MS : DELIVERY_ACK_TIMEOUT_MS;
+  const ackTimeoutMs = action === 'vpn' || action === 'vnc'
+    ? REMOTE_CONTROL_ACK_TIMEOUT_MS : DELIVERY_ACK_TIMEOUT_MS;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pendingDeliveries.delete(id);
@@ -1132,10 +1149,12 @@ async function deliverNotification(notification) {
     }, ackTimeoutMs);
     pendingDeliveries.set(id, {
       timer,
-      resolve: (ok, reason, state) => resolve({
+      resolve: (ok, reason, state, vncEnabled, vncConnected) => resolve({
         id,
         ok,
         state: state || '',
+        vncEnabled,
+        vncConnected,
         reason: reason || (ok ? 'acked' : 'failed')
       })
     });
@@ -1397,7 +1416,7 @@ function startControlSocket() {
     socket.on('end', async () => {
       const request = parseControlMessage(buffer);
       request.action = String(request.action || '').trim().toLowerCase();
-      if (!['message', 'reboot', 'ping', 'alarm', 'vpn'].includes(request.action) || (request.action === 'message' && !request.message)) {
+      if (!['message', 'reboot', 'ping', 'alarm', 'vpn', 'vnc'].includes(request.action) || (request.action === 'message' && !request.message)) {
         log(`control request rejected reason=invalid body=${JSON.stringify(request)}`);
         socket.end('error invalid request\n');
         return;
@@ -1410,6 +1429,15 @@ function startControlSocket() {
           return;
         }
         request.message = request.message || `Remote VPN ${request.cmd} requested`;
+      }
+      if (request.action === 'vnc') {
+        request.cmd = String(request.cmd || '').trim().toLowerCase();
+        if (!['enable', 'disable', 'status'].includes(request.cmd)) {
+          log(`control vnc rejected reason=invalid-cmd cmd=${logValue(request.cmd)}`);
+          socket.end('error invalid request\n');
+          return;
+        }
+        request.message = request.message || `Remote VNC ${request.cmd} requested`;
       }
       if (request.action === 'ping') {
         log('control ping requested');
@@ -1432,8 +1460,8 @@ function startControlSocket() {
       const imageBytes = imageBase64 ? Buffer.byteLength(imageBase64, 'base64') : 0;
       if (request.action === 'alarm') {
         log(`control alarm requested tone=${logValue(request.tone)} length=${request.length} vibrate=${request.vibrate}`);
-      } else if (request.action === 'vpn') {
-        log(`control vpn requested cmd=${logValue(request.cmd)}`);
+      } else if (request.action === 'vpn' || request.action === 'vnc') {
+        log(`control ${request.action} requested cmd=${logValue(request.cmd)}`);
       } else {
         log(`control notification requested action=${request.action} title=${request.title || ''} image_bytes=${imageBytes} message=${request.message}`);
       }
@@ -1446,7 +1474,8 @@ function startControlSocket() {
         tone: request.tone || '',
         lengthSeconds: request.length,
         vibrate: request.vibrate,
-        vpnCommand: request.cmd
+        vpnCommand: request.action === 'vpn' ? request.cmd : '',
+        vncCommand: request.action === 'vnc' ? request.cmd : ''
       };
       const result = await deliverNotification(notification);
       if (!result.ok && queueForRedelivery(notification, result.id, result.reason)) {
@@ -1458,6 +1487,16 @@ function startControlSocket() {
         socket.end(result.ok
           ? `ok id=${result.id} state=${result.state || 'unknown'}\n`
           : `error id=${result.id} reason=${result.reason}\n`);
+      } else if (request.action === 'vnc') {
+        const validVncAck = typeof result.vncEnabled === 'boolean'
+          && typeof result.vncConnected === 'boolean';
+        if (result.ok && validVncAck) {
+          socket.end(`ok id=${result.id} state=${result.state || 'unknown'}`
+            + ` enabled=${result.vncEnabled} connected=${result.vncConnected}\n`);
+        } else {
+          const reason = result.ok ? 'client does not support vnc control' : result.reason;
+          socket.end(`error id=${result.id} reason=${reason}\n`);
+        }
       } else {
         socket.end(result.ok ? `ok id=${result.id}\n` : `error id=${result.id} reason=${result.reason}\n`);
       }

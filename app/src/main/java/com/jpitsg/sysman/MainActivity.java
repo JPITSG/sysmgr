@@ -335,6 +335,7 @@ public final class MainActivity extends Activity {
     private Switch beaconNotificationSwitch;
     private Switch beaconEnabledSwitch;
     private Switch vncEnabledSwitch;
+    private Switch vncRemoteCommandEnabledSwitch;
     private Switch vncViewOnlySwitch;
     private Switch vncAutoWifiEnabledSwitch;
     private Switch vncStopOnCellularSwitch;
@@ -1065,6 +1066,11 @@ public final class MainActivity extends Activity {
                 "A connected client is always shown, with an action to disconnect it.",
                 11, COLOR_TEXT_FAINT, false);
         frame.content.addView(notificationNote, stack(frame.content));
+
+        addSubsectionLabel(frame.content, "Remote Control");
+        LinearLayout remoteGroup = addToggleGroup(frame.content);
+        vncRemoteCommandEnabledSwitch = addGroupedToggle(
+                remoteGroup, "Allow VNC control from Remote Link");
 
         LinearLayout probeRow = newRow();
         frame.content.addView(probeRow, stack(frame.content));
@@ -2018,6 +2024,7 @@ public final class MainActivity extends Activity {
         vncStateReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
+                syncVncMasterSwitchFromConfig();
                 refreshVncPanel();
             }
         };
@@ -2038,6 +2045,24 @@ public final class MainActivity extends Activity {
         } catch (RuntimeException ignored) {
         }
         vncStateReceiver = null;
+    }
+
+    /** Keeps an open settings panel truthful when Remote Link changes VNC. */
+    private void syncVncMasterSwitchFromConfig() {
+        if (vncEnabledSwitch == null) {
+            return;
+        }
+        boolean enabled = Config.get(this).vncEnabled();
+        if (vncEnabledSwitch.isChecked() == enabled) {
+            return;
+        }
+        boolean wasLoading = loadingConfig;
+        loadingConfig = true;
+        try {
+            vncEnabledSwitch.setChecked(enabled);
+        } finally {
+            loadingConfig = wasLoading;
+        }
     }
 
     // ---- OpenVPN import / connect ------------------------------------------
@@ -2856,6 +2881,7 @@ public final class MainActivity extends Activity {
         }
         Config.get(this).saveVncConfig(
                 vncEnabledSwitch.isChecked(),
+                vncRemoteCommandEnabledSwitch.isChecked(),
                 vncEngine,
                 text(vncPortField),
                 vncViewOnlySwitch.isChecked(),
@@ -2870,6 +2896,12 @@ public final class MainActivity extends Activity {
                 vncShowListeningNotificationSwitch.isChecked());
         VncSecretStore.setPassword(this, text(vncPasswordField));
         VncManager.sync(this, "settings-live");
+        refreshStatusAndLog();
+        return true;
+    }
+
+    private boolean saveVncRemoteCommandToggleOnly() {
+        Config.get(this).saveVncRemoteCommandConfig(vncRemoteCommandEnabledSwitch.isChecked());
         refreshStatusAndLog();
         return true;
     }
@@ -4458,6 +4490,7 @@ public final class MainActivity extends Activity {
             vpnTapGatewayField.setText(config.vpnTapGateway());
             vpnRemoteCommandEnabledSwitch.setChecked(config.vpnRemoteCommandEnabled());
             vncEnabledSwitch.setChecked(config.vncEnabled());
+            vncRemoteCommandEnabledSwitch.setChecked(config.vncRemoteCommandEnabled());
             vncEngine = config.vncEngine();
             updateVncEngineButtons();
             vncPasswordField.setText(VncSecretStore.password(this));
@@ -4674,6 +4707,14 @@ public final class MainActivity extends Activity {
         bindLiveToggles(vncSettingsSave, vncViewOnlySwitch, vncAutoWifiEnabledSwitch,
                 vncStopOnCellularSwitch, vncWakeOnConnectSwitch,
                 vncShowListeningNotificationSwitch);
+
+        final LiveSaveGroup vncRemoteControl = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                return saveVncRemoteCommandToggleOnly();
+            }
+        });
+        bindLiveToggles(vncRemoteControl, vncRemoteCommandEnabledSwitch);
 
         beaconSettingsSave = liveSaveGroup(new LiveSaveAction() {
             @Override
