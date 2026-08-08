@@ -9,6 +9,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.URI;
@@ -26,6 +27,10 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
 final class RemoteWebSocketClient implements Closeable {
+    // A bare new Socket(host, port) blocks until the OS gives up (minutes on a
+    // flapping network) and cannot be interrupted by the reconnect wake, so
+    // every connect and the TLS handshake are bounded explicitly.
+    private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
     private static final String ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     private static final int OPCODE_TEXT = 0x1;
     private static final int OPCODE_CLOSE = 0x8;
@@ -60,7 +65,7 @@ final class RemoteWebSocketClient implements Closeable {
             throw new IOException("missing host in endpoint");
         }
 
-        socket = tls ? createTlsSocket(host, port) : new Socket(host, port);
+        socket = tls ? createTlsSocket(host, port) : createPlainSocket(host, port);
         socket.setSoTimeout(10_000);
         in = socket.getInputStream();
         out = socket.getOutputStream();
@@ -180,17 +185,52 @@ final class RemoteWebSocketClient implements Closeable {
         out.flush();
     }
 
+    private static Socket createPlainSocket(String host, int port) throws IOException {
+        Socket plain = new Socket();
+        try {
+            plain.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MILLIS);
+        } catch (IOException e) {
+            try {
+                plain.close();
+            } catch (IOException ignored) {
+            }
+            throw e;
+        }
+        return plain;
+    }
+
     private Socket createTlsSocket(String host, int port) throws Exception {
         SSLSocketFactory factory = acceptAnySslCert
                 ? trustAnySslSocketFactory()
                 : (SSLSocketFactory) SSLSocketFactory.getDefault();
-        SSLSocket sslSocket = (SSLSocket) factory.createSocket(host, port);
-        if (!acceptAnySslCert) {
-            SSLParameters parameters = sslSocket.getSSLParameters();
-            parameters.setEndpointIdentificationAlgorithm("HTTPS");
-            sslSocket.setSSLParameters(parameters);
+        Socket plain = createPlainSocket(host, port);
+        SSLSocket sslSocket;
+        try {
+            // Bound the handshake reads too; connect() relaxes this to the
+            // regular frame-read timeout once the websocket upgrade is done.
+            plain.setSoTimeout(CONNECT_TIMEOUT_MILLIS);
+            sslSocket = (SSLSocket) factory.createSocket(plain, host, port, true);
+        } catch (Exception e) {
+            try {
+                plain.close();
+            } catch (IOException ignored) {
+            }
+            throw e;
         }
-        sslSocket.startHandshake();
+        try {
+            if (!acceptAnySslCert) {
+                SSLParameters parameters = sslSocket.getSSLParameters();
+                parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                sslSocket.setSSLParameters(parameters);
+            }
+            sslSocket.startHandshake();
+        } catch (Exception e) {
+            try {
+                sslSocket.close();
+            } catch (IOException ignored) {
+            }
+            throw e;
+        }
         return sslSocket;
     }
 

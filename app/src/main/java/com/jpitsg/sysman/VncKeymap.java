@@ -23,6 +23,9 @@ final class VncKeymap {
     static final int KEYSYM_TAB = 0xFF09;
     static final int KEYSYM_RETURN = 0xFF0D;
     static final int KEYSYM_DELETE = 0xFFFF;
+    private static final int KEYSYM_KP_ENTER = 0xFF8D;
+    private static final int KEYSYM_KP_0 = 0xFFB0;
+    private static final int KEYSYM_KP_9 = 0xFFB9;
 
     private static final int KEYSYM_ESCAPE = 0xFF1B;
     private static final int KEYSYM_HOME = 0xFF50;
@@ -90,6 +93,9 @@ final class VncKeymap {
         if (keysym >= 0x20 && keysym <= 0x7E) {
             return (char) keysym;
         }
+        if (keysym >= KEYSYM_KP_0 && keysym <= KEYSYM_KP_9) {
+            return (char) ('0' + keysym - KEYSYM_KP_0);
+        }
         // Latin-1 supplement sits at its own code points, minus the soft hyphen
         // and non-breaking space which are not worth typing.
         if (keysym >= 0xA0 && keysym <= 0xFF) {
@@ -102,6 +108,10 @@ final class VncKeymap {
             }
         }
         return 0;
+    }
+
+    static boolean isEnter(int keysym) {
+        return keysym == KEYSYM_RETURN || keysym == KEYSYM_KP_ENTER;
     }
 
     /**
@@ -132,6 +142,7 @@ final class VncKeymap {
             case KEYSYM_BACKSPACE: return "BackSpace";
             case KEYSYM_TAB: return "Tab";
             case KEYSYM_RETURN: return "Return";
+            case KEYSYM_KP_ENTER: return "Keypad Enter";
             case KEYSYM_DELETE: return "Delete";
             case KEYSYM_ESCAPE: return "Escape";
             case KEYSYM_HOME: return "Home";

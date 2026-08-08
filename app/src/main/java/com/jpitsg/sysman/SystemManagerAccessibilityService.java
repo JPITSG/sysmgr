@@ -3,8 +3,11 @@ package com.jpitsg.sysman;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
+import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.graphics.Path;
 import android.os.Handler;
 import android.os.Looper;
@@ -34,6 +37,11 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
             "Confirm",
             "Continue",
             "Submit"
+    };
+    private static final String[] PIN_DELETE_TEXTS = new String[]{
+            "Delete",
+            "Backspace",
+            "Clear"
     };
     private static final int PIN_CONFIRM_ATTEMPTS = 3;
     private static final long REBOOT_CPU_WAKE_MILLIS = 120_000L;
@@ -147,6 +155,174 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
     }
 
     // ---- VNC input injection ------------------------------------------------
+
+    /**
+     * Presses one key on the visible device-PIN keypad. The lock screen does
+     * not expose its PIN as an editable text field, so ACTION_SET_TEXT cannot
+     * type into it; its individual keypad controls do expose click actions.
+     *
+     * <p>The resource-id path is language independent and matches AOSP System
+     * UI. Text is only a fallback for OEM keyguards with different ids. Both
+     * paths are restricted to a credential-locked System UI window so a digit
+     * cannot accidentally click a similarly labelled control in an app.
+     */
+    static boolean pressVncLockscreenDigit(char digit) {
+        if (digit < '0' || digit > '9') {
+            return false;
+        }
+        return pressVncLockscreenControl("key" + digit,
+                new String[]{Character.toString(digit)});
+    }
+
+    /** Removes the last digit from the visible device-PIN keypad. */
+    static boolean deleteVncLockscreenDigit() {
+        return pressVncLockscreenControl("delete_button", PIN_DELETE_TEXTS);
+    }
+
+    /** Submits the PIN entered on the visible device-PIN keypad. */
+    static boolean submitVncLockscreenPin() {
+        return pressVncLockscreenControl("key_enter", PIN_CONFIRM_TEXTS);
+    }
+
+    private static boolean pressVncLockscreenControl(String viewIdEntry, String[] labels) {
+        SystemManagerAccessibilityService service = instance;
+        return service != null && service.clickLockedSystemUiControl(viewIdEntry, labels);
+    }
+
+    private boolean clickLockedSystemUiControl(String viewIdEntry, String[] labels) {
+        KeyguardManager keyguard = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        try {
+            if (keyguard == null || !keyguard.isDeviceLocked()) {
+                return false;
+            }
+        } catch (RuntimeException e) {
+            return false;
+        }
+
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) {
+            return false;
+        }
+        try {
+            if (!isSystemUiWindow(root)) {
+                return false;
+            }
+            if (clickMatchingViewId(root, viewIdEntry)) {
+                return true;
+            }
+            for (String label : labels) {
+                if (clickMatchingLockscreenLabel(root, label)) {
+                    return true;
+                }
+            }
+        } catch (RuntimeException ignored) {
+        } finally {
+            root.recycle();
+        }
+        return false;
+    }
+
+    private boolean isSystemUiWindow(AccessibilityNodeInfo root) {
+        CharSequence packageName = root.getPackageName();
+        if (packageName == null) {
+            return false;
+        }
+        String value = packageName.toString();
+        if ("com.android.systemui".equals(value)) {
+            return true;
+        }
+        if (!value.endsWith(".systemui") && !value.contains("keyguard")) {
+            return false;
+        }
+
+        // Some OEMs give their keyguard a different package name. Accept that
+        // only for a preinstalled system package; an ordinary app displayed
+        // over the lock screen must never receive inferred PIN-key clicks.
+        try {
+            ApplicationInfo info = getPackageManager().getApplicationInfo(value, 0);
+            return (info.flags & (ApplicationInfo.FLAG_SYSTEM
+                    | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
+        } catch (PackageManager.NameNotFoundException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    private boolean clickMatchingViewId(AccessibilityNodeInfo node, String viewIdEntry) {
+        String viewId = node.getViewIdResourceName();
+        if (node.isVisibleToUser()
+                && viewId != null
+                && viewId.endsWith(":id/" + viewIdEntry)
+                && clickLockscreenNodeOrParent(node)) {
+            return true;
+        }
+
+        int childCount = node.getChildCount();
+        for (int i = 0; i < childCount; i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            try {
+                if (child != null && clickMatchingViewId(child, viewIdEntry)) {
+                    return true;
+                }
+            } finally {
+                if (child != null) {
+                    child.recycle();
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean clickMatchingLockscreenLabel(AccessibilityNodeInfo node, String target) {
+        if (node.isVisibleToUser()
+                && (matchesNodeText(node.getText(), target, false)
+                || matchesNodeText(node.getContentDescription(), target, false))
+                && clickLockscreenNodeOrParent(node)) {
+            return true;
+        }
+
+        int childCount = node.getChildCount();
+        for (int i = 0; i < childCount; i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            try {
+                if (child != null && clickMatchingLockscreenLabel(child, target)) {
+                    return true;
+                }
+            } finally {
+                if (child != null) {
+                    child.recycle();
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Key labels are sometimes children of the actual OEM button. Limit the
+     * search to that button and two immediate containers; walking all the way
+     * to the window root could turn an unrelated digit into a window click.
+     */
+    private boolean clickLockscreenNodeOrParent(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
+        try {
+            for (int depth = 0; current != null && depth < 3; depth++) {
+                if (current.isVisibleToUser()
+                        && current.isEnabled()
+                        && current.isClickable()
+                        && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    return true;
+                }
+                AccessibilityNodeInfo parent = current.getParent();
+                current.recycle();
+                current = parent;
+            }
+        } catch (RuntimeException ignored) {
+        } finally {
+            if (current != null) {
+                current.recycle();
+            }
+        }
+        return false;
+    }
 
     /**
      * Dispatches one gesture on behalf of a VNC client. Callbacks land on this

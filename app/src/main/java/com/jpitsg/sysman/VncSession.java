@@ -1,7 +1,9 @@
 package com.jpitsg.sysman;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Rect;
+import android.os.PowerManager;
 import android.os.SystemClock;
 
 import java.io.BufferedInputStream;
@@ -69,6 +71,7 @@ final class VncSession implements Runnable {
     private FrameSource source;
     private FrameSource.Frame initialFrame;
     private volatile VncInputInjector injector;
+    private PowerManager.WakeLock displayWakeLock;
     private Thread frameThread;
     // Written by the frame thread on a resize, read by the reader thread when
     // it clamps an update request.
@@ -112,6 +115,7 @@ final class VncSession implements Runnable {
             // time, so the read timeout comes off and liveness is left to TCP
             // keepalive and the idle timeout.
             socket.setSoTimeout(0);
+            acquireDisplayWakeLock();
             listener.onAuthenticated(this, clientAddress);
 
             startFrameThread();
@@ -126,6 +130,7 @@ final class VncSession implements Runnable {
         } catch (RuntimeException e) {
             reason = "session crashed: " + e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
+            releaseDisplayWakeLock();
             close(reason);
             listener.onClosed(this, clientAddress, reason);
         }
@@ -603,6 +608,53 @@ final class VncSession implements Runnable {
     }
 
     // ---- Teardown -----------------------------------------------------------
+
+    /**
+     * A VNC client has no Activity window on which FLAG_KEEP_SCREEN_ON could
+     * live, so the authenticated session owns the display wake lock directly.
+     * No ACQUIRE_CAUSES_WAKEUP flag: the separate Wake-on-connect setting
+     * decides whether an already sleeping display should be turned on.
+     */
+    @SuppressLint("WakelockTimeout")
+    @SuppressWarnings("deprecation")
+    private void acquireDisplayWakeLock() {
+        PowerManager manager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        if (manager == null || displayWakeLock != null) {
+            return;
+        }
+        try {
+            PowerManager.WakeLock lock = manager.newWakeLock(
+                    PowerManager.SCREEN_DIM_WAKE_LOCK,
+                    "SystemManager:vnc-display");
+            lock.setReferenceCounted(false);
+            displayWakeLock = lock;
+            // This deliberately lasts for the session rather than an arbitrary
+            // timeout. The single finally block in run() is the matching release.
+            lock.acquire();
+            LogStore.append(context, "vnc", "Display held awake for connected client");
+        } catch (RuntimeException e) {
+            releaseDisplayWakeLock();
+            LogStore.append(context, "vnc", "Could not hold display awake: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
+
+    private void releaseDisplayWakeLock() {
+        PowerManager.WakeLock lock = displayWakeLock;
+        displayWakeLock = null;
+        if (lock == null) {
+            return;
+        }
+        try {
+            if (lock.isHeld()) {
+                lock.release();
+                LogStore.append(context, "vnc", "Display wake lock released");
+            }
+        } catch (RuntimeException e) {
+            LogStore.append(context, "vnc", "Could not release display wake lock: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
 
     private void close(String reason) {
         running = false;

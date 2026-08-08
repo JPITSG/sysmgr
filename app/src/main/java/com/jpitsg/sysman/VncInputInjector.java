@@ -292,18 +292,31 @@ final class VncInputInjector {
             return;
         }
         if (keysym == VncKeymap.KEYSYM_BACKSPACE) {
-            SystemManagerAccessibilityService.deleteVncBackward();
+            if (!SystemManagerAccessibilityService.deleteVncLockscreenDigit()) {
+                SystemManagerAccessibilityService.deleteVncBackward();
+            }
             return;
         }
-        if (keysym == VncKeymap.KEYSYM_RETURN) {
-            SystemManagerAccessibilityService.submitVncText();
+        if (VncKeymap.isEnter(keysym)) {
+            if (!SystemManagerAccessibilityService.submitVncLockscreenPin()) {
+                SystemManagerAccessibilityService.submitVncText();
+            }
             return;
         }
-        if (keysym == VncKeymap.KEYSYM_DELETE || keysym == VncKeymap.KEYSYM_TAB) {
+        if (keysym == VncKeymap.KEYSYM_DELETE) {
+            SystemManagerAccessibilityService.deleteVncLockscreenDigit();
+            return;
+        }
+        if (keysym == VncKeymap.KEYSYM_TAB) {
             return;
         }
         char typed = VncKeymap.charFor(keysym);
         if (typed != 0) {
+            if (typed >= '0' && typed <= '9'
+                    && SystemManagerAccessibilityService.pressVncLockscreenDigit(typed)) {
+                typingWorked = true;
+                return;
+            }
             boolean applied = SystemManagerAccessibilityService.insertVncText(String.valueOf(typed));
             // Logged on the transition only: typing into a window with no text
             // field would otherwise write a line to disk per keystroke.

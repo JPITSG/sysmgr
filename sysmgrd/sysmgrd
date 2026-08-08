@@ -15,7 +15,20 @@ const DELIVERY_ACK_TIMEOUT_MS = 10000;
 // is far too short for it, so vpn deliveries get their own longer timeout.
 const VPN_ACK_TIMEOUT_MS = 60000;
 const PING_TIMEOUT_MS = 10000;
-const PING_RECONNECT_GRACE_MS = 5000;
+// How long a preflight failure waits for the phone to reconnect before giving
+// up. Reconnects after a wifi-flap kill are observed to take 9-25s, so 5s
+// expired just before the replacement arrived; 30s covers the real-world tail.
+const PING_RECONNECT_GRACE_MS = 30000;
+// Notifications that fail to deliver are queued and retried when the phone
+// reconnects, so a wifi flap delays them instead of dropping them. Per-action
+// TTL: an action missing here (vpn: interactive, the control caller has moved
+// on) is never queued.
+const REDELIVERY_TTL_MS = {
+  message: 10 * 60000,
+  reboot: 10 * 60000,
+  alarm: 30 * 60000
+};
+const REDELIVERY_MAX_QUEUE = 50;
 const PROXY_V2_SIGNATURE = Buffer.from('\r\n\r\n\0\r\nQUIT\n', 'binary');
 const PROXY_HEADER_TIMEOUT_MS = 5000;
 const MYSQL_DEFAULT_CLIENT = '/usr/bin/mysql';
@@ -672,6 +685,7 @@ function handleTextMessage(connectionId, socket, text) {
     const uuid = assignClientUuid(connectionId, socket, parsed.uuid || parsed.client_uuid || parsed.device_uuid);
     log(`hello received connection=${connectionId} app=${parsed.app || ''} version=${parsed.version || ''} uuid=${uuid || ''} heartbeat_seconds=${parsed.heartbeat_seconds || ''}`);
     sendJson(socket, {type: 'hello_ack', ts: Math.floor(Date.now() / 1000), notif_backup: notificationStore.enabled});
+    flushRedeliveryQueue('hello').catch((err) => log(`redelivery flush error ${err && err.stack ? err.stack : err}`));
     return;
   }
   log(`message received connection=${connectionId} type=${parsed.type || 'unknown'} body=${text}`);
@@ -1114,6 +1128,62 @@ async function deliverNotification(notification) {
   });
 }
 
+const redeliveryQueue = [];
+let redeliveryFlushRunning = false;
+
+function queueForRedelivery(notification, failedId, failedReason) {
+  const ttlMs = REDELIVERY_TTL_MS[notification.action || 'message'];
+  if (!ttlMs) {
+    return false;
+  }
+  if (redeliveryQueue.length >= REDELIVERY_MAX_QUEUE) {
+    const dropped = redeliveryQueue.shift();
+    log(`redelivery queue full; dropping oldest action=${dropped.notification.action} message=${logValue(dropped.notification.message)}`);
+  }
+  redeliveryQueue.push({
+    notification,
+    queuedAt: Date.now(),
+    expiresAt: Date.now() + ttlMs
+  });
+  log(`notification queued for redelivery action=${notification.action} failed_id=${failedId} failed_reason=${logValue(failedReason)} ttl_s=${ttlMs / 1000} queue=${redeliveryQueue.length}`);
+  return true;
+}
+
+// One flush runs at a time; each entry goes back through deliverNotification,
+// whose preflight ping is what proves the reconnected link is actually alive.
+// A failed attempt leaves the entry at the head for the next trigger rather
+// than looping (each retry already costs a full ping timeout).
+async function flushRedeliveryQueue(trigger) {
+  if (redeliveryFlushRunning || redeliveryQueue.length === 0) {
+    return;
+  }
+  redeliveryFlushRunning = true;
+  try {
+    log(`redelivery flush started trigger=${trigger} queue=${redeliveryQueue.length}`);
+    while (redeliveryQueue.length > 0) {
+      const entry = redeliveryQueue[0];
+      if (Date.now() >= entry.expiresAt) {
+        redeliveryQueue.shift();
+        log(`redelivery expired action=${entry.notification.action} queued_for_s=${Math.round((Date.now() - entry.queuedAt) / 1000)} message=${logValue(entry.notification.message)}`);
+        continue;
+      }
+      if (activeClients().length === 0) {
+        log(`redelivery flush paused; no connected clients queue=${redeliveryQueue.length}`);
+        return;
+      }
+      const result = await deliverNotification(entry.notification);
+      if (!result.ok) {
+        log(`redelivery attempt failed id=${result.id} action=${entry.notification.action} reason=${logValue(result.reason)} queue=${redeliveryQueue.length}`);
+        return;
+      }
+      redeliveryQueue.shift();
+      log(`redelivery succeeded id=${result.id} action=${entry.notification.action} delayed_s=${Math.round((Date.now() - entry.queuedAt) / 1000)} queue=${redeliveryQueue.length}`);
+    }
+  } finally {
+    redeliveryFlushRunning = false;
+  }
+}
+
 function generateSelfSignedCertificate() {
   certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sysmgrd-cert-'));
   const keyPath = path.join(certDir, 'sysmgrd.key');
@@ -1347,7 +1417,7 @@ function startControlSocket() {
       } else {
         log(`control notification requested action=${request.action} title=${request.title || ''} image_bytes=${imageBytes} message=${request.message}`);
       }
-      const result = await deliverNotification({
+      const notification = {
         action: request.action,
         title: request.title || '',
         message: request.message,
@@ -1357,7 +1427,13 @@ function startControlSocket() {
         lengthSeconds: request.length,
         vibrate: request.vibrate,
         vpnCommand: request.cmd
-      });
+      };
+      const result = await deliverNotification(notification);
+      if (!result.ok && queueForRedelivery(notification, result.id, result.reason)) {
+        // The phone may have reconnected while this delivery was failing, in
+        // which case the hello-triggered flush already ran on an empty queue.
+        flushRedeliveryQueue('post-failure').catch((err) => log(`redelivery flush error ${err && err.stack ? err.stack : err}`));
+      }
       if (request.action === 'vpn') {
         socket.end(result.ok
           ? `ok id=${result.id} state=${result.state || 'unknown'}\n`

@@ -28,6 +28,19 @@ public final class RemoteLinkService extends Service {
     private static final int NOTIFICATION_ID = 0x5303;
     private static final long GPS_ACK_TIMEOUT_MILLIS = 10_000L;
     private static final long LIVENESS_PROBE_TIMEOUT_MILLIS = 5_000L;
+    // The server acks every heartbeat within ~1s, so silence this long after
+    // sending one means the link is blackholed: reconnect without a further
+    // probe (the heartbeat was the probe).
+    private static final long HEARTBEAT_ACK_TIMEOUT_MILLIS = 8_000L;
+    // On wifi a faster beat costs next to nothing and wifi is the link that
+    // flaps at the edge of range, so the configured interval is capped there.
+    // Cellular keeps the configured cadence: every send holds the radio out of
+    // idle for ~10s, and the cellular link doesn't flap at the border anyway.
+    private static final long WIFI_HEARTBEAT_MAX_INTERVAL_MILLIS = 15_000L;
+    // Below this wifi RSSI the link is marginal enough to be worth verifying
+    // before a message needs it; re-probe at most this often while lingering.
+    private static final int WIFI_WEAK_RSSI_DBM = -75;
+    private static final long WEAK_SIGNAL_PROBE_MIN_INTERVAL_MILLIS = 30_000L;
     // Connections that die younger than this count toward reconnect backoff;
     // longer-lived ones reset it (distinguishes churn from a healthy link dropping).
     private static final long STABLE_CONNECTION_MILLIS = 30_000L;
@@ -50,6 +63,9 @@ public final class RemoteLinkService extends Service {
     private volatile String livenessProbeReason = "";
     private volatile boolean reconnectWakeRequested;
     private volatile Network connectedNetwork;
+    private volatile boolean linkOnWifi;
+    // Touched only on the ConnectivityManager callback thread.
+    private long lastWeakSignalProbeAt;
     private volatile boolean defaultValidated = true;
     private volatile boolean stopRequested;
     private volatile RemoteWebSocketClient client;
@@ -221,6 +237,7 @@ public final class RemoteLinkService extends Service {
                     connected = true;
                     connectedAtMillis = SystemClock.elapsedRealtime();
                     connectedNetwork = currentDefaultNetwork();
+                    linkOnWifi = isWifiNetwork(connectedNetwork);
                     RemoteLinkStateStore.setConnected(this, true);
                     LogStore.append(this, "remote", "Remote Link connected");
                     backupInFlight.clear();
@@ -256,6 +273,7 @@ public final class RemoteLinkService extends Service {
                 } finally {
                     current.close();
                     connectedNetwork = null;
+                    linkOnWifi = false;
                     if (client == current) {
                         client = null;
                     }
@@ -277,6 +295,7 @@ public final class RemoteLinkService extends Service {
     private void runConnectedLoop(RemoteWebSocketClient current) throws IOException {
         long nextHeartbeatAt = 0L;
         long lastInboundAt = current.lastInboundAtMillis();
+        long heartbeatAckDeadlineAt = 0L;
         long lastHeartbeatResetAt = heartbeatResetAtMillis;
         long probeSentAt = 0L;
         long probeDeadlineAt = 0L;
@@ -289,6 +308,7 @@ public final class RemoteLinkService extends Service {
             long inboundAt = current.lastInboundAtMillis();
             if (inboundAt > lastInboundAt) {
                 lastInboundAt = inboundAt;
+                heartbeatAckDeadlineAt = 0L;
                 nextHeartbeatAt = inboundAt + heartbeatDelayMillis(config);
                 LogStore.append(this, "remote", "Heartbeat timer reset by inbound traffic next_in="
                         + config.remoteLinkHeartbeatSeconds() + "s");
@@ -325,6 +345,14 @@ public final class RemoteLinkService extends Service {
             if (now >= nextHeartbeatAt) {
                 sendHeartbeat(current);
                 nextHeartbeatAt = now + heartbeatDelayMillis(config);
+                if (heartbeatAckDeadlineAt == 0L) {
+                    heartbeatAckDeadlineAt = now + HEARTBEAT_ACK_TIMEOUT_MILLIS;
+                }
+            }
+            if (heartbeatAckDeadlineAt > 0L && now >= heartbeatAckDeadlineAt) {
+                LogStore.append(this, "remote", "Heartbeat unanswered for "
+                        + (HEARTBEAT_ACK_TIMEOUT_MILLIS / 1000L) + "s; forcing reconnect");
+                throw new IOException("heartbeat ack timeout");
             }
         }
     }
@@ -489,7 +517,11 @@ public final class RemoteLinkService extends Service {
     }
 
     private long heartbeatDelayMillis(Config config) {
-        return Math.max(1L, config.remoteLinkHeartbeatSeconds()) * 1000L;
+        long configured = Math.max(1L, config.remoteLinkHeartbeatSeconds()) * 1000L;
+        if (linkOnWifi) {
+            return Math.min(configured, WIFI_HEARTBEAT_MAX_INTERVAL_MILLIS);
+        }
+        return configured;
     }
 
     private void sendHello(RemoteWebSocketClient current, Config config) throws IOException {
@@ -685,6 +717,11 @@ public final class RemoteLinkService extends Service {
             }
 
             @Override
+            public void onLosing(Network network, int maxMsToLive) {
+                handleDefaultNetworkLosing(network, maxMsToLive);
+            }
+
+            @Override
             public void onCapabilitiesChanged(Network network, NetworkCapabilities networkCapabilities) {
                 handleDefaultNetworkCapabilities(network, networkCapabilities);
             }
@@ -741,7 +778,24 @@ public final class RemoteLinkService extends Service {
         }
     }
 
+    private void handleDefaultNetworkLosing(Network network, int maxMsToLive) {
+        RemoteWebSocketClient current = client;
+        Network linkNetwork = connectedNetwork;
+        if (current == null || !current.isOpen()) {
+            return;
+        }
+        if (linkNetwork == null || network.equals(linkNetwork)) {
+            requestLivenessProbe("losing-in-" + maxMsToLive + "ms");
+        }
+    }
+
     private void handleDefaultNetworkCapabilities(Network network, NetworkCapabilities capabilities) {
+        Network linkNetwork = connectedNetwork;
+        if (linkNetwork != null && network.equals(linkNetwork)) {
+            linkOnWifi = capabilities != null
+                    && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI);
+        }
+        maybeProbeOnWeakSignal(network, capabilities);
         boolean validated = capabilities != null
                 && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
         boolean wasValidated = defaultValidated;
@@ -751,13 +805,59 @@ public final class RemoteLinkService extends Service {
         }
         if (!validated) {
             RemoteWebSocketClient current = client;
-            Network linkNetwork = connectedNetwork;
             if (current != null && current.isOpen()
                     && (linkNetwork == null || network.equals(linkNetwork))) {
                 requestLivenessProbe("validated-lost");
             }
         } else {
             requestReconnectWake("validated-restored");
+        }
+    }
+
+    /**
+     * As the phone walks toward the edge of wifi range the RSSI degrades well
+     * before the link blackholes, so a weak reading is the earliest available
+     * signal to verify the socket. Fires once on crossing the threshold, then
+     * at most every WEAK_SIGNAL_PROBE_MIN_INTERVAL_MILLIS while it stays weak.
+     */
+    private void maybeProbeOnWeakSignal(Network network, NetworkCapabilities capabilities) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || capabilities == null) {
+            return;
+        }
+        if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            return;
+        }
+        int rssi = capabilities.getSignalStrength();
+        if (rssi == Integer.MIN_VALUE || rssi > WIFI_WEAK_RSSI_DBM) {
+            return;
+        }
+        RemoteWebSocketClient current = client;
+        Network linkNetwork = connectedNetwork;
+        if (current == null || !current.isOpen()
+                || (linkNetwork != null && !network.equals(linkNetwork))) {
+            return;
+        }
+        // Unconditional throttle: RSSI jitters across the threshold at the
+        // edge of range, and each wobble must not become its own probe.
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastWeakSignalProbeAt < WEAK_SIGNAL_PROBE_MIN_INTERVAL_MILLIS) {
+            return;
+        }
+        lastWeakSignalProbeAt = now;
+        requestLivenessProbe("weak-signal-rssi=" + rssi);
+    }
+
+    private boolean isWifiNetwork(Network network) {
+        ConnectivityManager manager = connectivityManager;
+        if (network == null || manager == null) {
+            return false;
+        }
+        try {
+            NetworkCapabilities capabilities = manager.getNetworkCapabilities(network);
+            return capabilities != null
+                    && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI);
+        } catch (RuntimeException e) {
+            return false;
         }
     }
 

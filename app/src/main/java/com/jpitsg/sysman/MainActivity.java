@@ -1029,7 +1029,9 @@ public final class MainActivity extends Activity {
         // platform signature.
         TextView inputNote = historyText(
                 "Touch, drag, scroll and right-click (long press) work anywhere. Typing only "
-                        + "reaches a focused text field.\nEsc Back · Home Home · End Recents · "
+                        + "reaches a focused text field. On the device PIN screen, digits type "
+                        + "the PIN, Backspace/Delete removes a digit, and Enter submits it.\n"
+                        + "Esc Back · Home Home · End Recents · "
                         + "arrows D-pad · F1 Notifications · F2 Quick Settings · F3 Menu · "
                         + "F4 Power · F5 Lock · F6 Screenshot",
                 11, COLOR_TEXT_FAINT, false);
@@ -1047,7 +1049,12 @@ public final class MainActivity extends Activity {
         vncIdleTimeoutField = addField(frame.content, "Idle timeout (minutes, 0 = never)",
                 InputType.TYPE_CLASS_NUMBER);
         LinearLayout captureGroup = addToggleGroup(frame.content);
-        vncWakeOnConnectSwitch = addGroupedToggle(captureGroup, "Wake the screen when a client connects");
+        vncWakeOnConnectSwitch = addGroupedToggle(captureGroup,
+                "Wake a sleeping screen when a client connects");
+        TextView awakeNote = historyText(
+                "The display stays awake while a VNC client is connected.",
+                11, COLOR_TEXT_FAINT, false);
+        frame.content.addView(awakeNote, stack(frame.content));
 
         LinearLayout probeRow = newRow();
         frame.content.addView(probeRow, stack(frame.content));
