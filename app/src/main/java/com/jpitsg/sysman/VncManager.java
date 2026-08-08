@@ -12,9 +12,9 @@ import java.util.Locale;
  * the boot hook drive the server through here rather than touching the service
  * directly.
  *
- * <p>Nothing outside the service evaluates the auto-enable rules. The service
- * owns the network watcher and stays up for as long as the feature is armed,
- * because a background network callback cannot start a foreground service on
+ * <p>Nothing outside the service evaluates the availability conditions. The service
+ * owns the connection watcher and stays up for as long as the feature is armed,
+ * because a background connection callback cannot start a foreground service on
  * Android 12 and up.
  */
 final class VncManager {
@@ -28,9 +28,9 @@ final class VncManager {
 
     /**
      * Starts or stops the service to match the current settings. The master
-     * toggle means <em>armed</em>, not running — a rule that is not satisfied
-     * leaves the service up in {@link VncStateStore#STATE_WAITING} rather than
-     * turning the user's own switch off behind their back.
+     * toggle means <em>armed</em>, not running — unsatisfied availability
+     * conditions leave the service up in {@link VncStateStore#STATE_WAITING}
+     * rather than turning the user's own switch off behind their back.
      *
      * <p>Leaves a manual hold in place: a settings edit is not a request to
      * undo the user's own Stop.
@@ -56,8 +56,9 @@ final class VncManager {
 
     /**
      * Explicit user stop while the feature is still armed. The service stays up
-     * holding the watcher so the next network change can re-arm it; only
-     * turning the master switch off takes the service down.
+     * holding the watcher so the next connection change can re-arm it when an
+     * availability condition is selected. With no conditions, Start is what
+     * re-arms it. Only turning the master switch off takes the service down.
      */
     static void hold(Context context, String reason) {
         Context app = context.getApplicationContext();
@@ -99,7 +100,7 @@ final class VncManager {
 
     /**
      * The reason the server cannot run right now, or null when nothing is in
-     * the way. Checked before the rules so the panel can say what to fix
+     * the way. Checked before the conditions so the panel can say what to fix
      * instead of failing silently.
      */
     static String blockingReason(Context context) {
@@ -140,7 +141,7 @@ final class VncManager {
     /**
      * Executes a Remote Link enable/disable/status command away from the socket
      * thread, then reports the state after the VNC service has evaluated its
-     * preconditions and auto-enable rules.
+     * preconditions and availability conditions.
      */
     static void executeRemoteCommand(final Context context, final String cmd, final String reason,
                                      final long verdictTimeoutMillis, final ResultCallback callback) {

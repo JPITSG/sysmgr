@@ -21,11 +21,12 @@ import java.util.concurrent.Executors;
  * Hosts the VNC server.
  *
  * <p>The service runs for as long as the feature is armed, not only while it is
- * serving. That is what lets the auto-enable rules work at all: a network
- * callback firing in the background cannot start a foreground service on
- * Android 12 and up, so something already foreground has to be holding the
- * watcher when the Wi-Fi changes. Armed-but-not-serving is the {@code WAITING}
- * state, the same shape the beacon uses when no battery rule matches.
+ * serving. That is what lets the availability conditions work at all: a
+ * connection callback firing in the background cannot start a foreground
+ * service on Android 12 and up, so something already foreground has to be
+ * holding the watcher when the connection changes. Armed-but-not-serving is
+ * the {@code WAITING} state, the same shape the beacon uses when no battery
+ * rule matches.
  *
  * <p>Listening and connected states use separate notification channels. The
  * idle listener can be hidden by preference, while an attached remote-control
@@ -74,8 +75,8 @@ public final class VncService extends Service
 
     /**
      * Set when the user stops the server by hand while it is still armed, so
-     * the rules do not immediately start it again. Cleared by the next real
-     * network transition, or by an explicit start.
+     * the conditions do not immediately start it again. Cleared by the next real
+     * connection transition, or by an explicit start.
      */
     private volatile boolean manualHold;
     /** Stops an evaluation that was already in flight from writing after teardown. */
@@ -179,20 +180,20 @@ public final class VncService extends Service
     }
 
     @Override
-    public void onNetworkChanged(String reason, boolean transitioned,
-                                 VncNetworkWatcher.NetworkSnapshot snapshot) {
+    public void onConnectionChanged(String reason, boolean transitioned,
+                                    VncNetworkWatcher.NetworkSnapshot snapshot) {
         if (transitioned && manualHold) {
             manualHold = false;
-            LogStore.append(this, "vnc", "Manual hold cleared by network change reason=" + reason);
+            LogStore.append(this, "vnc", "Manual hold cleared by connection change reason=" + reason);
         }
         // Hand the already-read snapshot to the worker rather than evaluating on
         // the watcher's thread: every evaluation has to be serialised on one
         // thread, or a callback and a settings change can settle the state
         // against each other.
-        postEvaluation("network:" + reason, snapshot);
+        postEvaluation("connection:" + reason, snapshot);
     }
 
-    // ---- Rule evaluation ----------------------------------------------------
+    // ---- Condition evaluation ----------------------------------------------
 
     /**
      * Queues an evaluation onto the worker. Reading the Wi-Fi state can block
@@ -203,7 +204,7 @@ public final class VncService extends Service
             @Override
             public void run() {
                 VncNetworkWatcher.NetworkSnapshot snapshot =
-                        VncNetworkWatcher.rulesNeedNetwork(VncService.this)
+                        VncNetworkWatcher.rulesNeedState(VncService.this)
                                 ? VncNetworkWatcher.readNetwork(VncService.this)
                                 : null;
                 applyEvaluation(reason, snapshot);
@@ -235,7 +236,8 @@ public final class VncService extends Service
 
     /**
      * The state machine. Order matters: a missing precondition outranks the
-     * rules, and a manual hold outranks a rule that would otherwise start us.
+     * conditions, and a manual hold outranks a condition that would otherwise
+     * start us.
      */
     private void applyEvaluation(String reason, VncNetworkWatcher.NetworkSnapshot snapshot) {
         if (destroyed) {
@@ -250,6 +252,9 @@ public final class VncService extends Service
         }
 
         syncWatcher();
+        if (watcher != null) {
+            watcher.rememberSnapshot(snapshot);
+        }
 
         String blocking = VncManager.blockingReason(this);
         if (blocking != null) {
@@ -259,7 +264,9 @@ public final class VncService extends Service
         }
         if (manualHold) {
             stopServer();
-            settle(VncStateStore.STATE_OFF, "Stopped by hand; the next network change re-arms it", reason);
+            settle(VncStateStore.STATE_OFF, VncNetworkWatcher.rulesNeedState(this)
+                    ? "Stopped by hand; the next connection change re-arms it"
+                    : "Stopped by hand; tap Start to re-arm it", reason);
             return;
         }
         boolean wantsProjection = Config.VNC_ENGINE_PROJECTION.equals(Config.get(this).vncEngine());
@@ -445,16 +452,18 @@ public final class VncService extends Service
         }
     }
 
-    /** The watcher is only worth registering while a rule actually needs it. */
+    /** The watcher is only worth registering while a condition actually needs it. */
     private void syncWatcher() {
         VncNetworkWatcher current = watcher;
         if (current == null) {
             return;
         }
-        boolean wanted = Config.get(this).vncEnabled() && VncNetworkWatcher.rulesNeedNetwork(this);
-        if (wanted && !current.isRunning()) {
+        boolean wanted = Config.get(this).vncEnabled() && VncNetworkWatcher.rulesNeedState(this);
+        if (wanted) {
+            // start() is also a configuration sync: it replaces registrations
+            // when the selected condition types have changed.
             current.start();
-        } else if (!wanted && current.isRunning()) {
+        } else {
             current.stop();
         }
     }

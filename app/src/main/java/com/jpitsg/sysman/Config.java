@@ -135,9 +135,18 @@ final class Config {
     private static final String KEY_VNC_PORT = "vnc_port";
     private static final String KEY_VNC_VIEW_ONLY = "vnc_view_only";
     private static final String KEY_VNC_ALLOWED_CLIENTS = "vnc_allowed_clients";
-    private static final String KEY_VNC_AUTO_WIFI_ENABLED = "vnc_auto_wifi_enabled";
-    private static final String KEY_VNC_AUTO_WIFI_SSID = "vnc_auto_wifi_ssid";
-    private static final String KEY_VNC_STOP_ON_CELLULAR = "vnc_stop_on_cellular";
+    private static final String KEY_VNC_ENABLED_ON_MATCHING_WIFI =
+            "vnc_enabled_on_matching_wifi";
+    private static final String KEY_VNC_MATCHING_WIFI_SSID = "vnc_matching_wifi_ssid";
+    private static final String KEY_VNC_ENABLED_WHEN_VPN_CONNECTED =
+            "vnc_enabled_when_vpn_connected";
+    private static final String KEY_VNC_ENABLED_ON_CELLULAR_ONLY =
+            "vnc_enabled_on_cellular_only";
+    // Removed availability settings are retained only as migration keys. They
+    // are deleted from preferences so they cannot reappear in settings exports.
+    private static final String LEGACY_KEY_VNC_AUTO_WIFI_ENABLED = "vnc_auto_wifi_enabled";
+    private static final String LEGACY_KEY_VNC_AUTO_WIFI_SSID = "vnc_auto_wifi_ssid";
+    private static final String LEGACY_KEY_VNC_STOP_ON_CELLULAR = "vnc_stop_on_cellular";
     private static final String KEY_VNC_SCALE_PERCENT = "vnc_scale_percent";
     private static final String KEY_VNC_MAX_FPS = "vnc_max_fps";
     private static final String KEY_VNC_WAKE_ON_CONNECT = "vnc_wake_on_connect";
@@ -253,7 +262,38 @@ final class Config {
     }
 
     static Config get(Context context) {
-        return new Config(context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE));
+        SharedPreferences prefs = context.getApplicationContext()
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        migrateVncAvailabilitySettings(prefs);
+        return new Config(prefs);
+    }
+
+    /**
+     * Preserves the old matching-Wi-Fi choice under its clearer name and drops
+     * the removed cellular-stop switch. The latter must not become the new
+     * cellular-only allow rule: the two settings have opposite meanings.
+     */
+    private static void migrateVncAvailabilitySettings(SharedPreferences prefs) {
+        boolean hasLegacyWifiEnabled = prefs.contains(LEGACY_KEY_VNC_AUTO_WIFI_ENABLED);
+        boolean hasLegacyWifiSsid = prefs.contains(LEGACY_KEY_VNC_AUTO_WIFI_SSID);
+        boolean hasRemovedCellularStop = prefs.contains(LEGACY_KEY_VNC_STOP_ON_CELLULAR);
+        if (!hasLegacyWifiEnabled && !hasLegacyWifiSsid && !hasRemovedCellularStop) {
+            return;
+        }
+
+        SharedPreferences.Editor editor = prefs.edit();
+        if (!prefs.contains(KEY_VNC_ENABLED_ON_MATCHING_WIFI) && hasLegacyWifiEnabled) {
+            editor.putBoolean(KEY_VNC_ENABLED_ON_MATCHING_WIFI,
+                    prefs.getBoolean(LEGACY_KEY_VNC_AUTO_WIFI_ENABLED, false));
+        }
+        if (!prefs.contains(KEY_VNC_MATCHING_WIFI_SSID) && hasLegacyWifiSsid) {
+            editor.putString(KEY_VNC_MATCHING_WIFI_SSID,
+                    prefs.getString(LEGACY_KEY_VNC_AUTO_WIFI_SSID, ""));
+        }
+        editor.remove(LEGACY_KEY_VNC_AUTO_WIFI_ENABLED)
+                .remove(LEGACY_KEY_VNC_AUTO_WIFI_SSID)
+                .remove(LEGACY_KEY_VNC_STOP_ON_CELLULAR)
+                .apply();
     }
 
     boolean isTrackingEnabled() {
@@ -742,17 +782,21 @@ final class Config {
         return string(KEY_VNC_ALLOWED_CLIENTS, "");
     }
 
-    boolean vncAutoWifiEnabled() {
-        return prefs.getBoolean(KEY_VNC_AUTO_WIFI_ENABLED, false);
+    boolean vncEnabledOnMatchingWifi() {
+        return prefs.getBoolean(KEY_VNC_ENABLED_ON_MATCHING_WIFI, false);
     }
 
     /** SSID pattern matched by {@link PatternMatcher#simpleMatch}; {@code *} is the only wildcard. */
-    String vncAutoWifiSsid() {
-        return string(KEY_VNC_AUTO_WIFI_SSID, "");
+    String vncMatchingWifiSsid() {
+        return string(KEY_VNC_MATCHING_WIFI_SSID, "");
     }
 
-    boolean vncStopOnCellular() {
-        return prefs.getBoolean(KEY_VNC_STOP_ON_CELLULAR, true);
+    boolean vncEnabledWhenVpnConnected() {
+        return prefs.getBoolean(KEY_VNC_ENABLED_WHEN_VPN_CONNECTED, false);
+    }
+
+    boolean vncEnabledOnCellularOnly() {
+        return prefs.getBoolean(KEY_VNC_ENABLED_ON_CELLULAR_ONLY, false);
     }
 
     int vncScalePercent() {
@@ -787,9 +831,10 @@ final class Config {
             String port,
             boolean viewOnly,
             String allowedClients,
-            boolean autoWifiEnabled,
-            String autoWifiSsid,
-            boolean stopOnCellular,
+            boolean enabledOnMatchingWifi,
+            String matchingWifiSsid,
+            boolean enabledWhenVpnConnected,
+            boolean enabledOnCellularOnly,
             int scalePercent,
             String maxFps,
             boolean wakeOnConnect,
@@ -803,9 +848,13 @@ final class Config {
                 .putInt(KEY_VNC_PORT, parseInt(port, 5900, 1024, 65535))
                 .putBoolean(KEY_VNC_VIEW_ONLY, viewOnly)
                 .putString(KEY_VNC_ALLOWED_CLIENTS, clean(allowedClients, ""))
-                .putBoolean(KEY_VNC_AUTO_WIFI_ENABLED, autoWifiEnabled)
-                .putString(KEY_VNC_AUTO_WIFI_SSID, clean(autoWifiSsid, ""))
-                .putBoolean(KEY_VNC_STOP_ON_CELLULAR, stopOnCellular)
+                .putBoolean(KEY_VNC_ENABLED_ON_MATCHING_WIFI, enabledOnMatchingWifi)
+                .putString(KEY_VNC_MATCHING_WIFI_SSID, clean(matchingWifiSsid, ""))
+                .putBoolean(KEY_VNC_ENABLED_WHEN_VPN_CONNECTED, enabledWhenVpnConnected)
+                .putBoolean(KEY_VNC_ENABLED_ON_CELLULAR_ONLY, enabledOnCellularOnly)
+                .remove(LEGACY_KEY_VNC_AUTO_WIFI_ENABLED)
+                .remove(LEGACY_KEY_VNC_AUTO_WIFI_SSID)
+                .remove(LEGACY_KEY_VNC_STOP_ON_CELLULAR)
                 .putInt(KEY_VNC_SCALE_PERCENT, clamp(scalePercent, VNC_SCALE_HALF, VNC_SCALE_FULL))
                 .putInt(KEY_VNC_MAX_FPS, parseInt(maxFps, 3, 1, 60))
                 .putBoolean(KEY_VNC_WAKE_ON_CONNECT, wakeOnConnect)
@@ -1472,6 +1521,7 @@ final class Config {
         if (!editor.commit()) {
             throw new IllegalStateException("Could not save imported settings");
         }
+        migrateVncAvailabilitySettings(prefs);
         return values.size();
     }
 

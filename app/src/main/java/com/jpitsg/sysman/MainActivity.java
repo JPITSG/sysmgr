@@ -269,7 +269,7 @@ public final class MainActivity extends Activity {
     private EditText vncPasswordField;
     private EditText vncPortField;
     private EditText vncAllowedClientsField;
-    private EditText vncAutoWifiSsidField;
+    private EditText vncMatchingWifiSsidField;
     private EditText vncMaxFpsField;
     private EditText vncIdleTimeoutField;
     private Button vncEngineAccessibilityButton;
@@ -337,8 +337,9 @@ public final class MainActivity extends Activity {
     private Switch vncEnabledSwitch;
     private Switch vncRemoteCommandEnabledSwitch;
     private Switch vncViewOnlySwitch;
-    private Switch vncAutoWifiEnabledSwitch;
-    private Switch vncStopOnCellularSwitch;
+    private Switch vncEnabledOnMatchingWifiSwitch;
+    private Switch vncEnabledWhenVpnConnectedSwitch;
+    private Switch vncEnabledOnCellularOnlySwitch;
     private Switch vncWakeOnConnectSwitch;
     private Switch vncShowListeningNotificationSwitch;
     private Switch logEnabledSwitch;
@@ -1039,11 +1040,21 @@ public final class MainActivity extends Activity {
                 11, COLOR_TEXT_FAINT, false);
         frame.content.addView(inputNote, stack(frame.content));
 
-        addSubsectionLabel(frame.content, "Auto-Enable");
-        LinearLayout autoGroup = addToggleGroup(frame.content);
-        vncAutoWifiEnabledSwitch = addGroupedToggle(autoGroup, "Start on matching Wi-Fi SSID");
-        vncStopOnCellularSwitch = addGroupedToggle(autoGroup, "Stop when Wi-Fi drops to cellular");
-        vncAutoWifiSsidField = addField(frame.content, "SSID pattern (* wildcard)", InputType.TYPE_CLASS_TEXT);
+        addSubsectionLabel(frame.content, "Availability");
+        LinearLayout availabilityGroup = addToggleGroup(frame.content);
+        vncEnabledOnMatchingWifiSwitch = addGroupedToggle(
+                availabilityGroup, "Enable on matching Wi-Fi SSID");
+        vncEnabledWhenVpnConnectedSwitch = addGroupedToggle(
+                availabilityGroup, "Enable when VPN is connected");
+        vncEnabledOnCellularOnlySwitch = addGroupedToggle(
+                availabilityGroup, "Enable on cellular only");
+        vncMatchingWifiSsidField = addField(
+                frame.content, "Wi-Fi SSID pattern (* wildcard)", InputType.TYPE_CLASS_TEXT);
+        TextView availabilityNote = historyText(
+                "When one or more conditions are selected, the enabled server runs while any "
+                        + "selected condition matches. With none selected, it runs on any connection.",
+                11, COLOR_TEXT_FAINT, false);
+        frame.content.addView(availabilityNote, stack(frame.content));
 
         addSubsectionLabel(frame.content, "Capture");
         addVncScaleInput(frame.content);
@@ -1139,19 +1150,26 @@ public final class MainActivity extends Activity {
 
     /**
      * Screen Capture cannot start unattended — from Android 14 the consent
-     * token is single-use — so pairing it with the Wi-Fi rule is worth calling
-     * out where the choice is made rather than leaving it to be discovered.
+     * token is single-use — so pairing it with an availability condition is
+     * worth calling out where the choice is made rather than leaving it to be
+     * discovered.
      */
     private void updateVncEngineNote() {
         if (vncEngineNoteText == null) {
             return;
         }
         boolean projection = Config.VNC_ENGINE_PROJECTION.equals(vncEngine);
-        boolean autoWifi = vncAutoWifiEnabledSwitch != null && vncAutoWifiEnabledSwitch.isChecked();
+        boolean conditionSelected = (vncEnabledOnMatchingWifiSwitch != null
+                && vncEnabledOnMatchingWifiSwitch.isChecked())
+                || (vncEnabledWhenVpnConnectedSwitch != null
+                && vncEnabledWhenVpnConnectedSwitch.isChecked())
+                || (vncEnabledOnCellularOnlySwitch != null
+                && vncEnabledOnCellularOnlySwitch.isChecked());
         String note;
-        if (projection && autoWifi) {
-            note = "Screen Capture needs a tap to authorise each time it starts, so auto-enable will "
-                    + "notify you instead of starting silently. Use Accessibility for unattended start.";
+        if (projection && conditionSelected) {
+            note = "Screen Capture needs a tap to authorise each time it starts, so an availability "
+                    + "condition will notify you instead of starting silently. Use Accessibility for "
+                    + "unattended start.";
         } else if (projection) {
             note = "Screen Capture: full frame rate, but needs a tap to authorise each time it "
                     + "starts. Input still needs the Accessibility service; raise the frame rate "
@@ -2886,9 +2904,10 @@ public final class MainActivity extends Activity {
                 text(vncPortField),
                 vncViewOnlySwitch.isChecked(),
                 text(vncAllowedClientsField),
-                vncAutoWifiEnabledSwitch.isChecked(),
-                text(vncAutoWifiSsidField),
-                vncStopOnCellularSwitch.isChecked(),
+                vncEnabledOnMatchingWifiSwitch.isChecked(),
+                text(vncMatchingWifiSsidField),
+                vncEnabledWhenVpnConnectedSwitch.isChecked(),
+                vncEnabledOnCellularOnlySwitch.isChecked(),
                 vncScalePercent,
                 text(vncMaxFpsField),
                 vncWakeOnConnectSwitch.isChecked(),
@@ -2928,8 +2947,9 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Holds rather than stops: the service keeps the network watcher so the
-     * auto-enable rule can re-arm it, and a settings edit will not undo this.
+     * Holds rather than stops: when availability conditions are selected, the
+     * service keeps the connection watcher so a later change can re-arm it. A
+     * settings edit will not undo the hold; with no conditions, Start will.
      * Turning the master switch off is what actually takes the service down.
      */
     private void stopVncServer() {
@@ -4497,9 +4517,10 @@ public final class MainActivity extends Activity {
             vncPortField.setText(Integer.toString(config.vncPort()));
             vncAllowedClientsField.setText(config.vncAllowedClients());
             vncViewOnlySwitch.setChecked(config.vncViewOnly());
-            vncAutoWifiEnabledSwitch.setChecked(config.vncAutoWifiEnabled());
-            vncAutoWifiSsidField.setText(config.vncAutoWifiSsid());
-            vncStopOnCellularSwitch.setChecked(config.vncStopOnCellular());
+            vncEnabledOnMatchingWifiSwitch.setChecked(config.vncEnabledOnMatchingWifi());
+            vncMatchingWifiSsidField.setText(config.vncMatchingWifiSsid());
+            vncEnabledWhenVpnConnectedSwitch.setChecked(config.vncEnabledWhenVpnConnected());
+            vncEnabledOnCellularOnlySwitch.setChecked(config.vncEnabledOnCellularOnly());
             vncScalePercent = config.vncScalePercent();
             updateVncScaleButtons();
             vncMaxFpsField.setText(Integer.toString(config.vncMaxFps()));
@@ -4695,7 +4716,7 @@ public final class MainActivity extends Activity {
         });
         bindLiveEdits(vncSettingsSave,
                 vncPasswordField, vncPortField, vncAllowedClientsField,
-                vncAutoWifiSsidField, vncMaxFpsField, vncIdleTimeoutField);
+                vncMatchingWifiSsidField, vncMaxFpsField, vncIdleTimeoutField);
         // Only the master switch gets the disable fallback: the others must just
         // revert when a sibling field is invalid, not take the server down.
         bindLiveToggles(vncSettingsSave, new LiveSaveAction() {
@@ -4704,8 +4725,9 @@ public final class MainActivity extends Activity {
                 return saveVncDisabledOnly();
             }
         }, vncEnabledSwitch);
-        bindLiveToggles(vncSettingsSave, vncViewOnlySwitch, vncAutoWifiEnabledSwitch,
-                vncStopOnCellularSwitch, vncWakeOnConnectSwitch,
+        bindLiveToggles(vncSettingsSave, vncViewOnlySwitch, vncEnabledOnMatchingWifiSwitch,
+                vncEnabledWhenVpnConnectedSwitch, vncEnabledOnCellularOnlySwitch,
+                vncWakeOnConnectSwitch,
                 vncShowListeningNotificationSwitch);
 
         final LiveSaveGroup vncRemoteControl = liveSaveGroup(new LiveSaveAction() {

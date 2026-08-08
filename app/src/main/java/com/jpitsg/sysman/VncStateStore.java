@@ -15,7 +15,7 @@ final class VncStateStore {
 
     /** Disabled, or the service is not running. */
     static final String STATE_OFF = "OFF";
-    /** Enabled and armed, but the auto-enable rules are not satisfied. */
+    /** Enabled and armed, but the availability conditions are not satisfied. */
     static final String STATE_WAITING = "WAITING";
     /** Service up, capture engine coming online. */
     static final String STATE_STARTING = "STARTING";
