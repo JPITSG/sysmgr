@@ -141,6 +141,8 @@ final class Config {
     private static final String KEY_VNC_MAX_FPS = "vnc_max_fps";
     private static final String KEY_VNC_WAKE_ON_CONNECT = "vnc_wake_on_connect";
     private static final String KEY_VNC_IDLE_TIMEOUT_MINUTES = "vnc_idle_timeout_minutes";
+    private static final String KEY_VNC_SHOW_LISTENING_NOTIFICATION =
+            "vnc_show_listening_notification";
 
     private static final Object BEACON_UUID_LOCK = new Object();
 
@@ -765,6 +767,10 @@ final class Config {
         return intValue(KEY_VNC_IDLE_TIMEOUT_MINUTES, 30, 0, 1440);
     }
 
+    boolean vncShowListeningNotification() {
+        return prefs.getBoolean(KEY_VNC_SHOW_LISTENING_NOTIFICATION, true);
+    }
+
     void saveVncConfig(
             boolean enabled,
             String engine,
@@ -777,7 +783,8 @@ final class Config {
             int scalePercent,
             String maxFps,
             boolean wakeOnConnect,
-            String idleTimeoutMinutes) {
+            String idleTimeoutMinutes,
+            boolean showListeningNotification) {
         prefs.edit()
                 .putBoolean(KEY_VNC_ENABLED, enabled)
                 .putString(KEY_VNC_ENGINE, VNC_ENGINE_PROJECTION.equals(engine)
@@ -792,6 +799,7 @@ final class Config {
                 .putInt(KEY_VNC_MAX_FPS, parseInt(maxFps, 3, 1, 60))
                 .putBoolean(KEY_VNC_WAKE_ON_CONNECT, wakeOnConnect)
                 .putInt(KEY_VNC_IDLE_TIMEOUT_MINUTES, parseInt(idleTimeoutMinutes, 30, 0, 1440))
+                .putBoolean(KEY_VNC_SHOW_LISTENING_NOTIFICATION, showListeningNotification)
                 .apply();
     }
 

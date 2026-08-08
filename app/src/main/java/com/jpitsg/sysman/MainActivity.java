@@ -339,6 +339,7 @@ public final class MainActivity extends Activity {
     private Switch vncAutoWifiEnabledSwitch;
     private Switch vncStopOnCellularSwitch;
     private Switch vncWakeOnConnectSwitch;
+    private Switch vncShowListeningNotificationSwitch;
     private Switch logEnabledSwitch;
     private Switch clearNotificationsOnOpenSwitch;
     private Switch notificationBackupEnabledSwitch;
@@ -1055,6 +1056,15 @@ public final class MainActivity extends Activity {
                 "The display stays awake while a VNC client is connected.",
                 11, COLOR_TEXT_FAINT, false);
         frame.content.addView(awakeNote, stack(frame.content));
+
+        addSubsectionLabel(frame.content, "Notifications");
+        LinearLayout notificationGroup = addToggleGroup(frame.content);
+        vncShowListeningNotificationSwitch = addGroupedToggle(notificationGroup,
+                "Show the “Listening on…” notification");
+        TextView notificationNote = historyText(
+                "A connected client is always shown, with an action to disconnect it.",
+                11, COLOR_TEXT_FAINT, false);
+        frame.content.addView(notificationNote, stack(frame.content));
 
         LinearLayout probeRow = newRow();
         frame.content.addView(probeRow, stack(frame.content));
@@ -2856,7 +2866,8 @@ public final class MainActivity extends Activity {
                 vncScalePercent,
                 text(vncMaxFpsField),
                 vncWakeOnConnectSwitch.isChecked(),
-                text(vncIdleTimeoutField));
+                text(vncIdleTimeoutField),
+                vncShowListeningNotificationSwitch.isChecked());
         VncSecretStore.setPassword(this, text(vncPasswordField));
         VncManager.sync(this, "settings-live");
         refreshStatusAndLog();
@@ -4461,6 +4472,7 @@ public final class MainActivity extends Activity {
             vncMaxFpsField.setText(Integer.toString(config.vncMaxFps()));
             vncIdleTimeoutField.setText(Integer.toString(config.vncIdleTimeoutMinutes()));
             vncWakeOnConnectSwitch.setChecked(config.vncWakeOnConnect());
+            vncShowListeningNotificationSwitch.setChecked(config.vncShowListeningNotification());
             beaconEnabledSwitch.setChecked(config.beaconEnabled());
             beaconUuidValue.setText(config.beaconUuid().toString());
             beaconMajorField.setText(Integer.toString(config.beaconMajor()));
@@ -4660,7 +4672,8 @@ public final class MainActivity extends Activity {
             }
         }, vncEnabledSwitch);
         bindLiveToggles(vncSettingsSave, vncViewOnlySwitch, vncAutoWifiEnabledSwitch,
-                vncStopOnCellularSwitch, vncWakeOnConnectSwitch);
+                vncStopOnCellularSwitch, vncWakeOnConnectSwitch,
+                vncShowListeningNotificationSwitch);
 
         beaconSettingsSave = liveSaveGroup(new LiveSaveAction() {
             @Override

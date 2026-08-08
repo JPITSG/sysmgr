@@ -8,6 +8,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.graphics.drawable.Icon;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
@@ -26,12 +27,9 @@ import java.util.concurrent.Executors;
  * watcher when the Wi-Fi changes. Armed-but-not-serving is the {@code WAITING}
  * state, the same shape the beacon uses when no battery rule matches.
  *
- * <p>The ongoing notification is created here rather than through {@link
- * ServiceNotifications}. Every other service offers a switch to hide its
- * notification; this one deliberately does not. A server that mirrors the
- * screen and injects input should not be able to hide the only on-device sign
- * that it is running, and a switch that ignored the user would be worse than no
- * switch at all. The Wi-Fi monitor already owns its channel the same way.
+ * <p>Listening and connected states use separate notification channels. The
+ * idle listener can be hidden by preference, while an attached remote-control
+ * client is always announced and gets a one-tap Disconnect action.
  *
  * <p>The foreground type is {@code specialUse} rather than {@code dataSync} for
  * the reason recorded on {@link RemoteLinkService}: from Android 15 a dataSync
@@ -48,12 +46,17 @@ public final class VncService extends Service
     static final String ACTION_HOLD = "com.jpitsg.sysman.action.VNC_HOLD";
     /** Carries a fresh MediaProjection consent result in from the activity. */
     static final String ACTION_AUTHORIZE = "com.jpitsg.sysman.action.VNC_AUTHORIZE";
+    /** Drops the attached client but leaves the VNC server listening. */
+    static final String ACTION_DISCONNECT = "com.jpitsg.sysman.action.VNC_DISCONNECT";
     static final String EXTRA_REASON = "reason";
     static final String EXTRA_RESULT_CODE = "result_code";
     static final String EXTRA_RESULT_DATA = "result_data";
 
     private static final String CHANNEL_ID = "system_manager_vnc";
+    private static final String LISTENING_CHANNEL_ID = "system_manager_vnc_listening";
+    private static final String CONNECTED_CHANNEL_ID = "system_manager_vnc_connected";
     private static final int NOTIFICATION_ID = 0x5306;
+    private static final int DISCONNECT_REQUEST_CODE = 0x5307;
 
     private static volatile boolean active;
     /**
@@ -83,6 +86,7 @@ public final class VncService extends Service
     private VncNetworkWatcher watcher;
     private VncServer server;
     private ExecutorService evaluationExecutor;
+    private String listeningChannelId = LISTENING_CHANNEL_ID;
 
     static boolean isActive() {
         return active;
@@ -94,7 +98,7 @@ public final class VncService extends Service
         active = true;
         evaluationExecutor = Executors.newSingleThreadExecutor();
         watcher = new VncNetworkWatcher(this, this);
-        ensureNotificationChannel();
+        ensureNotificationChannels();
     }
 
     @Override
@@ -123,6 +127,9 @@ public final class VncService extends Service
         if (!startForegroundServer()) {
             stopSelf(startId);
             return START_NOT_STICKY;
+        }
+        if (ACTION_DISCONNECT.equals(action)) {
+            requestClientDisconnect(reason);
         }
         if (authorizing) {
             adoptProjection(intent.getIntExtra(EXTRA_RESULT_CODE, 0),
@@ -368,6 +375,19 @@ public final class VncService extends Service
         }
     }
 
+    private void requestClientDisconnect(final String reason) {
+        submit(new Runnable() {
+            @Override
+            public void run() {
+                VncServer current = server;
+                boolean requested = current != null
+                        && current.disconnectClient("disconnected by user");
+                LogStore.append(VncService.this, "vnc", "Notification disconnect result="
+                        + requested + " reason=" + reason);
+            }
+        }, "client-disconnect");
+    }
+
     @Override
     public void onListening(final String address, final int port) {
         submit(new Runnable() {
@@ -442,6 +462,7 @@ public final class VncService extends Service
     // ---- Foreground plumbing ------------------------------------------------
 
     private boolean startForegroundServer() {
+        ensureNotificationChannels();
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
@@ -473,6 +494,7 @@ public final class VncService extends Service
     }
 
     private void updateNotification() {
+        ensureNotificationChannels();
         NotificationManager manager =
                 (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) {
@@ -485,9 +507,10 @@ public final class VncService extends Service
     }
 
     private Notification buildNotification() {
+        String state = VncStateStore.state(this);
         Intent open = new Intent(this, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        if (VncStateStore.STATE_CONSENT.equals(VncStateStore.state(this))) {
+        if (VncStateStore.STATE_CONSENT.equals(state)) {
             // The only route back to a consent dialog is an activity, so the
             // notification is what an unattended start has to fall back to.
             open.putExtra(MainActivity.EXTRA_REQUEST_PROJECTION, true);
@@ -495,8 +518,15 @@ public final class VncService extends Service
         PendingIntent pending = PendingIntent.getActivity(this, 0, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        String text = notificationText();
-        return new Notification.Builder(this, CHANNEL_ID)
+        String channelId = CHANNEL_ID;
+        if (VncStateStore.STATE_LISTENING.equals(state)) {
+            channelId = listeningChannelId;
+        } else if (VncStateStore.STATE_CONNECTED.equals(state)) {
+            channelId = CONNECTED_CHANNEL_ID;
+        }
+
+        String text = notificationText(state);
+        Notification.Builder builder = new Notification.Builder(this, channelId)
                 .setSmallIcon(R.drawable.ic_stat_system_manager)
                 .setContentTitle("VNC server")
                 .setContentText(text)
@@ -506,12 +536,30 @@ public final class VncService extends Service
                 .setOngoing(true)
                 .setShowWhen(false)
                 .setOnlyAlertOnce(true)
-                .setLocalOnly(true)
-                .build();
+                .setLocalOnly(true);
+        boolean listeningShown = !VncStateStore.STATE_LISTENING.equals(state)
+                || Config.get(this).vncShowListeningNotification();
+        ServiceNotifications.applyBehavior(builder, listeningShown);
+        if (VncStateStore.STATE_CONNECTED.equals(state)) {
+            Intent disconnect = new Intent(this, VncService.class)
+                    .setAction(ACTION_DISCONNECT)
+                    .putExtra(EXTRA_REASON, "notification-action");
+            PendingIntent disconnectPending = PendingIntent.getService(
+                    this,
+                    DISCONNECT_REQUEST_CODE,
+                    disconnect,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            Notification.Action disconnectAction = new Notification.Action.Builder(
+                    Icon.createWithResource(this, R.drawable.ic_stat_system_manager),
+                    "Disconnect",
+                    disconnectPending)
+                    .build();
+            builder.addAction(disconnectAction);
+        }
+        return builder.build();
     }
 
-    private String notificationText() {
-        String state = VncStateStore.state(this);
+    private String notificationText(String state) {
         String detail = VncStateStore.detail(this);
         if (VncStateStore.STATE_CONNECTED.equals(state)) {
             String client = VncStateStore.clientAddress(this);
@@ -525,21 +573,39 @@ public final class VncService extends Service
         return detail.isEmpty() ? label : label + " — " + detail;
     }
 
-    private void ensureNotificationChannel() {
+    private void ensureNotificationChannels() {
+        listeningChannelId = ServiceNotifications.channel(
+                this,
+                LISTENING_CHANNEL_ID,
+                "VNC server listening",
+                "Shows the address while the VNC server is waiting for a client.",
+                NotificationManager.IMPORTANCE_LOW,
+                Config.get(this).vncShowListeningNotification());
+
         NotificationManager manager =
                 (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) {
             return;
         }
-        NotificationChannel channel = new NotificationChannel(
+        NotificationChannel statusChannel = new NotificationChannel(
                 CHANNEL_ID,
-                "VNC server",
+                "VNC server status",
                 NotificationManager.IMPORTANCE_LOW);
-        channel.setDescription("Shows when the VNC server is armed or serving a client.");
-        channel.setShowBadge(false);
-        channel.setSound(null, null);
+        statusChannel.setDescription("Shows VNC startup, waiting, consent and error states.");
+        statusChannel.setShowBadge(false);
+        statusChannel.setSound(null, null);
+
+        NotificationChannel connectedChannel = new NotificationChannel(
+                CONNECTED_CHANNEL_ID,
+                "VNC client connected",
+                NotificationManager.IMPORTANCE_LOW);
+        connectedChannel.setDescription(
+                "Shows when a remote-control client is attached to the device.");
+        connectedChannel.setShowBadge(false);
+        connectedChannel.setSound(null, null);
         try {
-            manager.createNotificationChannel(channel);
+            manager.createNotificationChannel(statusChannel);
+            manager.createNotificationChannel(connectedChannel);
         } catch (RuntimeException e) {
             LogStore.append(this, "vnc", "Channel setup failed: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());

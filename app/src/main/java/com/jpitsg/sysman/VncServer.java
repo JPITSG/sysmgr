@@ -97,6 +97,16 @@ final class VncServer implements VncSession.Listener {
         stop(true);
     }
 
+    /** Disconnects the current client while leaving the listening socket up. */
+    boolean disconnectClient(String reason) {
+        VncSession current = session.get();
+        if (current == null) {
+            return false;
+        }
+        current.stop(reason);
+        return true;
+    }
+
     /**
      * @param await whether to wait for the accept thread to unwind. Never wait
      *              from the main thread — teardown would block it for seconds.
