@@ -30,9 +30,12 @@ import java.util.concurrent.Executors;
  * the {@code WAITING} state, the same shape the beacon uses when no battery
  * rule matches.
  *
- * <p>Listening and connected states use separate notification channels. The
- * idle listener can be hidden by preference, while an attached remote-control
- * client is always announced and gets a one-tap Disconnect action.
+ * <p>Listening and connected states use separate notification channels, so the
+ * idle listener can be hidden in Android's notification settings while an
+ * attached remote-control client is announced with a one-tap Disconnect
+ * action. A posted notification is pinned to its channel, so each channel owns
+ * its own notification id and a state change across channels re-posts instead
+ * of updating.
  *
  * <p>The foreground type is {@code specialUse} rather than {@code dataSync} for
  * the reason recorded on {@link RemoteLinkService}: from Android 15 a dataSync
@@ -60,6 +63,9 @@ public final class VncService extends Service
     private static final String CONNECTED_CHANNEL_ID = "system_manager_vnc_connected";
     private static final int NOTIFICATION_ID = 0x5306;
     private static final int DISCONNECT_REQUEST_CODE = 0x5307;
+    private static final int LISTENING_NOTIFICATION_ID = 0x5308;
+    private static final int CONNECTED_NOTIFICATION_ID = 0x5309;
+    private static final int CONTENT_REQUEST_CODE = 0x530a;
 
     private static volatile boolean active;
     /**
@@ -85,6 +91,8 @@ public final class VncService extends Service
     private volatile boolean destroyed;
     /** Set for the one startForeground that has to precede getMediaProjection. */
     private volatile boolean pendingProjectionType;
+    /** Notification id the foreground service currently owns; 0 before the first start. */
+    private volatile int foregroundNotificationId;
 
     private VncNetworkWatcher watcher;
     private VncServer server;
@@ -543,6 +551,8 @@ public final class VncService extends Service
 
     private boolean startForegroundServer() {
         ensureNotificationChannels();
+        int id = notificationIdFor(VncStateStore.state(this));
+        int previousId = foregroundNotificationId;
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
@@ -551,7 +561,7 @@ public final class VncService extends Service
                     // no reason to wear the screen-recording type otherwise.
                     type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
                 }
-                startForeground(NOTIFICATION_ID, buildNotification(), type);
+                startForeground(id, buildNotification(), type);
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 // specialUse was added in API 34. dataSync has no duration cap
                 // on these releases and is the compatible network-server type.
@@ -559,9 +569,20 @@ public final class VncService extends Service
                 if (pendingProjectionType || projection != null) {
                     type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
                 }
-                startForeground(NOTIFICATION_ID, buildNotification(), type);
+                startForeground(id, buildNotification(), type);
             } else {
-                startForeground(NOTIFICATION_ID, buildNotification());
+                startForeground(id, buildNotification());
+            }
+            foregroundNotificationId = id;
+            if (previousId != 0 && previousId != id) {
+                // Re-associating the foreground service with a new id does not
+                // reliably remove the previous notification; drop it explicitly
+                // now that it no longer backs the service.
+                NotificationManager manager =
+                        (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                if (manager != null) {
+                    manager.cancel(previousId);
+                }
             }
             return true;
         } catch (RuntimeException e) {
@@ -574,6 +595,16 @@ public final class VncService extends Service
     }
 
     private void updateNotification() {
+        // A posted notification is pinned to its channel, so a state that maps
+        // to a different channel cannot be delivered as an update: the platform
+        // drops the channel change and the shade keeps the old text. Post it
+        // fresh under the new channel's own id instead — that also removes the
+        // stale notification, which plain cancel would not while it still
+        // backed the foreground service.
+        if (notificationIdFor(VncStateStore.state(this)) != foregroundNotificationId) {
+            startForegroundServer();
+            return;
+        }
         ensureNotificationChannels();
         NotificationManager manager =
                 (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
@@ -581,23 +612,24 @@ public final class VncService extends Service
             return;
         }
         try {
-            manager.notify(NOTIFICATION_ID, buildNotification());
+            manager.notify(foregroundNotificationId, buildNotification());
         } catch (RuntimeException ignored) {
         }
     }
 
+    /** The channel is fixed at post time, so each channel owns a notification id. */
+    private int notificationIdFor(String state) {
+        if (VncStateStore.STATE_LISTENING.equals(state)) {
+            return LISTENING_NOTIFICATION_ID;
+        }
+        if (VncStateStore.STATE_CONNECTED.equals(state)) {
+            return CONNECTED_NOTIFICATION_ID;
+        }
+        return NOTIFICATION_ID;
+    }
+
     private Notification buildNotification() {
         String state = VncStateStore.state(this);
-        Intent open = new Intent(this, MainActivity.class)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        if (VncStateStore.STATE_CONSENT.equals(state)) {
-            // The only route back to a consent dialog is an activity, so the
-            // notification is what an unattended start has to fall back to.
-            open.putExtra(MainActivity.EXTRA_REQUEST_PROJECTION, true);
-        }
-        PendingIntent pending = PendingIntent.getActivity(this, 0, open,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
         String channelId = CHANNEL_ID;
         if (VncStateStore.STATE_LISTENING.equals(state)) {
             channelId = LISTENING_CHANNEL_ID;
@@ -612,12 +644,14 @@ public final class VncService extends Service
                 .setContentText(text)
                 .setStyle(new Notification.BigTextStyle().bigText(text))
                 .setCategory(Notification.CATEGORY_SERVICE)
-                .setContentIntent(pending)
                 .setOngoing(true)
                 .setShowWhen(false)
                 .setOnlyAlertOnce(true)
                 .setLocalOnly(true);
         if (VncStateStore.STATE_CONNECTED.equals(state)) {
+            // No content intent while connected: the only tap this notification
+            // answers is the Disconnect action, and a tap that lands on the row
+            // instead must not pull the app to the foreground.
             Intent disconnect = new Intent(this, VncService.class)
                     .setAction(ACTION_DISCONNECT)
                     .putExtra(EXTRA_REASON, "notification-action");
@@ -632,6 +666,19 @@ public final class VncService extends Service
                     disconnectPending)
                     .build();
             builder.addAction(disconnectAction);
+        } else {
+            Intent open = new Intent(this, MainActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            if (VncStateStore.STATE_CONSENT.equals(state)) {
+                // The only route back to a consent dialog is an activity, so the
+                // notification is what an unattended start has to fall back to.
+                open.putExtra(MainActivity.EXTRA_REQUEST_PROJECTION, true);
+            }
+            // Own request code: with the default one this record aliases the
+            // VPN notification's content intent (same target, no action), and
+            // its updates would strip the consent extra set above.
+            builder.setContentIntent(PendingIntent.getActivity(this, CONTENT_REQUEST_CODE, open,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
         }
         return builder.build();
     }
