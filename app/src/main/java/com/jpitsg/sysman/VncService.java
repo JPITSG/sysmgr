@@ -5,8 +5,10 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.graphics.drawable.Icon;
 import android.media.projection.MediaProjection;
@@ -88,6 +90,8 @@ public final class VncService extends Service
     private VncServer server;
     private ExecutorService evaluationExecutor;
     private String listeningChannelId = LISTENING_CHANNEL_ID;
+    private BroadcastReceiver vpnInterfaceReceiver;
+    private String vpnInterfaceSignature = "";
 
     static boolean isActive() {
         return active;
@@ -99,6 +103,7 @@ public final class VncService extends Service
         active = true;
         evaluationExecutor = Executors.newSingleThreadExecutor();
         watcher = new VncNetworkWatcher(this, this);
+        registerVpnInterfaceReceiver();
         ensureNotificationChannels();
     }
 
@@ -149,6 +154,7 @@ public final class VncService extends Service
     public void onDestroy() {
         active = false;
         destroyed = true;
+        unregisterVpnInterfaceReceiver();
         // No join here: onDestroy runs on the main thread and waiting on the
         // accept and frame threads would risk an ANR. Closing the sockets is
         // what ends them.
@@ -359,7 +365,9 @@ public final class VncService extends Service
 
     private void startServer(String reason) {
         int port = Config.get(this).vncPort();
-        if (server != null && server.isRunning() && server.port() == port) {
+        VncServer current = server;
+        if (current != null && current.isRunning() && current.port() == port) {
+            refreshListenAddress(VncServer.localAddress(), port, "interface-refresh");
             return;
         }
         stopServer();
@@ -400,11 +408,21 @@ public final class VncService extends Service
         submit(new Runnable() {
             @Override
             public void run() {
-                VncStateStore.setListenAddress(VncService.this,
-                        (address.isEmpty() ? "0.0.0.0" : address) + ":" + port);
+                refreshListenAddress(address, port, "server-listening");
                 settle(VncStateStore.STATE_LISTENING, "", "server-listening");
             }
         }, "server-listening");
+    }
+
+    private void refreshListenAddress(String address, int port, String reason) {
+        String next = (address.isEmpty() ? "0.0.0.0" : address) + ":" + port;
+        String previous = VncStateStore.listenAddress(this);
+        VncStateStore.setListenAddress(this, next);
+        if (!next.equals(previous)) {
+            LogStore.append(this, "vnc", "Preferred listening endpoint changed to "
+                    + next + " reason=" + reason + "; socket remains bound to all interfaces");
+            updateNotification();
+        }
     }
 
     @Override
@@ -466,6 +484,60 @@ public final class VncService extends Service
         } else {
             current.stop();
         }
+    }
+
+    /**
+     * Availability may not depend on VPN state, but the preferred endpoint
+     * shown to the user still must change when the TUN interface appears or
+     * disappears. The change marker filters high-frequency byte-count updates,
+     * and the reachability signature avoids duplicate state evaluations.
+     */
+    private void registerVpnInterfaceReceiver() {
+        if (vpnInterfaceReceiver != null) {
+            return;
+        }
+        vpnInterfaceSignature = currentVpnInterfaceSignature();
+        vpnInterfaceReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent != null && !OpenVpnStateStore.CHANGE_STATE.equals(
+                        intent.getStringExtra(OpenVpnStateStore.EXTRA_CHANGE))) {
+                    return;
+                }
+                String next = currentVpnInterfaceSignature();
+                if (next.equals(vpnInterfaceSignature)) {
+                    return;
+                }
+                vpnInterfaceSignature = next;
+                if (Config.get(VncService.this).vncEnabled()) {
+                    requestEvaluation("vpn-interface:" + next);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(OpenVpnStateStore.ACTION_STATE_CHANGED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(vpnInterfaceReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(vpnInterfaceReceiver, filter);
+        }
+    }
+
+    private void unregisterVpnInterfaceReceiver() {
+        BroadcastReceiver receiver = vpnInterfaceReceiver;
+        vpnInterfaceReceiver = null;
+        if (receiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(receiver);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private String currentVpnInterfaceSignature() {
+        boolean connected = OpenVpnService.isActive()
+                && OpenVpnStateStore.STATE_CONNECTED.equals(OpenVpnStateStore.state(this));
+        return connected ? "connected:" + VncServer.vpnAddress() : "disconnected";
     }
 
     // ---- Foreground plumbing ------------------------------------------------

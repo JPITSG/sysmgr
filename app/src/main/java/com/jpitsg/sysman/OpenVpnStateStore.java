@@ -11,6 +11,10 @@ import android.content.SharedPreferences;
  */
 final class OpenVpnStateStore {
     static final String ACTION_STATE_CHANGED = "com.jpitsg.sysman.action.OPENVPN_STATE_CHANGED";
+    static final String EXTRA_CHANGE = "change";
+    static final String CHANGE_STATE = "state";
+    static final String CHANGE_REMOTE = "remote";
+    static final String CHANGE_BYTES = "bytes";
 
     // Detailed engine states (notification/log detail).
     static final String STATE_IDLE = "IDLE";
@@ -55,7 +59,7 @@ final class OpenVpnStateStore {
             editor.putLong(KEY_CONNECTED_AT, System.currentTimeMillis());
         }
         editor.apply();
-        broadcast(context);
+        broadcast(context, CHANGE_STATE);
     }
 
     static void setRemote(Context context, String remote) {
@@ -65,7 +69,7 @@ final class OpenVpnStateStore {
             return;
         }
         prefs.edit().putString(KEY_REMOTE, next).apply();
-        broadcast(context);
+        broadcast(context, CHANGE_REMOTE);
     }
 
     static void setByteCounts(Context context, long rx, long tx) {
@@ -74,7 +78,7 @@ final class OpenVpnStateStore {
             return;
         }
         prefs.edit().putLong(KEY_RX, rx).putLong(KEY_TX, tx).apply();
-        broadcast(context);
+        broadcast(context, CHANGE_BYTES);
     }
 
     static String state(Context context) {
@@ -144,8 +148,9 @@ final class OpenVpnStateStore {
         return prefs(context).getLong(KEY_CONNECTED_AT, 0L);
     }
 
-    private static void broadcast(Context context) {
+    private static void broadcast(Context context, String change) {
         context.getApplicationContext().sendBroadcast(new Intent(ACTION_STATE_CHANGED)
-                .setPackage(context.getPackageName()));
+                .setPackage(context.getPackageName())
+                .putExtra(EXTRA_CHANGE, change));
     }
 }

@@ -4,6 +4,7 @@ import android.content.Context;
 
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -52,6 +53,19 @@ final class VncServer implements VncSession.Listener {
         long blockedUntilMillis;
     }
 
+    private static final class LocalAddresses {
+        String vpn = "";
+        String wifi = "";
+        String fallback = "";
+
+        String preferred() {
+            if (!vpn.isEmpty()) {
+                return vpn;
+            }
+            return wifi.isEmpty() ? fallback : wifi;
+        }
+    }
+
     VncServer(Context context, Listener listener) {
         this.context = context.getApplicationContext();
         this.listener = listener;
@@ -72,7 +86,16 @@ final class VncServer implements VncSession.Listener {
         try {
             serverSocket = new ServerSocket();
             serverSocket.setReuseAddress(true);
-            serverSocket.bind(new java.net.InetSocketAddress(requestedPort), ACCEPT_BACKLOG);
+            // Bind once to the wildcard, not to the address currently shown in
+            // the UI. A wildcard listener covers every present and future local
+            // interface, so a VPN established after VNC starts is included
+            // without dropping clients for a rebind.
+            serverSocket.bind(
+                    new InetSocketAddress((InetAddress) null, requestedPort), ACCEPT_BACKLOG);
+            InetAddress boundAddress = serverSocket.getInetAddress();
+            if (boundAddress == null || !boundAddress.isAnyLocalAddress()) {
+                throw new IOException("listener did not bind to all interfaces");
+            }
         } catch (IOException e) {
             listener.onFailed("Could not listen on port " + requestedPort + ": " + e.getMessage());
             closeServerSocket();
@@ -88,8 +111,10 @@ final class VncServer implements VncSession.Listener {
             }
         }, "SystemManagerVncAccept");
         acceptThread.start();
-        listener.onListening(localAddress(), port);
-        LogStore.append(context, "vnc", "Listening on " + localAddress() + ":" + port);
+        String preferredAddress = localAddress();
+        listener.onListening(preferredAddress, port);
+        LogStore.append(context, "vnc", "Wildcard listener active on all interfaces port="
+                + port + " preferred=" + (preferredAddress.isEmpty() ? "none" : preferredAddress));
         return true;
     }
 
@@ -322,7 +347,16 @@ final class VncServer implements VncSession.Listener {
 
     /** Best guess at the address a client should point at, for the panel. */
     static String localAddress() {
-        String fallback = "";
+        return readLocalAddresses().preferred();
+    }
+
+    /** Current IPv4 address on Android's VPN/TUN interface, if visible. */
+    static String vpnAddress() {
+        return readLocalAddresses().vpn;
+    }
+
+    private static LocalAddresses readLocalAddresses() {
+        LocalAddresses result = new LocalAddresses();
         try {
             List<NetworkInterface> interfaces =
                     Collections.list(NetworkInterface.getNetworkInterfaces());
@@ -336,17 +370,24 @@ final class VncServer implements VncSession.Listener {
                         continue;
                     }
                     String name = networkInterface.getName();
-                    if (name != null && name.startsWith("wlan")) {
-                        return address.getHostAddress();
+                    if (isVpnInterface(name) && result.vpn.isEmpty()) {
+                        result.vpn = address.getHostAddress();
+                    } else if (name != null && name.startsWith("wlan") && result.wifi.isEmpty()) {
+                        result.wifi = address.getHostAddress();
                     }
-                    if (fallback.isEmpty()) {
-                        fallback = address.getHostAddress();
+                    if (result.fallback.isEmpty()) {
+                        result.fallback = address.getHostAddress();
                     }
                 }
             }
         } catch (SocketException ignored) {
         }
-        return fallback;
+        return result;
+    }
+
+    private static boolean isVpnInterface(String name) {
+        return name != null
+                && (name.startsWith("tun") || name.startsWith("tap") || name.startsWith("ppp"));
     }
 
     private void closeServerSocket() {

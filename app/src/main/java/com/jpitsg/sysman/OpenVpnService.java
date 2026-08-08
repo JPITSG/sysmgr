@@ -19,8 +19,10 @@ import android.system.OsConstants;
 
 import java.io.FileDescriptor;
 import java.io.File;
-import java.util.ArrayList;
+import java.net.InetAddress;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * VpnService that runs the embedded openvpn binary, drives it over the
@@ -407,34 +409,24 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
             }
         }
 
-        boolean anyRoute = false;
+        Set<String> installedRoutes = new HashSet<>();
+        // A wildcard server socket already accepts packets addressed to the VPN
+        // interface. Always install the interface's connected route as well so
+        // replies to a VPN-side client return through the tunnel even when the
+        // server also pushed unrelated routes (for example, a remote LAN).
+        addInterfaceRoutes(builder, installedRoutes, config, ip4, prefix);
+
         for (VpnTunConfig.Route4 r : config.routes4) {
             int net = TapBridge.parseIp(r.network) & TapBridge.parseIp(r.netmask);
             int rprefix = maskToPrefix(TapBridge.parseIp(r.netmask));
-            try {
-                builder.addRoute(TapBridge.ipToString(net), rprefix);
-                anyRoute = true;
-            } catch (RuntimeException e) {
-                LogStore.append(this, "vpn", "skipped invalid route " + r.network + "/" + rprefix);
-            }
+            addVpnRoute(builder, installedRoutes,
+                    TapBridge.ipToString(net), rprefix, r.network + "/" + rprefix);
         }
         for (VpnTunConfig.Route6 r : config.routes6) {
             String[] p = r.destination.split("/");
             if (p.length == 2) {
-                try {
-                    builder.addRoute(p[0], parseIntSafe(p[1], 128));
-                    anyRoute = true;
-                } catch (RuntimeException ignored) {
-                }
-            }
-        }
-        if (!anyRoute && !"net30".equals(config.topology) && !"p2p".equals(config.topology)) {
-            // No pushed routes: route the assigned subnet. Skipped for net30/p2p
-            // where "netmask" is actually the peer address, not a mask.
-            int mask = TapBridge.parseIp(netmask);
-            if (mask != 0) {
-                int net = TapBridge.parseIp(ip4) & mask;
-                builder.addRoute(TapBridge.ipToString(net), maskToPrefix(mask));
+                addVpnRoute(builder, installedRoutes,
+                        p[0], parseIntSafe(p[1], 128), r.destination);
             }
         }
 
@@ -630,6 +622,72 @@ public final class OpenVpnService extends VpnService implements OpenVpnManagemen
             builder.addDnsServer(dns);
         } catch (RuntimeException e) {
             LogStore.append(this, "vpn", "skipped invalid DNS " + dns);
+        }
+    }
+
+    private void addInterfaceRoutes(VpnService.Builder builder, Set<String> installedRoutes,
+                                    VpnTunConfig config, String ip4, int prefix4) {
+        int local = TapBridge.parseIp(ip4);
+        if ("p2p".equals(config.topology)) {
+            // In p2p topology OpenVPN reports the peer in the IFCONFIG
+            // "netmask" position. The local address is /32, so the peer needs
+            // its own host route for replies to enter the tunnel.
+            int peer = TapBridge.parseIp(config.netmask4);
+            if (peer != 0) {
+                addVpnRoute(builder, installedRoutes,
+                        TapBridge.ipToString(peer), 32, "VPN peer");
+            }
+        } else if (local != 0) {
+            // subnet and net30 both have a real connected prefix. For net30 the
+            // prefix is fixed at /30 by prefixFor(), regardless of the peer
+            // address carried in netmask4.
+            int mask = prefix4 == 0 ? 0 : (int) (0xFFFFFFFFL << (32 - prefix4));
+            addVpnRoute(builder, installedRoutes,
+                    TapBridge.ipToString(local & mask), prefix4, "VPN interface subnet");
+        }
+
+        if (config.ip6 != null && !config.ip6.isEmpty()) {
+            addIpv6InterfaceRoute(builder, installedRoutes, config.ip6);
+        }
+    }
+
+    private void addIpv6InterfaceRoute(VpnService.Builder builder, Set<String> installedRoutes,
+                                       String addressWithPrefix) {
+        String[] parts = addressWithPrefix.split("/");
+        if (parts.length != 2) {
+            return;
+        }
+        int prefix = parseIntSafe(parts[1], -1);
+        if (prefix < 0 || prefix > 128) {
+            return;
+        }
+        try {
+            byte[] network = InetAddress.getByName(parts[0]).getAddress();
+            if (network.length != 16) {
+                return;
+            }
+            for (int bit = prefix; bit < 128; bit++) {
+                network[bit / 8] &= (byte) ~(1 << (7 - (bit % 8)));
+            }
+            addVpnRoute(builder, installedRoutes,
+                    InetAddress.getByAddress(network).getHostAddress(), prefix,
+                    "VPN IPv6 interface subnet");
+        } catch (Exception e) {
+            LogStore.append(this, "vpn", "skipped invalid interface route "
+                    + addressWithPrefix);
+        }
+    }
+
+    private void addVpnRoute(VpnService.Builder builder, Set<String> installedRoutes,
+                             String address, int prefix, String label) {
+        String key = address + "/" + prefix;
+        if (!installedRoutes.add(key)) {
+            return;
+        }
+        try {
+            builder.addRoute(address, prefix);
+        } catch (RuntimeException e) {
+            LogStore.append(this, "vpn", "skipped invalid route " + label);
         }
     }
 
