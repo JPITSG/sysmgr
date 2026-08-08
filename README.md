@@ -171,6 +171,12 @@ the daemon appends each backed-up notification as one JSON object per line
 (JSON Lines) to that file, created `0600`. Point it outside the repository. The
 file only grows — rotate or prune it yourself if needed.
 
+Optional state-file outputs for automation are enabled with `--statefile`,
+`--statefilevpn`, and `--statefilevnc`. The first contains `Online` or `Offline`.
+The VPN and VNC files contain `Disabled`, `Disconnected`, or `Connected`, based
+on the latest heartbeat; both are forced to `Disabled` whenever the Remote Link
+is not established.
+
 Push a command to the phone from the server by writing to the control socket,
 for example:
 

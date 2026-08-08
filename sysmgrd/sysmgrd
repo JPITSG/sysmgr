@@ -50,7 +50,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.bindip || !args.bindport || !args.log || !args.users) {
-  console.error('usage: sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--statefile=<path>]');
+  console.error('usage: sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--statefile=<path>] [--statefilevpn=<path>] [--statefilevnc=<path>]');
   process.exit(2);
 }
 
@@ -70,13 +70,16 @@ if (users.size === 0) {
 }
 const gpsMysql = parseGpsMysqlConfig(args);
 const notificationStore = createNotificationStore(args);
-// Optional --statefile: mirrors the remote link status to a file for openHAB to
-// read. Empty disables the feature entirely.
-const stateFilePath = args.statefile ? String(args.statefile) : '';
-if (stateFilePath) {
-  fs.mkdirSync(path.dirname(stateFilePath), {recursive: true});
+// Optional state files mirror the link and service statuses for openHAB. Empty
+// paths disable their respective outputs.
+const remoteLinkStateFile = {path: args.statefile ? String(args.statefile) : '', last: ''};
+const vpnStateFile = {path: args.statefilevpn ? String(args.statefilevpn) : '', last: ''};
+const vncStateFile = {path: args.statefilevnc ? String(args.statefilevnc) : '', last: ''};
+for (const target of [remoteLinkStateFile, vpnStateFile, vncStateFile]) {
+  if (target.path) {
+    fs.mkdirSync(path.dirname(target.path), {recursive: true});
+  }
 }
-let lastRemoteLinkState = '';
 let nextConnectionId = 1;
 let certDir = null;
 const clients = new Map();
@@ -97,33 +100,53 @@ function pad(value, width) {
   return String(value).padStart(width, '0');
 }
 
-// Remote link status for openHAB. Written synchronously, and via temp+rename so
-// a reader never catches a half-written file. Every teardown path feeds this --
-// client close, daemon signal, crash handler -- so the file is never left
-// claiming Online once the link is gone. A SIGKILL is the one case it cannot
-// cover; daemon startup rewrites the file to correct exactly that.
-function writeRemoteLinkState(state) {
-  if (!stateFilePath || state === lastRemoteLinkState) {
+// Status files are written synchronously and via temp+rename so a reader never
+// catches a half-written value. Every teardown path feeds this; startup repairs
+// the one case it cannot cover, a SIGKILL that prevented final writes.
+function writeStateFile(target, label, state) {
+  if (!target.path || state === target.last) {
     return;
   }
-  const tempPath = `${stateFilePath}.tmp`;
+  const tempPath = `${target.path}.tmp`;
   try {
     fs.writeFileSync(tempPath, state);
-    fs.renameSync(tempPath, stateFilePath);
-    lastRemoteLinkState = state;
-    log(`remote link state written state=${state} path=${stateFilePath}`);
+    fs.renameSync(tempPath, target.path);
+    target.last = state;
+    log(`${label} state written state=${state} path=${target.path}`);
   } catch (err) {
     try {
       fs.unlinkSync(tempPath);
     } catch (cleanupErr) {
       // Ignore: the temp file may never have been created.
     }
-    log(`remote link state write failed path=${stateFilePath} error=${err.message}`);
+    log(`${label} state write failed path=${target.path} error=${err.message}`);
   }
 }
 
-function syncRemoteLinkState() {
-  writeRemoteLinkState(activeClients().length > 0 ? 'Online' : 'Offline');
+function featureState(clients, enabledField, connectedField) {
+  if (clients.length === 0) {
+    return 'Disabled';
+  }
+  if (clients.some((client) => client[enabledField] === true && client[connectedField] === true)) {
+    return 'Connected';
+  }
+  if (clients.some((client) => client[enabledField] === true)) {
+    return 'Disconnected';
+  }
+  return 'Disabled';
+}
+
+function syncStateFiles() {
+  const connectedClients = activeClients();
+  writeStateFile(remoteLinkStateFile, 'remote link', connectedClients.length > 0 ? 'Online' : 'Offline');
+  writeStateFile(vpnStateFile, 'vpn', featureState(connectedClients, 'vpnEnabled', 'vpnConnected'));
+  writeStateFile(vncStateFile, 'vnc', featureState(connectedClients, 'vncEnabled', 'vncConnected'));
+}
+
+function writeDisconnectedStateFiles() {
+  writeStateFile(remoteLinkStateFile, 'remote link', 'Offline');
+  writeStateFile(vpnStateFile, 'vpn', 'Disabled');
+  writeStateFile(vncStateFile, 'vnc', 'Disabled');
 }
 
 function websocketAccept(key) {
@@ -648,6 +671,7 @@ function handleTextMessage(connectionId, socket, text) {
       ` vpn_connected=${logValue(parsed.vpn_connected)}` +
       ` vnc_enabled=${logValue(parsed.vnc_enabled)}` +
       ` vnc_connected=${logValue(parsed.vnc_connected)}`);
+    syncStateFiles();
     sendJson(socket, {type: 'heartbeat_ack', ts: Math.floor(Date.now() / 1000), notif_backup: notificationStore.enabled});
     return;
   }
@@ -868,6 +892,7 @@ function handleAck(connectionId, messageId, okValue, reasonValue, stateValue,
     if (vncEnabled !== null) client.vncEnabled = vncEnabled;
     if (vncConnected !== null) client.vncConnected = vncConnected;
   }
+  syncStateFiles();
   log(`message ${ok ? 'acked' : 'rejected'} id=${messageId} connection=${connectionId}`
     + `${state ? ` state=${logValue(state)}` : ''}`
     + `${vncEnabled !== null ? ` vnc_enabled=${vncEnabled}` : ''}`
@@ -1306,7 +1331,7 @@ server.on('upgrade', (req, socket) => {
     '\r\n'
   );
   log(`websocket connected connection=${connectionId} from=${client.from} user=${credentials.username}`);
-  syncRemoteLinkState();
+  syncStateFiles();
   sendJson(socket, {type: 'connected', connection_id: connectionId, ts: Math.floor(Date.now() / 1000)});
 
   const state = {buffer: Buffer.alloc(0)};
@@ -1339,7 +1364,7 @@ server.on('upgrade', (req, socket) => {
     }
     clients.delete(connectionId);
     // Fires for a clean close frame and for an abruptly dropped socket alike.
-    syncRemoteLinkState();
+    syncStateFiles();
   });
   socket.on('error', (err) => log(`websocket error connection=${connectionId} error=${err.message}`));
 });
@@ -1355,9 +1380,9 @@ tcpServer.on('error', (err) => {
   process.exitCode = 1;
 });
 tcpServer.listen(bindPort, bindIp, () => {
-  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'} statefile=${stateFilePath || 'disabled'}`);
-  // No clients yet, so this also clears a stale Online left by a hard kill.
-  syncRemoteLinkState();
+  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'} statefile=${remoteLinkStateFile.path || 'disabled'} statefilevpn=${vpnStateFile.path || 'disabled'} statefilevnc=${vncStateFile.path || 'disabled'}`);
+  // No clients yet, so this also clears stale values left by a hard kill.
+  syncStateFiles();
 });
 
 function parseControlMessage(text) {
@@ -1520,7 +1545,7 @@ const controlServer = startControlSocket();
 
 function shutdown(signal) {
   log(`daemon shutdown signal=${signal}`);
-  writeRemoteLinkState('Offline');
+  writeDisconnectedStateFiles();
   cleanupCertificate();
   cleanupControlSocket();
   controlServer.close();
@@ -1570,14 +1595,14 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 process.on('uncaughtException', (err) => {
   log(`uncaught exception ${err && err.stack ? err.stack : err}`);
-  writeRemoteLinkState('Offline');
+  writeDisconnectedStateFiles();
   cleanupCertificate();
   cleanupControlSocket();
   process.exit(1);
 });
 process.on('unhandledRejection', (err) => {
   log(`unhandled rejection ${err && err.stack ? err.stack : err}`);
-  writeRemoteLinkState('Offline');
+  writeDisconnectedStateFiles();
   cleanupCertificate();
   cleanupControlSocket();
   process.exit(1);
