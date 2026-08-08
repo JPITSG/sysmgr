@@ -106,7 +106,6 @@ final class Config {
     private static final String KEY_REMOTE_LINK_PASSWORD = "remote_link_password";
     private static final String KEY_REMOTE_LINK_HEARTBEAT_SECONDS = "remote_link_heartbeat_seconds";
     private static final String KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT = "remote_link_accept_any_ssl_cert";
-    private static final String KEY_REMOTE_LINK_SHOW_NOTIFICATION = "remote_link_show_notification";
     private static final String KEY_SETTINGS_LAST_EXPORT_MILLIS = "settings_last_export_millis";
     private static final String KEY_VPN_USERNAME = "vpn_username";
     private static final String KEY_VPN_PASSWORD = "vpn_password";
@@ -123,9 +122,6 @@ final class Config {
     private static final String KEY_BEACON_TX_POWER_DBM = "beacon_tx_power_dbm";
     private static final String KEY_BEACON_RULES = "beacon_rules";
     private static final String KEY_BEACON_RULES_SEEDED = "beacon_rules_seeded";
-    private static final String KEY_TASK_SERVICE_NOTIFICATION = "task_service_notification";
-    private static final String KEY_VPN_NOTIFICATION = "vpn_notification";
-    private static final String KEY_BEACON_NOTIFICATION = "beacon_notification";
     // The VNC password is deliberately absent: it lives in VncSecretStore's own
     // preferences file so the settings export never sees it and the settings
     // import never clears it.
@@ -151,8 +147,6 @@ final class Config {
     private static final String KEY_VNC_MAX_FPS = "vnc_max_fps";
     private static final String KEY_VNC_WAKE_ON_CONNECT = "vnc_wake_on_connect";
     private static final String KEY_VNC_IDLE_TIMEOUT_MINUTES = "vnc_idle_timeout_minutes";
-    private static final String KEY_VNC_SHOW_LISTENING_NOTIFICATION =
-            "vnc_show_listening_notification";
 
     private static final Object BEACON_UUID_LOCK = new Object();
 
@@ -710,10 +704,6 @@ final class Config {
         return prefs.getBoolean(KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT, false);
     }
 
-    boolean remoteLinkShowNotification() {
-        return prefs.getBoolean(KEY_REMOTE_LINK_SHOW_NOTIFICATION, false);
-    }
-
     int remoteLinkReconnectSeconds() {
         return 60;
     }
@@ -820,10 +810,6 @@ final class Config {
         return intValue(KEY_VNC_IDLE_TIMEOUT_MINUTES, 30, 0, 1440);
     }
 
-    boolean vncShowListeningNotification() {
-        return prefs.getBoolean(KEY_VNC_SHOW_LISTENING_NOTIFICATION, true);
-    }
-
     void saveVncConfig(
             boolean enabled,
             boolean remoteCommandEnabled,
@@ -838,8 +824,7 @@ final class Config {
             int scalePercent,
             String maxFps,
             boolean wakeOnConnect,
-            String idleTimeoutMinutes,
-            boolean showListeningNotification) {
+            String idleTimeoutMinutes) {
         prefs.edit()
                 .putBoolean(KEY_VNC_ENABLED, enabled)
                 .putBoolean(KEY_VNC_REMOTE_COMMAND_ENABLED, remoteCommandEnabled)
@@ -859,7 +844,6 @@ final class Config {
                 .putInt(KEY_VNC_MAX_FPS, parseInt(maxFps, 3, 1, 60))
                 .putBoolean(KEY_VNC_WAKE_ON_CONNECT, wakeOnConnect)
                 .putInt(KEY_VNC_IDLE_TIMEOUT_MINUTES, parseInt(idleTimeoutMinutes, 30, 0, 1440))
-                .putBoolean(KEY_VNC_SHOW_LISTENING_NOTIFICATION, showListeningNotification)
                 .apply();
     }
 
@@ -867,31 +851,12 @@ final class Config {
         return VNC_ENGINE_PROJECTION.equals(engine) ? "Screen Capture" : "Accessibility";
     }
 
-    // ---- Foreground service notifications -----------------------------------
+    // ---- Wi-Fi monitor notification -----------------------------------------
 
-    // Default on: these have always been visible, so hiding one stays a
-    // deliberate choice rather than something an update does silently. The
-    // Remote Link and Wi-Fi monitor keep their own older keys.
-
-    boolean taskServiceNotificationEnabled() {
-        return prefs.getBoolean(KEY_TASK_SERVICE_NOTIFICATION, true);
-    }
-
-    boolean vpnNotificationEnabled() {
-        return prefs.getBoolean(KEY_VPN_NOTIFICATION, true);
-    }
-
-    boolean beaconNotificationEnabled() {
-        return prefs.getBoolean(KEY_BEACON_NOTIFICATION, true);
-    }
-
-    void saveServiceNotificationConfig(boolean taskService, boolean vpn, boolean beacon) {
-        prefs.edit()
-                .putBoolean(KEY_TASK_SERVICE_NOTIFICATION, taskService)
-                .putBoolean(KEY_VPN_NOTIFICATION, vpn)
-                .putBoolean(KEY_BEACON_NOTIFICATION, beacon)
-                .apply();
-    }
+    // The only notification switch left in the app: unlike the per-service
+    // channels (which Android's own notification settings show or hide), this
+    // one changes how monitoring runs — visible foreground service when on,
+    // the Accessibility service's hidden path when off.
 
     void saveWifiMonitorNotificationConfig(boolean showNotification) {
         prefs.edit()
@@ -1334,8 +1299,7 @@ final class Config {
             String username,
             String password,
             String heartbeatSeconds,
-            boolean acceptAnySslCert,
-            boolean showNotification) {
+            boolean acceptAnySslCert) {
         prefs.edit()
                 .putBoolean(KEY_REMOTE_LINK_ENABLED, enabled)
                 .putString(KEY_REMOTE_LINK_ENDPOINT, clean(endpoint, "https://server:1234"))
@@ -1343,7 +1307,6 @@ final class Config {
                 .putString(KEY_REMOTE_LINK_PASSWORD, clean(password, ""))
                 .putInt(KEY_REMOTE_LINK_HEARTBEAT_SECONDS, parseInt(heartbeatSeconds, 60, 10, 3600))
                 .putBoolean(KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT, acceptAnySslCert)
-                .putBoolean(KEY_REMOTE_LINK_SHOW_NOTIFICATION, showNotification)
                 .apply();
     }
 
@@ -1351,12 +1314,6 @@ final class Config {
         prefs.edit()
                 .putBoolean(KEY_REMOTE_LINK_ENABLED, enabled)
                 .putBoolean(KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT, acceptAnySslCert)
-                .apply();
-    }
-
-    void saveRemoteLinkNotificationConfig(boolean showNotification) {
-        prefs.edit()
-                .putBoolean(KEY_REMOTE_LINK_SHOW_NOTIFICATION, showNotification)
                 .apply();
     }
 

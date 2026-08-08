@@ -20,15 +20,12 @@ public final class SystemTaskService extends Service {
     private static final String EXTRA_RESCHEDULE = "reschedule";
     private static final String CHANNEL_ID = "system_manager_task_service";
     private static final int NOTIFICATION_ID = 0x5301;
-    private static volatile SystemTaskService activeService;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile boolean stopping;
     private ExecutorService executor;
     private String activeTaskId = TaskIds.GPS_POST;
     private String activeReason = "unknown";
-    /** Re-resolved before every foreground start, so the toggle applies at once. */
-    private String channelId = CHANNEL_ID;
 
     static void startTask(Context context, String taskId, String reason, boolean reschedule) {
         Context app = context.getApplicationContext();
@@ -43,18 +40,9 @@ public final class SystemTaskService extends Service {
         }
     }
 
-    /** Moves a running task's foreground notification to the newly selected channel. */
-    static void refreshNotification() {
-        SystemTaskService service = activeService;
-        if (service != null && service.running.get() && !service.stopping) {
-            service.startForegroundForTask(service.activeTaskId, service.activeReason);
-        }
-    }
-
     @Override
     public void onCreate() {
         super.onCreate();
-        activeService = this;
         executor = Executors.newSingleThreadExecutor();
         ensureNotificationChannel();
     }
@@ -102,9 +90,6 @@ public final class SystemTaskService extends Service {
     public void onDestroy() {
         running.set(false);
         stopping = true;
-        if (activeService == this) {
-            activeService = null;
-        }
         if (executor != null) {
             executor.shutdownNow();
         }
@@ -147,17 +132,15 @@ public final class SystemTaskService extends Service {
     private void startForegroundForTask(String taskId, String reason) {
         activeTaskId = taskId;
         activeReason = reason;
-        boolean shown = ServiceNotifications.shown(this, ServiceNotifications.TASK_RUNNER);
         ensureNotificationChannel();
-        Notification.Builder builder = new Notification.Builder(this, channelId)
+        Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_system_manager)
                 .setContentTitle("System Manager")
                 .setContentText("Running " + taskId + " (" + reason + ")")
                 .setCategory(Notification.CATEGORY_SERVICE)
                 .setOngoing(true)
-                .setShowWhen(false);
-        ServiceNotifications.applyBehavior(builder, shown);
-        Notification notification = builder.build();
+                .setShowWhen(false)
+                .build();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
         } else {
@@ -166,12 +149,11 @@ public final class SystemTaskService extends Service {
     }
 
     private void ensureNotificationChannel() {
-        channelId = ServiceNotifications.channel(
+        ServiceNotifications.ensureChannel(
                 this,
                 CHANNEL_ID,
                 "System task runner",
                 "Short-lived service notification for System Manager background tasks.",
-                NotificationManager.IMPORTANCE_MIN,
-                ServiceNotifications.shown(this, ServiceNotifications.TASK_RUNNER));
+                NotificationManager.IMPORTANCE_MIN);
     }
 }

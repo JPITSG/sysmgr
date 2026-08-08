@@ -329,10 +329,6 @@ public final class MainActivity extends Activity {
     private Switch rebootOnlyWhenWifiNotMatchingSwitch;
     private Switch remoteLinkEnabledSwitch;
     private Switch remoteLinkAcceptAnySslCertSwitch;
-    private Switch remoteLinkShowNotificationSwitch;
-    private Switch taskServiceNotificationSwitch;
-    private Switch vpnNotificationSwitch;
-    private Switch beaconNotificationSwitch;
     private Switch beaconEnabledSwitch;
     private Switch vncEnabledSwitch;
     private Switch vncRemoteCommandEnabledSwitch;
@@ -341,7 +337,6 @@ public final class MainActivity extends Activity {
     private Switch vncEnabledWhenVpnConnectedSwitch;
     private Switch vncEnabledOnCellularOnlySwitch;
     private Switch vncWakeOnConnectSwitch;
-    private Switch vncShowListeningNotificationSwitch;
     private Switch logEnabledSwitch;
     private Switch clearNotificationsOnOpenSwitch;
     private Switch notificationBackupEnabledSwitch;
@@ -524,6 +519,7 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setTitle("System Manager");
         configureSystemBars();
+        ServiceNotifications.deleteLegacyHiddenChannels(this);
         buildUi();
         loadConfigIntoFields();
         wireLiveSettings();
@@ -848,8 +844,7 @@ public final class MainActivity extends Activity {
         allowIdleAlarmsSwitch = addGroupedToggle(group, "Allow GPS, volume, and reboot alarms while idle");
         postOnStartupSwitch = addGroupedToggle(group, "Send once after boot");
         postOnWifiChangeSwitch = addGroupedToggle(group, "Send when Wi-Fi changes");
-        // The Wi-Fi monitor's own notification toggle lives with the other
-        // service notifications, under Permissions.
+        // The Wi-Fi monitor's own notification toggle lives under Permissions.
     }
 
     private void buildHighPriorityPanel(LinearLayout root) {
@@ -1068,15 +1063,6 @@ public final class MainActivity extends Activity {
                 "The display stays awake while a VNC client is connected.",
                 11, COLOR_TEXT_FAINT, false);
         frame.content.addView(awakeNote, stack(frame.content));
-
-        addSubsectionLabel(frame.content, "Notifications");
-        LinearLayout notificationGroup = addToggleGroup(frame.content);
-        vncShowListeningNotificationSwitch = addGroupedToggle(notificationGroup,
-                "Show the “Listening on…” notification");
-        TextView notificationNote = historyText(
-                "A connected client is always shown, with an action to disconnect it.",
-                11, COLOR_TEXT_FAINT, false);
-        frame.content.addView(notificationNote, stack(frame.content));
 
         addSubsectionLabel(frame.content, "Remote Control");
         LinearLayout remoteGroup = addToggleGroup(frame.content);
@@ -1459,15 +1445,21 @@ public final class MainActivity extends Activity {
 
         addSubsectionLabel(frame.content, "Service Notifications");
         LinearLayout serviceNotifications = addToggleGroup(frame.content);
-        taskServiceNotificationSwitch = addGroupedToggle(serviceNotifications, "Task runner");
         showWifiMonitorNotificationSwitch = addGroupedToggle(serviceNotifications, "Wi-Fi monitor");
-        remoteLinkShowNotificationSwitch = addGroupedToggle(serviceNotifications, "Remote Link");
-        vpnNotificationSwitch = addGroupedToggle(serviceNotifications, "VPN");
-        beaconNotificationSwitch = addGroupedToggle(serviceNotifications, "Beacon");
 
         wifiMonitorWarning = historyText("", 12, COLOR_BAD, false);
         wifiMonitorWarning.setVisibility(View.GONE);
         frame.content.addView(wifiMonitorWarning, stack(frame.content));
+
+        TextView serviceNotificationNote = historyText(
+                "Other service notifications are shown or hidden per channel in "
+                        + "Android's notification settings.",
+                11, COLOR_TEXT_FAINT, false);
+        frame.content.addView(serviceNotificationNote, stack(frame.content));
+
+        LinearLayout r7 = newRow();
+        frame.content.addView(r7, stack(frame.content));
+        addRowButton(r7, tonalButton("Notification Settings", action("notification_settings")));
     }
 
     private void buildLogPanel(LinearLayout root) {
@@ -2911,8 +2903,7 @@ public final class MainActivity extends Activity {
                 vncScalePercent,
                 text(vncMaxFpsField),
                 vncWakeOnConnectSwitch.isChecked(),
-                text(vncIdleTimeoutField),
-                vncShowListeningNotificationSwitch.isChecked());
+                text(vncIdleTimeoutField));
         VncSecretStore.setPassword(this, text(vncPasswordField));
         VncManager.sync(this, "settings-live");
         refreshStatusAndLog();
@@ -4501,7 +4492,6 @@ public final class MainActivity extends Activity {
             remoteLinkPasswordField.setText(config.remoteLinkPassword());
             remoteLinkHeartbeatSecondsField.setText(Integer.toString(config.remoteLinkHeartbeatSeconds()));
             remoteLinkAcceptAnySslCertSwitch.setChecked(config.remoteLinkAcceptAnySslCert());
-            remoteLinkShowNotificationSwitch.setChecked(config.remoteLinkShowNotification());
             vpnUsernameField.setText(config.vpnUsername());
             vpnPasswordField.setText(config.vpnPassword());
             vpnKeyPassphraseField.setText(config.vpnKeyPassphrase());
@@ -4526,7 +4516,6 @@ public final class MainActivity extends Activity {
             vncMaxFpsField.setText(Integer.toString(config.vncMaxFps()));
             vncIdleTimeoutField.setText(Integer.toString(config.vncIdleTimeoutMinutes()));
             vncWakeOnConnectSwitch.setChecked(config.vncWakeOnConnect());
-            vncShowListeningNotificationSwitch.setChecked(config.vncShowListeningNotification());
             beaconEnabledSwitch.setChecked(config.beaconEnabled());
             beaconUuidValue.setText(config.beaconUuid().toString());
             beaconMajorField.setText(Integer.toString(config.beaconMajor()));
@@ -4539,9 +4528,6 @@ public final class MainActivity extends Activity {
             postOnStartupSwitch.setChecked(config.postOnStartup());
             postOnWifiChangeSwitch.setChecked(config.postOnWifiChange());
             showWifiMonitorNotificationSwitch.setChecked(config.showWifiMonitorNotification());
-            taskServiceNotificationSwitch.setChecked(config.taskServiceNotificationEnabled());
-            vpnNotificationSwitch.setChecked(config.vpnNotificationEnabled());
-            beaconNotificationSwitch.setChecked(config.beaconNotificationEnabled());
             useGpsProviderSwitch.setChecked(config.useGpsProvider());
             useNetworkProviderSwitch.setChecked(config.useNetworkProvider());
             requestGpsOnSsidMismatchSwitch.setChecked(config.requestGpsOnSsidMismatch());
@@ -4578,15 +4564,6 @@ public final class MainActivity extends Activity {
                 requestGpsOnSsidMismatchSwitch, useFallbackOnSsidMatchSwitch,
                 useCachedBeforeFreshSwitch, includeExtendedFieldsSwitch,
                 caseSensitiveSsidSwitch, gpsUseRemoteLinkSwitch);
-
-        final LiveSaveGroup serviceNotifications = liveSaveGroup(new LiveSaveAction() {
-            @Override
-            public boolean save() {
-                return saveServiceNotificationConfigOnly();
-            }
-        });
-        bindLiveToggles(serviceNotifications,
-                taskServiceNotificationSwitch, vpnNotificationSwitch, beaconNotificationSwitch);
 
         final LiveSaveGroup wifiMonitorNotification = liveSaveGroup(new LiveSaveAction() {
             @Override
@@ -4680,18 +4657,6 @@ public final class MainActivity extends Activity {
         },
                 remoteLinkEnabledSwitch, remoteLinkAcceptAnySslCertSwitch);
 
-        final LiveSaveGroup remoteLinkNotification = liveSaveGroup(new LiveSaveAction() {
-            @Override
-            public boolean save() {
-                Config.get(MainActivity.this).saveRemoteLinkNotificationConfig(
-                        remoteLinkShowNotificationSwitch.isChecked());
-                RemoteLinkManager.sync(MainActivity.this, "remote-link-notification-live");
-                refreshStatusAndLog();
-                return true;
-            }
-        });
-        bindLiveToggles(remoteLinkNotification, remoteLinkShowNotificationSwitch);
-
         vpnSettingsSave = liveSaveGroup(new LiveSaveAction() {
             @Override
             public boolean save() {
@@ -4727,8 +4692,7 @@ public final class MainActivity extends Activity {
         }, vncEnabledSwitch);
         bindLiveToggles(vncSettingsSave, vncViewOnlySwitch, vncEnabledOnMatchingWifiSwitch,
                 vncEnabledWhenVpnConnectedSwitch, vncEnabledOnCellularOnlySwitch,
-                vncWakeOnConnectSwitch,
-                vncShowListeningNotificationSwitch);
+                vncWakeOnConnectSwitch);
 
         final LiveSaveGroup vncRemoteControl = liveSaveGroup(new LiveSaveAction() {
             @Override
@@ -5076,26 +5040,6 @@ public final class MainActivity extends Activity {
                 getApplicationContext(), "Check " + label, Toast.LENGTH_SHORT);
         settingsFeedbackToast.show();
         return false;
-    }
-
-    /**
-     * Saves the visibility choices and nudges each running service so it
-     * re-posts on the right channel straight away.
-     */
-    private boolean saveServiceNotificationConfigOnly() {
-        Config.get(this).saveServiceNotificationConfig(
-                taskServiceNotificationSwitch.isChecked(),
-                vpnNotificationSwitch.isChecked(),
-                beaconNotificationSwitch.isChecked());
-        SystemTaskService.refreshNotification();
-        BeaconManager.sync(this, "service-notifications");
-        OpenVpnService.refreshNotification(this);
-        LogStore.append(this, "ui", "Service notification visibility saved"
-                + " task=" + taskServiceNotificationSwitch.isChecked()
-                + " vpn=" + vpnNotificationSwitch.isChecked()
-                + " beacon=" + beaconNotificationSwitch.isChecked());
-        refreshStatusAndLog();
-        return true;
     }
 
     private boolean saveNotificationBackupConfigOnly() {
@@ -5561,6 +5505,12 @@ public final class MainActivity extends Activity {
         openIntent(intent);
     }
 
+    private void openAppNotificationSettings() {
+        Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+        intent.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+        openIntent(intent);
+    }
+
     private void openLocationSettings() {
         openIntent(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
     }
@@ -5629,8 +5579,7 @@ public final class MainActivity extends Activity {
                 text(remoteLinkUsernameField),
                 text(remoteLinkPasswordField),
                 text(remoteLinkHeartbeatSecondsField),
-                remoteLinkAcceptAnySslCertSwitch.isChecked(),
-                remoteLinkShowNotificationSwitch.isChecked());
+                remoteLinkAcceptAnySslCertSwitch.isChecked());
         LogStore.append(this, "ui", "Remote Link configuration saved");
         return true;
     }
@@ -5831,8 +5780,6 @@ public final class MainActivity extends Activity {
         RebootManager.sync(this, "settings-import");
         RemoteLinkManager.restart(this, "settings-import");
         BeaconManager.refresh(this, "settings-import");
-        SystemTaskService.refreshNotification();
-        OpenVpnService.refreshNotification(this);
         // VPN prefs round-trip through Settings XML; profile files do not, so
         // the pill stays DISABLED until a profile is re-imported.
         OpenVpnManager.sync(this, "settings-import");
@@ -5978,6 +5925,8 @@ public final class MainActivity extends Activity {
                     openLocationSettings();
                 } else if ("notification_access".equals(command)) {
                     openNotificationListenerSettings();
+                } else if ("notification_settings".equals(command)) {
+                    openAppNotificationSettings();
                 } else if ("dnd_access".equals(command)) {
                     openDndAccessSettings();
                 } else if ("accessibility_settings".equals(command)) {

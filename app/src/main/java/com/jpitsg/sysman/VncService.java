@@ -89,7 +89,6 @@ public final class VncService extends Service
     private VncNetworkWatcher watcher;
     private VncServer server;
     private ExecutorService evaluationExecutor;
-    private String listeningChannelId = LISTENING_CHANNEL_ID;
     private BroadcastReceiver vpnInterfaceReceiver;
     private String vpnInterfaceSignature = "";
 
@@ -601,7 +600,7 @@ public final class VncService extends Service
 
         String channelId = CHANNEL_ID;
         if (VncStateStore.STATE_LISTENING.equals(state)) {
-            channelId = listeningChannelId;
+            channelId = LISTENING_CHANNEL_ID;
         } else if (VncStateStore.STATE_CONNECTED.equals(state)) {
             channelId = CONNECTED_CHANNEL_ID;
         }
@@ -618,9 +617,6 @@ public final class VncService extends Service
                 .setShowWhen(false)
                 .setOnlyAlertOnce(true)
                 .setLocalOnly(true);
-        boolean listeningShown = !VncStateStore.STATE_LISTENING.equals(state)
-                || Config.get(this).vncShowListeningNotification();
-        ServiceNotifications.applyBehavior(builder, listeningShown);
         if (VncStateStore.STATE_CONNECTED.equals(state)) {
             Intent disconnect = new Intent(this, VncService.class)
                     .setAction(ACTION_DISCONNECT)
@@ -655,13 +651,12 @@ public final class VncService extends Service
     }
 
     private void ensureNotificationChannels() {
-        listeningChannelId = ServiceNotifications.channel(
+        ServiceNotifications.ensureChannel(
                 this,
                 LISTENING_CHANNEL_ID,
                 "VNC server listening",
                 "Shows the address while the VNC server is waiting for a client.",
-                NotificationManager.IMPORTANCE_LOW,
-                Config.get(this).vncShowListeningNotification());
+                NotificationManager.IMPORTANCE_LOW);
 
         NotificationManager manager =
                 (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);

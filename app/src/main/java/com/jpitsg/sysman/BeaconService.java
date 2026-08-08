@@ -34,9 +34,6 @@ public final class BeaconService extends Service {
 
     private static volatile boolean active;
 
-    /** Re-resolved before every foreground start, so the toggle applies at once. */
-    private String channelId = CHANNEL_ID;
-
     private BeaconAdvertiser advertiser;
     private BroadcastReceiver batteryReceiver;
     private BroadcastReceiver bluetoothReceiver;
@@ -311,8 +308,7 @@ public final class BeaconService extends Service {
         PendingIntent contentIntent = PendingIntent.getActivity(
                 this, NOTIFICATION_ID, new Intent(this, MainActivity.class), flags);
 
-        boolean shown = ServiceNotifications.shown(this, ServiceNotifications.BEACON);
-        Notification.Builder builder = new Notification.Builder(this, channelId)
+        return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_system_manager)
                 .setContentTitle("Beacon")
                 .setContentText(text)
@@ -321,18 +317,16 @@ public final class BeaconService extends Service {
                 .setOngoing(true)
                 .setShowWhen(false)
                 .setOnlyAlertOnce(true)
-                .setLocalOnly(true);
-        ServiceNotifications.applyBehavior(builder, shown);
-        return builder.build();
+                .setLocalOnly(true)
+                .build();
     }
 
     private void resolveChannel() {
-        channelId = ServiceNotifications.channel(
+        ServiceNotifications.ensureChannel(
                 this,
                 CHANNEL_ID,
                 "Beacon",
                 "Keeps the System Manager BLE beacon broadcasting.",
-                NotificationManager.IMPORTANCE_MIN,
-                ServiceNotifications.shown(this, ServiceNotifications.BEACON));
+                NotificationManager.IMPORTANCE_MIN);
     }
 }

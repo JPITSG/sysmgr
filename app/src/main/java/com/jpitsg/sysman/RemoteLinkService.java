@@ -80,8 +80,6 @@ public final class RemoteLinkService extends Service {
     private Thread worker;
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
-    /** Re-resolved before every foreground start, so the toggle applies at once. */
-    private String channelId = CHANNEL_ID;
 
     @Override
     public void onCreate() {
@@ -898,9 +896,8 @@ public final class RemoteLinkService extends Service {
     }
 
     private void startForegroundRemoteLink() {
-        boolean shown = ServiceNotifications.shown(this, ServiceNotifications.REMOTE_LINK);
         ensureNotificationChannel();
-        Notification.Builder builder = new Notification.Builder(this, channelId)
+        Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_system_manager)
                 .setContentTitle("System Manager")
                 .setContentText("Remote Link active")
@@ -908,9 +905,8 @@ public final class RemoteLinkService extends Service {
                 .setOngoing(true)
                 .setShowWhen(false)
                 .setOnlyAlertOnce(true)
-                .setLocalOnly(true);
-        ServiceNotifications.applyBehavior(builder, shown);
-        Notification notification = builder.build();
+                .setLocalOnly(true)
+                .build();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             // Uncapped, unlike dataSync; see the manifest entry for why.
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
@@ -935,12 +931,11 @@ public final class RemoteLinkService extends Service {
     }
 
     private void ensureNotificationChannel() {
-        channelId = ServiceNotifications.channel(
+        ServiceNotifications.ensureChannel(
                 this,
                 CHANNEL_ID,
                 "Remote Link",
                 "Keeps the System Manager Remote Link connected.",
-                NotificationManager.IMPORTANCE_MIN,
-                ServiceNotifications.shown(this, ServiceNotifications.REMOTE_LINK));
+                NotificationManager.IMPORTANCE_MIN);
     }
 }

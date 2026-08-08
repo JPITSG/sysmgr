@@ -73,12 +73,12 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
   identity. Note that Android randomises the on-air Bluetooth address — match
   your receivers on the **proximity UUID**, not on a MAC.
 - **Battery alerts** and **Wi-Fi change monitoring**.
-- **Service notification control** — a switch per background service (task
-  runner, Wi-Fi monitor, Remote Link, VPN, beacon) under **Permissions**.
-  Android requires every foreground service to post a notification, so an
-  "off" row posts it on a channel the system never displays: nothing reaches
-  the shade or status bar and the service keeps running. The Wi-Fi monitor is
-  the exception — turning it off moves the monitor into the Accessibility
+- **Service notification control** — Android owns notification visibility.
+  Every foreground service posts on its own named channel (task runner,
+  Remote Link, VPN, beacon, VNC), so individual notifications are shown or
+  hidden per channel in the system's notification settings; a **Notification
+  Settings** shortcut sits under **Permissions**. The Wi-Fi monitor keeps the
+  one in-app switch — turning it off moves the monitor into the Accessibility
   service, so no notification is created at all.
 - **Settings backup/restore** to an XML file (no secrets/keys are exported).
 
