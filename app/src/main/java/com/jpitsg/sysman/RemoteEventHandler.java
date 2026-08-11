@@ -338,27 +338,6 @@ final class RemoteEventHandler {
         PendingIntent contentIntent = PendingIntent.getActivity(context, 0x5200 + Math.abs(id.hashCode() % 1000), openIntent, flags);
         int notificationId = notificationIdFor(id);
 
-        Intent deleteIntent = new Intent(context, NotificationActionReceiver.class)
-                .setAction(NotificationActionReceiver.ACTION_DELETE_NOTIFICATION)
-                .putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId)
-                .putExtra(NotificationActionReceiver.EXTRA_HISTORY_ID, historyEntry == null ? "" : historyEntry.id);
-        PendingIntent deletePendingIntent = PendingIntent.getBroadcast(
-                context,
-                0x6400 + Math.abs(id.hashCode() % 10000),
-                deleteIntent,
-                flags);
-
-        // Clear dismisses the notification from the shade but keeps it in
-        // history (nudging the user to keep notifications rather than delete).
-        Intent clearIntent = new Intent(context, NotificationActionReceiver.class)
-                .setAction(NotificationActionReceiver.ACTION_CLEAR_NOTIFICATION)
-                .putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId);
-        PendingIntent clearPendingIntent = PendingIntent.getBroadcast(
-                context,
-                0x6800 + Math.abs(id.hashCode() % 10000),
-                clearIntent,
-                flags);
-
         Bitmap picture = decodeNotificationImage(imageBase64);
         boolean hasTitle = hasText(title);
         String contentTitle = hasTitle ? cleanTitle(title) : body;
@@ -375,9 +354,33 @@ final class RemoteEventHandler {
                 .setAutoCancel(true)
                 .setShowWhen(true)
                 .setCategory(Notification.CATEGORY_MESSAGE)
-                .setPriority(Notification.PRIORITY_HIGH)
-                .addAction(R.drawable.ic_stat_system_manager, "Delete", deletePendingIntent)
-                .addAction(R.drawable.ic_stat_system_manager, "Clear", clearPendingIntent);
+                .setPriority(Notification.PRIORITY_HIGH);
+        if (Config.get(context).notificationActionButtonsEnabled()) {
+            Intent deleteIntent = new Intent(context, NotificationActionReceiver.class)
+                    .setAction(NotificationActionReceiver.ACTION_DELETE_NOTIFICATION)
+                    .putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId)
+                    .putExtra(NotificationActionReceiver.EXTRA_HISTORY_ID,
+                            historyEntry == null ? "" : historyEntry.id);
+            PendingIntent deletePendingIntent = PendingIntent.getBroadcast(
+                    context,
+                    0x6400 + Math.abs(id.hashCode() % 10000),
+                    deleteIntent,
+                    flags);
+
+            // Clear dismisses the notification from the shade but keeps it in
+            // history (nudging the user to keep notifications rather than delete).
+            Intent clearIntent = new Intent(context, NotificationActionReceiver.class)
+                    .setAction(NotificationActionReceiver.ACTION_CLEAR_NOTIFICATION)
+                    .putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId);
+            PendingIntent clearPendingIntent = PendingIntent.getBroadcast(
+                    context,
+                    0x6800 + Math.abs(id.hashCode() % 10000),
+                    clearIntent,
+                    flags);
+
+            builder.addAction(R.drawable.ic_stat_system_manager, "Delete", deletePendingIntent)
+                    .addAction(R.drawable.ic_stat_system_manager, "Clear", clearPendingIntent);
+        }
         if (picture != null) {
             Notification.BigPictureStyle style = new Notification.BigPictureStyle().bigPicture(picture);
             if (hasTitle) {

@@ -59,6 +59,8 @@ final class Config {
     private static final String KEY_LOG_MAX_LINES = "log_max_lines";
     private static final String KEY_LOG_ENABLED = "log_enabled";
     private static final String KEY_CLEAR_NOTIFICATIONS_ON_OPEN = "clear_notifications_on_open";
+    private static final String KEY_NOTIFICATION_ACTION_BUTTONS_ENABLED =
+            "notification_action_buttons_enabled";
     private static final String KEY_NOTIFICATION_BACKUP_ENABLED = "notification_backup_enabled";
     private static final String KEY_NOTIFICATION_BACKUP_INCLUDE_SYSMGR = "notification_backup_include_sysmgr";
     private static final String KEY_HIGH_PRIORITY_ENABLED = "high_priority_enabled";
@@ -431,6 +433,10 @@ final class Config {
 
     boolean clearNotificationsOnOpen() {
         return prefs.getBoolean(KEY_CLEAR_NOTIFICATIONS_ON_OPEN, true);
+    }
+
+    boolean notificationActionButtonsEnabled() {
+        return prefs.getBoolean(KEY_NOTIFICATION_ACTION_BUTTONS_ENABLED, true);
     }
 
     boolean notificationBackupEnabled() {
@@ -1355,9 +1361,13 @@ final class Config {
                 .apply();
     }
 
-    void saveNotificationHistoryConfig(boolean clearNotificationsOnOpen) {
+    void saveNotificationHistoryConfig(
+            boolean clearNotificationsOnOpen,
+            boolean notificationActionButtonsEnabled) {
         prefs.edit()
                 .putBoolean(KEY_CLEAR_NOTIFICATIONS_ON_OPEN, clearNotificationsOnOpen)
+                .putBoolean(KEY_NOTIFICATION_ACTION_BUTTONS_ENABLED,
+                        notificationActionButtonsEnabled)
                 .apply();
     }
 

@@ -339,6 +339,7 @@ public final class MainActivity extends Activity {
     private Switch vncWakeOnConnectSwitch;
     private Switch logEnabledSwitch;
     private Switch clearNotificationsOnOpenSwitch;
+    private Switch notificationActionButtonsEnabledSwitch;
     private Switch notificationBackupEnabledSwitch;
     private Switch notificationBackupIncludeSysmgrSwitch;
     private final List<Panel> panels = new ArrayList<>();
@@ -743,6 +744,8 @@ public final class MainActivity extends Activity {
 
         LinearLayout optionsGroup = addToggleGroup(frame.content);
         clearNotificationsOnOpenSwitch = addGroupedToggle(optionsGroup, "Clear Android notifications on app open");
+        notificationActionButtonsEnabledSwitch = addGroupedToggle(
+                optionsGroup, "Show Delete and Clear buttons on notifications");
 
         LinearLayout buttons = newRow();
         frame.content.addView(buttons, stack(frame.content));
@@ -4429,6 +4432,8 @@ public final class MainActivity extends Activity {
             Config config = Config.get(this);
             serverBaseUrlField.setText(config.serverBaseUrl());
             clearNotificationsOnOpenSwitch.setChecked(config.clearNotificationsOnOpen());
+            notificationActionButtonsEnabledSwitch.setChecked(
+                    config.notificationActionButtonsEnabled());
             notificationBackupEnabledSwitch.setChecked(config.notificationBackupEnabled());
             notificationBackupIncludeSysmgrSwitch.setChecked(config.notificationBackupIncludeSysmgr());
             trackPathField.setText(config.trackPath());
@@ -4753,12 +4758,14 @@ public final class MainActivity extends Activity {
             @Override
             public boolean save() {
                 Config.get(MainActivity.this).saveNotificationHistoryConfig(
-                        clearNotificationsOnOpenSwitch.isChecked());
+                        clearNotificationsOnOpenSwitch.isChecked(),
+                        notificationActionButtonsEnabledSwitch.isChecked());
                 refreshStatusAndLog();
                 return true;
             }
         });
-        bindLiveToggles(notificationHistorySettings, clearNotificationsOnOpenSwitch);
+        bindLiveToggles(notificationHistorySettings,
+                clearNotificationsOnOpenSwitch, notificationActionButtonsEnabledSwitch);
 
         final LiveSaveGroup logSettings = liveSaveGroup(new LiveSaveAction() {
             @Override
