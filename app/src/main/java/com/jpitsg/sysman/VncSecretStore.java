@@ -6,12 +6,9 @@ import android.content.SharedPreferences;
 /**
  * The VNC password, deliberately kept out of {@link Config}.
  *
- * <p>{@code Config.exportSettingsXml()} writes every key in its own
- * preferences file, and {@code importSettingsXml()} clears that file before
- * restoring. Anything excluded from the export but stored there would be wiped
- * by a restore. Keeping the password in a separate file sidesteps both: the
- * export never sees it, the restore never clears it, and neither of those code
- * paths needed a single line changed.
+ * <p>The password stays separate from ordinary configuration reads and edits.
+ * A full system backup deliberately includes this private preference store so
+ * a restored installation keeps its VNC authentication state.
  */
 final class VncSecretStore {
     /** VNC authentication uses a DES key built from the first eight bytes. */

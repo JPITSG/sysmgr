@@ -20,7 +20,7 @@ import java.util.Map;
  * On-disk store for the single OpenVPN profile under filesDir/openvpn/. Holds
  * the normalized profile.conf, the imported certificate/key files, and meta.json
  * (written last, acting as the commit marker). All key material lives as files
- * here — never in SharedPreferences — so it is excluded from Settings XML export.
+ * here — never in SharedPreferences. Full system backups include this directory.
  *
  * Atomic writes mirror NotificationHistoryStore (temp + fsync + rename).
  */

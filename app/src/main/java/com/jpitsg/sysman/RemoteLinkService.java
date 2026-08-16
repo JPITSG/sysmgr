@@ -230,6 +230,7 @@ public final class RemoteLinkService extends Service {
                 long connectedAtMillis = 0L;
                 try {
                     NotificationBackupStateStore.setChecking(this);
+                    SystemBackupStateStore.setChecking(this);
                     LogStore.append(this, "remote", "Connecting to " + config.remoteLinkEndpoint());
                     current.connect();
                     connected = true;
@@ -378,6 +379,16 @@ public final class RemoteLinkService extends Service {
             if ("hello_ack".equals(type) || "heartbeat_ack".equals(type)) {
                 if (json.has("notif_backup")) {
                     NotificationBackupStateStore.setServerAvailable(this, json.optBoolean("notif_backup", false));
+                }
+                if (json.has("backup")) {
+                    SystemBackupStateStore.setServerState(
+                            this,
+                            json.optBoolean("backup", false),
+                            json.optBoolean("backup_exists", false),
+                            json.optLong("backup_mtime", 0L));
+                } else if ("hello_ack".equals(type)) {
+                    // An older daemon does not advertise full-backup support.
+                    SystemBackupStateStore.setServerState(this, false, false, 0L);
                 }
                 // Server signalled liveness; re-check the outbox (covers a server that
                 // re-enables the store mid-session even if a queue nudge was missed).

@@ -83,8 +83,6 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_BACKGROUND_LOCATION = 11;
     private static final int REQUEST_NOTIFICATIONS = 12;
     private static final int REQUEST_BLUETOOTH_ADVERTISE = 13;
-    private static final int REQUEST_EXPORT_SETTINGS = 20;
-    private static final int REQUEST_IMPORT_SETTINGS = 21;
     private static final int REQUEST_SAVE_NOTIFICATION_IMAGE = 22;
     private static final int REQUEST_IMPORT_VPN_PROFILE = 23;
     private static final int REQUEST_IMPORT_VPN_CERT = 24;
@@ -157,7 +155,7 @@ public final class MainActivity extends Activity {
     private View notificationBackupDot;
     private TextView notificationBackupStatus;
     private TextView notificationBackupCountPill;
-    private TextView settingsBackupPill;
+    private TextView systemBackupPill;
     private TextView wifiBadge;
     private TextView wifiSummary;
     private TextView wifiMonitorWarning;
@@ -178,6 +176,8 @@ public final class MainActivity extends Activity {
     private TextView logView;
     private Button startTrackingButton;
     private Button stopTrackingButton;
+    private Button backUpButton;
+    private Button restoreBackupButton;
     private float logTouchStartY;
     private int logTouchStartScrollY;
 
@@ -367,6 +367,8 @@ public final class MainActivity extends Activity {
     private volatile boolean wifiIoRequested;
     private volatile boolean logIoInFlight;
     private volatile boolean logIoRequested;
+    private volatile boolean backupOperationInFlight;
+    private volatile boolean backupRestoreInFlight;
     private String renderedNotificationHistoryKey;
     private final LruCache<String, Bitmap> notificationImageCache =
             new LruCache<String, Bitmap>(notificationImageCacheSizeKb()) {
@@ -1394,13 +1396,15 @@ public final class MainActivity extends Activity {
     }
 
     private void buildSettingsTransferPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Settings Backup", true);
-        settingsBackupPill = frame.pill;
+        Panel frame = addExpandablePanel(root, "Backup", true);
+        systemBackupPill = frame.pill;
 
         LinearLayout row = newRow();
         frame.content.addView(row, stack(frame.content));
-        addRowButton(row, tonalButton("Export XML", action("export_settings")));
-        addRowButton(row, tonalButton("Import XML", action("import_settings")));
+        backUpButton = tonalButton("Back Up Now", action("backup_now"));
+        restoreBackupButton = tonalButton("Restore", action("restore_backup"));
+        addRowButton(row, backUpButton);
+        addRowButton(row, restoreBackupButton);
     }
 
     private void buildPermissionsPanel(LinearLayout root) {
@@ -3973,7 +3977,7 @@ public final class MainActivity extends Activity {
         setRemoteLinkPill(RemoteLinkStateStore.isConnected(this));
         refreshNotificationBackupStatus();
         setEnabledPill(logPill, switchValue(logEnabledSwitch, config.logEnabled()));
-        setSettingsBackupPill(config.settingsLastExportMillis());
+        refreshSystemBackupStatus();
         applyButtonState(startTrackingButton, !tracking, COLOR_PRIMARY, Color.WHITE);
         applyButtonState(stopTrackingButton, tracking, COLOR_DANGER, Color.WHITE);
 
@@ -4186,9 +4190,11 @@ public final class MainActivity extends Activity {
             public void onReceive(Context context, Intent intent) {
                 setRemoteLinkPill(RemoteLinkStateStore.isConnected(MainActivity.this));
                 refreshNotificationBackupStatus();
+                refreshSystemBackupStatus();
             }
         };
         IntentFilter filter = new IntentFilter(RemoteLinkStateStore.ACTION_STATE_CHANGED);
+        filter.addAction(SystemBackupStateStore.ACTION_STATE_CHANGED);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(remoteLinkStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -4394,12 +4400,50 @@ public final class MainActivity extends Activity {
                 enabled ? COLOR_PRIMARY_ON_CONTAINER : COLOR_NEUTRAL_ON_CONTAINER);
     }
 
-    private void setSettingsBackupPill(long timestampMillis) {
-        setPillState(
-                settingsBackupPill,
-                timestampMillis > 0L ? formatBackupDate(timestampMillis) : "Never",
-                timestampMillis > 0L ? COLOR_PRIMARY_CONTAINER : COLOR_NEUTRAL_CONTAINER,
-                timestampMillis > 0L ? COLOR_PRIMARY_ON_CONTAINER : COLOR_NEUTRAL_ON_CONTAINER);
+    private void refreshSystemBackupStatus() {
+        Config config = Config.get(this);
+        boolean connected = config.remoteLinkEnabled() && RemoteLinkStateStore.isConnected(this);
+        boolean checked = SystemBackupStateStore.isChecked(this);
+        boolean available = SystemBackupStateStore.isServerAvailable(this);
+        boolean exists = SystemBackupStateStore.backupExists(this);
+        String label;
+        int background;
+        int foreground;
+        if (backupOperationInFlight) {
+            label = backupRestoreInFlight ? "RESTORING" : "BACKING UP";
+            background = COLOR_PRIMARY_CONTAINER;
+            foreground = COLOR_PRIMARY_ON_CONTAINER;
+        } else if (!connected) {
+            label = "LINK OFFLINE";
+            background = COLOR_DANGER_CONTAINER;
+            foreground = COLOR_DANGER_ON_CONTAINER;
+        } else if (!checked) {
+            label = "CHECKING";
+            background = COLOR_NEUTRAL_CONTAINER;
+            foreground = COLOR_NEUTRAL_ON_CONTAINER;
+        } else if (!available) {
+            label = "UNAVAILABLE";
+            background = COLOR_DANGER_CONTAINER;
+            foreground = COLOR_DANGER_ON_CONTAINER;
+        } else if (!exists) {
+            label = "NEVER";
+            background = COLOR_NEUTRAL_CONTAINER;
+            foreground = COLOR_NEUTRAL_ON_CONTAINER;
+        } else {
+            long timestamp = SystemBackupStateStore.backupModifiedAtMillis(this);
+            if (timestamp <= 0L) {
+                timestamp = config.lastBackupMillis();
+            }
+            label = timestamp > 0L ? formatBackupDate(timestamp) : "AVAILABLE";
+            background = COLOR_PRIMARY_CONTAINER;
+            foreground = COLOR_PRIMARY_ON_CONTAINER;
+        }
+        setPillState(systemBackupPill, label, background, foreground);
+        boolean canBackUp = connected && checked && available && !backupOperationInFlight;
+        applyButtonState(backUpButton, canBackUp,
+                COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+        applyButtonState(restoreBackupButton, canBackUp && exists,
+                COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
     }
 
     private void setPillState(TextView target, String text, int bg, int fg) {
@@ -4877,7 +4921,7 @@ public final class MainActivity extends Activity {
     }
 
     private boolean flushSettingsForAction(String command) {
-        if ("export_settings".equals(command)) {
+        if ("backup_now".equals(command)) {
             return flushPendingLiveSaves();
         }
         if ("start".equals(command) || "send".equals(command)) {
@@ -5709,88 +5753,222 @@ public final class MainActivity extends Activity {
         return true;
     }
 
-    private void exportSettingsXml() {
-        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("application/xml");
-        intent.putExtra(Intent.EXTRA_TITLE, "system-manager-settings-"
-                + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()) + ".xml");
-        try {
-            startActivityForResult(intent, REQUEST_EXPORT_SETTINGS);
-        } catch (RuntimeException e) {
-            LogStore.append(this, "settings", "Settings export picker failed: " + e.getMessage());
-            Toast.makeText(this, "Could not open export picker", Toast.LENGTH_LONG).show();
+    private void startSystemBackup() {
+        if (!canUseRemoteBackup(false)) {
+            return;
         }
+        final Context app = getApplicationContext();
+        final Config config = Config.get(app);
+        final long previousBackupMillis = config.lastBackupMillis();
+        final long backupMillis = System.currentTimeMillis();
+        config.setLastBackupMillis(backupMillis);
+        backupOperationInFlight = true;
+        backupRestoreInFlight = false;
+        LogStore.append(app, "backup", "Backup started");
+        refreshSystemBackupStatus();
+        Toast.makeText(this, "Backing up to Remote Link", Toast.LENGTH_SHORT).show();
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                File archive = null;
+                Exception failure = null;
+                try {
+                    archive = SystemBackupArchive.create(app);
+                    RemoteBackupClient.upload(app, archive);
+                } catch (Exception e) {
+                    failure = e;
+                    config.setLastBackupMillis(previousBackupMillis);
+                } finally {
+                    if (archive != null) {
+                        //noinspection ResultOfMethodCallIgnored
+                        archive.delete();
+                    }
+                }
+                final Exception resultFailure = failure;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        backupOperationInFlight = false;
+                        backupRestoreInFlight = false;
+                        if (resultFailure == null) {
+                            LogStore.append(MainActivity.this, "backup", "Backup completed");
+                            Toast.makeText(MainActivity.this, "Backup completed",
+                                    Toast.LENGTH_SHORT).show();
+                        } else {
+                            String detail = backupFailureMessage(resultFailure, "Backup failed");
+                            LogStore.append(MainActivity.this, "backup", "Backup failed: " + detail);
+                            Toast.makeText(MainActivity.this, detail, Toast.LENGTH_LONG).show();
+                        }
+                        refreshStatusAndLog();
+                    }
+                });
+            }
+        }, "SystemManagerBackup").start();
     }
 
-    private void importSettingsXml() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/xml", "text/xml", "text/*"});
-        try {
-            startActivityForResult(intent, REQUEST_IMPORT_SETTINGS);
-        } catch (RuntimeException e) {
-            LogStore.append(this, "settings", "Settings import picker failed: " + e.getMessage());
-            Toast.makeText(this, "Could not open import picker", Toast.LENGTH_LONG).show();
+    private void confirmSystemRestore() {
+        if (!canUseRemoteBackup(true)) {
+            return;
         }
+        OpenVpnConfirmDialog.show(this, "Restore backup?",
+                "This replaces all System Manager settings, credentials, history, logs, and VPN files with the Remote Link backup.",
+                "Restore", true, new OpenVpnConfirmDialog.Listener() {
+                    @Override
+                    public void onConfirm() {
+                        startSystemRestore();
+                    }
+                });
     }
 
-    private void handleSettingsExport(Uri uri) {
+    private void startSystemRestore() {
+        if (!canUseRemoteBackup(true)) {
+            return;
+        }
+        final Context app = getApplicationContext();
+        backupOperationInFlight = true;
+        backupRestoreInFlight = true;
+        LogStore.append(app, "backup", "Restore started");
+        refreshSystemBackupStatus();
+        Toast.makeText(this, "Restoring from Remote Link", Toast.LENGTH_SHORT).show();
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                File archive = null;
+                Exception failure = null;
+                SystemBackupArchive.RestoreResult result = null;
+                final boolean[] servicesStopped = {false};
+                try {
+                    archive = RemoteBackupClient.download(app);
+                    result = SystemBackupArchive.restore(app, archive, new Runnable() {
+                        @Override
+                        public void run() {
+                            servicesStopped[0] = true;
+                            prepareForSystemRestore(app);
+                        }
+                    });
+                } catch (Exception e) {
+                    failure = e;
+                } finally {
+                    if (archive != null) {
+                        //noinspection ResultOfMethodCallIgnored
+                        archive.delete();
+                    }
+                }
+                final Exception resultFailure = failure;
+                final SystemBackupArchive.RestoreResult restoreResult = result;
+                final boolean resumeServices = servicesStopped[0];
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        backupOperationInFlight = false;
+                        backupRestoreInFlight = false;
+                        if (resumeServices) {
+                            loadConfigIntoFields();
+                            syncAfterBackupRestore();
+                        }
+                        if (resultFailure == null && restoreResult != null) {
+                            renderedNotificationHistoryKey = null;
+                            notificationImageCache.evictAll();
+                            LogStore.append(MainActivity.this, "backup",
+                                    "Restore completed files=" + restoreResult.fileCount
+                                            + " preference_stores="
+                                            + restoreResult.preferenceStoreCount);
+                            Toast.makeText(MainActivity.this, "Backup restored",
+                                    Toast.LENGTH_SHORT).show();
+                            refreshNotificationHistory();
+                        } else {
+                            String detail = backupFailureMessage(resultFailure, "Restore failed");
+                            LogStore.append(MainActivity.this, "backup", "Restore failed: " + detail);
+                            Toast.makeText(MainActivity.this, detail, Toast.LENGTH_LONG).show();
+                        }
+                        refreshStatusAndLog();
+                    }
+                });
+            }
+        }, "SystemManagerRestore").start();
+    }
+
+    private boolean canUseRemoteBackup(boolean requireExistingBackup) {
+        if (backupOperationInFlight) {
+            Toast.makeText(this, "A backup operation is already running", Toast.LENGTH_SHORT).show();
+            return false;
+        }
         Config config = Config.get(this);
-        long previousExportMillis = config.settingsLastExportMillis();
-        long exportMillis = System.currentTimeMillis();
-        try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
-            if (output == null) {
-                throw new IllegalStateException("Output stream unavailable");
-            }
-            config.setSettingsLastExportMillis(exportMillis);
-            int count = config.exportSettingsXml(output);
-            LogStore.append(this, "settings", "Settings exported entries=" + count);
-            Toast.makeText(this, "Settings exported", Toast.LENGTH_SHORT).show();
-        } catch (Exception e) {
-            config.setSettingsLastExportMillis(previousExportMillis);
-            LogStore.append(this, "settings", "Settings export failed: " + e.getMessage());
-            Toast.makeText(this, "Settings export failed", Toast.LENGTH_LONG).show();
+        if (!config.remoteLinkEnabled()) {
+            Toast.makeText(this, "Enable Remote Link first", Toast.LENGTH_LONG).show();
+            return false;
         }
-        refreshStatusAndLog();
+        if (!RemoteLinkStateStore.isConnected(this)) {
+            Toast.makeText(this, "Remote Link is not connected", Toast.LENGTH_LONG).show();
+            return false;
+        }
+        if (!SystemBackupStateStore.isChecked(this)) {
+            Toast.makeText(this, "Waiting for backup status from Remote Link",
+                    Toast.LENGTH_LONG).show();
+            return false;
+        }
+        if (!SystemBackupStateStore.isServerAvailable(this)) {
+            Toast.makeText(this, "Backups are not configured on Remote Link",
+                    Toast.LENGTH_LONG).show();
+            return false;
+        }
+        if (requireExistingBackup && !SystemBackupStateStore.backupExists(this)) {
+            Toast.makeText(this, "No backup is available", Toast.LENGTH_LONG).show();
+            return false;
+        }
+        return true;
     }
 
-    private void handleSettingsImport(Uri uri) {
-        try (InputStream input = getContentResolver().openInputStream(uri)) {
-            if (input == null) {
-                throw new IllegalStateException("Input stream unavailable");
+    private void prepareForSystemRestore(Context context) {
+        HighPriorityAlertPlayer.stop(context, "backup-restore");
+        OpenVpnManager.disconnect(context, "backup-restore");
+        VncManager.stop(context, "backup-restore");
+        BeaconManager.stop(context);
+        NetworkMonitorService.stop(context);
+        RemoteLinkManager.stop(context);
+        long deadline = System.currentTimeMillis() + 3_000L;
+        while (System.currentTimeMillis() < deadline
+                && (RemoteLinkService.isRunning() || OpenVpnService.isActive()
+                || VncService.isActive() || BeaconService.isActive())) {
+            try {
+                Thread.sleep(100L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
             }
-            int count = Config.get(this).importSettingsXml(input);
-            loadConfigIntoFields();
-            syncAfterSettingsImport();
-            LogStore.append(this, "settings", "Settings imported entries=" + count);
-            Toast.makeText(this, "Settings imported", Toast.LENGTH_SHORT).show();
-        } catch (Exception e) {
-            LogStore.append(this, "settings", "Settings import failed: " + e.getMessage());
-            Toast.makeText(this, "Settings import failed", Toast.LENGTH_LONG).show();
         }
-        refreshStatusAndLog();
     }
 
-    private void syncAfterSettingsImport() {
+    private String backupFailureMessage(Exception error, String fallback) {
+        if (error == null) {
+            return fallback;
+        }
+        String message = error.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return fallback;
+        }
+        message = message.replace('\r', ' ').replace('\n', ' ').trim();
+        return message.length() > 180 ? message.substring(0, 177) + "..." : message;
+    }
+
+    private void syncAfterBackupRestore() {
         Config config = Config.get(this);
         if (config.isTrackingEnabled()) {
-            seedWifiStateAsync("settings-import");
-            AlarmScheduler.scheduleGpsPost(this, "settings-import");
+            seedWifiStateAsync("backup-restore");
+            AlarmScheduler.scheduleGpsPost(this, "backup-restore");
         } else {
             AlarmScheduler.cancelGpsPost(this);
         }
         NetworkMonitorService.sync(this);
-        BatteryAlertManager.sync(this, "settings-import");
-        VolumeControlManager.sync(this, "settings-import");
-        RebootManager.sync(this, "settings-import");
-        RemoteLinkManager.restart(this, "settings-import");
-        BeaconManager.refresh(this, "settings-import");
-        // VPN prefs round-trip through Settings XML; profile files do not, so
-        // the pill stays DISABLED until a profile is re-imported.
-        OpenVpnManager.sync(this, "settings-import");
-        VncManager.sync(this, "settings-import");
+        BatteryAlertManager.sync(this, "backup-restore");
+        VolumeControlManager.sync(this, "backup-restore");
+        RebootManager.sync(this, "backup-restore");
+        RemoteLinkManager.restart(this, "backup-restore");
+        BeaconManager.refresh(this, "backup-restore");
+        OpenVpnManager.sync(this, "backup-restore");
+        VncManager.sync(this, "backup-restore");
     }
 
     private void openIntent(Intent intent) {
@@ -5873,11 +6051,7 @@ public final class MainActivity extends Activity {
             return;
         }
         Uri uri = data.getData();
-        if (requestCode == REQUEST_EXPORT_SETTINGS) {
-            handleSettingsExport(uri);
-        } else if (requestCode == REQUEST_IMPORT_SETTINGS) {
-            handleSettingsImport(uri);
-        } else if (requestCode == REQUEST_SAVE_NOTIFICATION_IMAGE) {
+        if (requestCode == REQUEST_SAVE_NOTIFICATION_IMAGE) {
             handleNotificationImageSave(uri);
         } else if (requestCode == REQUEST_IMPORT_VPN_PROFILE) {
             handleVpnProfileImport(uri);
@@ -5914,10 +6088,10 @@ public final class MainActivity extends Activity {
                     stopTracking();
                 } else if ("send".equals(command)) {
                     sendNow();
-                } else if ("export_settings".equals(command)) {
-                    exportSettingsXml();
-                } else if ("import_settings".equals(command)) {
-                    importSettingsXml();
+                } else if ("backup_now".equals(command)) {
+                    startSystemBackup();
+                } else if ("restore_backup".equals(command)) {
+                    confirmSystemRestore();
                 } else if ("common_permissions".equals(command)) {
                     requestCommonPermissions();
                 } else if ("background_location".equals(command)) {

@@ -36,6 +36,10 @@ const MYSQL_DEFAULT_CLIENT = '/usr/bin/mysql';
 const NOTIF_STORE_MAX_FIELD = 4000;
 // How many recently-stored notification keys to remember for idempotent retries.
 const NOTIF_KEY_MEMORY = 5000;
+const BACKUP_HTTP_PATH = '/backup';
+// Bounds a malformed or accidental upload without forcing normal app backups
+// into memory. The request body is streamed directly to disk.
+const BACKUP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 
 function parseArgs(argv) {
   const args = {};
@@ -50,7 +54,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.bindip || !args.bindport || !args.log || !args.users) {
-  console.error('usage: sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--statefile=<path>] [--statefilevpn=<path>] [--statefilevnc=<path>]');
+  console.error('usage: sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>] [--statefile=<path>] [--statefilevpn=<path>] [--statefilevnc=<path>]');
   process.exit(2);
 }
 
@@ -70,6 +74,7 @@ if (users.size === 0) {
 }
 const gpsMysql = parseGpsMysqlConfig(args);
 const notificationStore = createNotificationStore(args);
+const backupStore = createBackupStore(args);
 // Optional state files mirror the link and service statuses for openHAB. Empty
 // paths disable their respective outputs.
 const remoteLinkStateFile = {path: args.statefile ? String(args.statefile) : '', last: ''};
@@ -427,6 +432,50 @@ function createNotificationStore(parsedArgs) {
   return {enabled: true, path: target, stream, recentKeys: new Set(), recentOrder: []};
 }
 
+function createBackupStore(parsedArgs) {
+  const target = String(parsedArgs.backupfile || '').trim();
+  if (!target) {
+    return {enabled: false, path: '', upload: null};
+  }
+  try {
+    fs.mkdirSync(path.dirname(target), {recursive: true});
+    const existing = fs.existsSync(target) ? fs.statSync(target) : null;
+    if (existing && !existing.isFile()) {
+      throw new Error('target exists and is not a regular file');
+    }
+  } catch (err) {
+    console.error(`could not prepare backup file: ${err.message}`);
+    process.exit(2);
+  }
+  return {enabled: true, path: target, upload: null};
+}
+
+function backupInfo() {
+  if (!backupStore.enabled) {
+    return {backup: false, backup_exists: false, backup_mtime: 0};
+  }
+  try {
+    const stat = fs.statSync(backupStore.path);
+    return {
+      backup: stat.isFile(),
+      backup_exists: stat.isFile(),
+      backup_mtime: stat.isFile() ? Math.round(stat.mtimeMs) : 0
+    };
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      log(`backup status failed path=${backupStore.path} error=${err.message}`);
+    }
+    return {backup: true, backup_exists: false, backup_mtime: 0};
+  }
+}
+
+function sendBackupStatus(socket, type, extra) {
+  sendJson(socket, Object.assign({
+    type,
+    ts: Math.floor(Date.now() / 1000)
+  }, backupInfo(), extra || {}));
+}
+
 function cleanNotifKey(value) {
   const key = String(value || '').trim().toLowerCase();
   return /^[0-9a-f]{16,128}$/.test(key) ? key : '';
@@ -672,7 +721,7 @@ function handleTextMessage(connectionId, socket, text) {
       ` vnc_enabled=${logValue(parsed.vnc_enabled)}` +
       ` vnc_connected=${logValue(parsed.vnc_connected)}`);
     syncStateFiles();
-    sendJson(socket, {type: 'heartbeat_ack', ts: Math.floor(Date.now() / 1000), notif_backup: notificationStore.enabled});
+    sendBackupStatus(socket, 'heartbeat_ack', {notif_backup: notificationStore.enabled});
     return;
   }
   if (parsed.type === 'gps') {
@@ -724,7 +773,7 @@ function handleTextMessage(connectionId, socket, text) {
   if (parsed.type === 'hello') {
     const uuid = assignClientUuid(connectionId, socket, parsed.uuid || parsed.client_uuid || parsed.device_uuid);
     log(`hello received connection=${connectionId} app=${parsed.app || ''} version=${parsed.version || ''} uuid=${uuid || ''} heartbeat_seconds=${parsed.heartbeat_seconds || ''}`);
-    sendJson(socket, {type: 'hello_ack', ts: Math.floor(Date.now() / 1000), notif_backup: notificationStore.enabled});
+    sendBackupStatus(socket, 'hello_ack', {notif_backup: notificationStore.enabled});
     flushRedeliveryQueue('hello').catch((err) => log(`redelivery flush error ${err && err.stack ? err.stack : err}`));
     return;
   }
@@ -1271,6 +1320,197 @@ function generateSelfSignedCertificate() {
 
 const tlsOptions = generateSelfSignedCertificate();
 
+function backupRequestPath(req) {
+  try {
+    return new URL(req.url, 'https://sysmgrd.local').pathname;
+  } catch (err) {
+    return '';
+  }
+}
+
+function sendBackupHttpError(res, status, message) {
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  const body = `${message}\n`;
+  res.writeHead(status, {
+    'content-type': 'text/plain; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store'
+  });
+  res.end(body);
+}
+
+function handleBackupUpload(req, res) {
+  if (!backupStore.enabled) {
+    sendBackupHttpError(res, 503, 'backup file is not configured');
+    return;
+  }
+  if (backupStore.upload) {
+    sendBackupHttpError(res, 409, 'another backup is already in progress');
+    return;
+  }
+
+  const declaredLength = Number(req.headers['content-length']);
+  if (Number.isFinite(declaredLength) &&
+      (declaredLength < 1 || declaredLength > BACKUP_MAX_BYTES)) {
+    sendBackupHttpError(res, 413, 'backup archive size is invalid');
+    return;
+  }
+
+  const tempPath = `${backupStore.path}.upload-${process.pid}-${Date.now()}`;
+  let output;
+  try {
+    output = fs.createWriteStream(tempPath, {flags: 'wx', mode: 0o600});
+  } catch (err) {
+    sendBackupHttpError(res, 500, 'could not create backup archive');
+    log(`backup upload create failed path=${backupStore.path} error=${err.message}`);
+    return;
+  }
+
+  const upload = {tempPath, output, bytes: 0, complete: false};
+  backupStore.upload = upload;
+  const hash = crypto.createHash('sha256');
+  let failed = false;
+
+  function cleanupTemp() {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        log(`backup upload cleanup failed path=${tempPath} error=${err.message}`);
+      }
+    }
+  }
+
+  function fail(status, publicMessage, err) {
+    if (failed || upload.complete) {
+      return;
+    }
+    failed = true;
+    if (backupStore.upload === upload) {
+      backupStore.upload = null;
+    }
+    try {
+      output.destroy();
+    } catch (ignored) {
+      // Best-effort cleanup below handles the temporary file.
+    }
+    cleanupTemp();
+    sendBackupHttpError(res, status, publicMessage);
+    log(`backup upload failed path=${backupStore.path} bytes=${upload.bytes} error=${err && err.message ? err.message : publicMessage}`);
+  }
+
+  req.on('data', (chunk) => {
+    upload.bytes += chunk.length;
+    if (upload.bytes > BACKUP_MAX_BYTES) {
+      fail(413, 'backup archive is too large', new Error('size limit exceeded'));
+      req.destroy();
+      return;
+    }
+    hash.update(chunk);
+  });
+  req.on('aborted', () => fail(400, 'backup upload was interrupted', new Error('request aborted')));
+  req.on('error', (err) => fail(400, 'backup upload failed', err));
+  output.on('error', (err) => fail(500, 'could not write backup archive', err));
+  output.on('finish', () => {
+    if (failed) {
+      return;
+    }
+    if (upload.bytes < 1 ||
+        (Number.isFinite(declaredLength) && upload.bytes !== declaredLength)) {
+      fail(400, 'backup upload was incomplete', new Error('content length mismatch'));
+      return;
+    }
+    const digest = hash.digest('hex');
+    const expectedDigest = String(req.headers['x-backup-sha256'] || '').trim().toLowerCase();
+    if (expectedDigest && (!/^[0-9a-f]{64}$/.test(expectedDigest) || expectedDigest !== digest)) {
+      fail(400, 'backup archive checksum mismatch', new Error('checksum mismatch'));
+      return;
+    }
+    try {
+      const fd = fs.openSync(tempPath, 'r');
+      try {
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.chmodSync(tempPath, 0o600);
+      fs.renameSync(tempPath, backupStore.path);
+      upload.complete = true;
+      if (backupStore.upload === upload) {
+        backupStore.upload = null;
+      }
+      const body = `${JSON.stringify({ok: true, bytes: upload.bytes, sha256: digest})}\n`;
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+        'cache-control': 'no-store'
+      });
+      res.end(body);
+      log(`backup stored path=${backupStore.path} bytes=${upload.bytes} sha256=${digest}`);
+    } catch (err) {
+      fail(500, 'could not store backup archive', err);
+    }
+  });
+  req.pipe(output);
+}
+
+function handleBackupDownload(req, res) {
+  if (!backupStore.enabled) {
+    sendBackupHttpError(res, 503, 'backup file is not configured');
+    return;
+  }
+  let stat;
+  try {
+    stat = fs.statSync(backupStore.path);
+    if (!stat.isFile()) {
+      throw new Error('backup target is not a regular file');
+    }
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      sendBackupHttpError(res, 404, 'no backup is available');
+    } else {
+      sendBackupHttpError(res, 500, 'could not read backup archive');
+      log(`backup download stat failed path=${backupStore.path} error=${err.message}`);
+    }
+    return;
+  }
+
+  res.writeHead(200, {
+    'content-type': 'application/gzip',
+    'content-length': stat.size,
+    'content-disposition': 'attachment; filename="sysmgr.backup.tar.gz"',
+    'last-modified': stat.mtime.toUTCString(),
+    'cache-control': 'no-store'
+  });
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  const input = fs.createReadStream(backupStore.path);
+  input.on('error', (err) => {
+    log(`backup download failed path=${backupStore.path} error=${err.message}`);
+    res.destroy();
+  });
+  res.on('finish', () => log(`backup sent path=${backupStore.path} bytes=${stat.size}`));
+  input.pipe(res);
+}
+
+function handleBackupRequest(req, res) {
+  if (req.method === 'PUT') {
+    handleBackupUpload(req, res);
+    return;
+  }
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    handleBackupDownload(req, res);
+    return;
+  }
+  res.writeHead(405, {'allow': 'GET, HEAD, PUT', 'content-length': '0'});
+  res.end();
+}
+
 const server = https.createServer(tlsOptions, (req, res) => {
   const credentials = authorizedCredentials(req.headers.authorization);
   if (!credentials) {
@@ -1281,6 +1521,11 @@ const server = https.createServer(tlsOptions, (req, res) => {
       'connection': 'close'
     });
     res.end('unauthorized\n');
+    return;
+  }
+  if (backupRequestPath(req) === BACKUP_HTTP_PATH) {
+    log(`http backup ${req.method} from=${clientAddress(req.socket)} user=${credentials.username}`);
+    handleBackupRequest(req, res);
     return;
   }
   log(`http ${req.method} ${req.url} from=${clientAddress(req.socket)}`);
@@ -1380,7 +1625,7 @@ tcpServer.on('error', (err) => {
   process.exitCode = 1;
 });
 tcpServer.listen(bindPort, bindIp, () => {
-  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'} statefile=${remoteLinkStateFile.path || 'disabled'} statefilevpn=${vpnStateFile.path || 'disabled'} statefilevnc=${vncStateFile.path || 'disabled'}`);
+  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'} backup_file=${backupStore.enabled ? `enabled path=${backupStore.path}` : 'disabled'} statefile=${remoteLinkStateFile.path || 'disabled'} statefilevpn=${vpnStateFile.path || 'disabled'} statefilevnc=${vncStateFile.path || 'disabled'}`);
   // No clients yet, so this also clears stale values left by a hard kill.
   syncStateFiles();
 });
@@ -1548,6 +1793,20 @@ function shutdown(signal) {
   writeDisconnectedStateFiles();
   cleanupCertificate();
   cleanupControlSocket();
+  if (backupStore.upload) {
+    const upload = backupStore.upload;
+    backupStore.upload = null;
+    try {
+      upload.output.destroy();
+    } catch (err) {
+      // Ignore shutdown cleanup errors.
+    }
+    try {
+      fs.unlinkSync(upload.tempPath);
+    } catch (err) {
+      // Ignore a missing or already-cleaned temporary upload.
+    }
+  }
   controlServer.close();
   for (const client of clients.values()) {
     try {

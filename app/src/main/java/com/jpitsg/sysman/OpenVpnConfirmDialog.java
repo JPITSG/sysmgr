@@ -10,7 +10,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-/** Simple confirm dialog for replace-while-connected and Clear Profile. */
+/** App-styled confirmation dialog for destructive or state-changing actions. */
 final class OpenVpnConfirmDialog {
     interface Listener {
         void onConfirm();

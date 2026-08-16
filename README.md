@@ -80,7 +80,9 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
   Settings** shortcut sits under **Permissions**. The Wi-Fi monitor keeps the
   one in-app switch — turning it off moves the monitor into the Accessibility
   service, so no notification is created at all.
-- **Settings backup/restore** to an XML file (no secrets/keys are exported).
+- **Full backup/restore over Remote Link** — one compressed `tar.gz` preserves
+  all app preferences, credentials, notification history and images, the app
+  log, queued notification backups, and the complete OpenVPN profile.
 
 **Embedded OpenVPN client**
 - A cross-compiled `openvpn` 2.7.5 binary (OpenSSL 3.5.7, LZO 2.10, LZ4 1.10.0)
@@ -159,7 +161,7 @@ Node 14+.
 ### sysmgrd
 
 ```
-sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2>
+sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>]
 ```
 
 Optional GPS→MySQL persistence is enabled by adding `--gps-mysql-*`
@@ -170,6 +172,12 @@ Optional notification backup is enabled by adding `--notificationstore=<path>`;
 the daemon appends each backed-up notification as one JSON object per line
 (JSON Lines) to that file, created `0600`. Point it outside the repository. The
 file only grows — rotate or prune it yourself if needed.
+
+Full app backups are enabled with `--backupfile=<path>`. The app uploads and
+restores the authenticated archive through the Remote Link server at
+`/backup`; sysmgrd streams uploads to a temporary file and atomically replaces
+the configured `tar.gz` with mode `0600`. The Backup panel remains unavailable
+unless the Remote Link is connected and this option is configured.
 
 Optional state-file outputs for automation are enabled with `--statefile`,
 `--statefilevpn`, and `--statefilevnc`. The first contains `Online` or `Offline`.
@@ -205,10 +213,11 @@ access, accessibility, VPN consent, battery-optimization exemption).
 
 - **Self-hosted and single-tenant by design.** Intended for one trusted phone
   and a server you control on a private network.
-- **Credentials are runtime-only.** sysmgrd's Basic-auth users, the MySQL
-  password, and its TLS certificate are provided/generated at run time; none are
-  committed. The app stores its own credentials in app-private storage and never
-  includes them in settings backups.
+- **Server credentials are runtime-only.** sysmgrd's Basic-auth users, the
+  MySQL password, and its TLS certificate are provided/generated at run time;
+  none are committed. Full app backups intentionally contain the app's private
+  credentials and VPN key material, so protect the configured backup file like
+  any other secret and keep it outside the repository.
 - **TLS is self-signed.** The app has a developer option to accept any TLS
   certificate for the Remote Link — appropriate only for a trusted LAN, not the
   public internet.

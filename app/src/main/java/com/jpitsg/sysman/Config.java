@@ -2,25 +2,15 @@ package com.jpitsg.sysman;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.util.Xml;
-
-import org.xmlpull.v1.XmlPullParser;
-import org.xmlpull.v1.XmlSerializer;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.UUID;
 
 final class Config {
@@ -108,7 +98,9 @@ final class Config {
     private static final String KEY_REMOTE_LINK_PASSWORD = "remote_link_password";
     private static final String KEY_REMOTE_LINK_HEARTBEAT_SECONDS = "remote_link_heartbeat_seconds";
     private static final String KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT = "remote_link_accept_any_ssl_cert";
-    private static final String KEY_SETTINGS_LAST_EXPORT_MILLIS = "settings_last_export_millis";
+    // Keep the old key so an existing install retains the date of its last
+    // settings export as the initial full-backup date.
+    private static final String KEY_LAST_BACKUP_MILLIS = "settings_last_export_millis";
     private static final String KEY_VPN_USERNAME = "vpn_username";
     private static final String KEY_VPN_PASSWORD = "vpn_password";
     private static final String KEY_VPN_KEY_PASSPHRASE = "vpn_key_passphrase";
@@ -124,9 +116,8 @@ final class Config {
     private static final String KEY_BEACON_TX_POWER_DBM = "beacon_tx_power_dbm";
     private static final String KEY_BEACON_RULES = "beacon_rules";
     private static final String KEY_BEACON_RULES_SEEDED = "beacon_rules_seeded";
-    // The VNC password is deliberately absent: it lives in VncSecretStore's own
-    // preferences file so the settings export never sees it and the settings
-    // import never clears it.
+    // The VNC password lives in VncSecretStore's own preferences file. Full
+    // backups include that store, while normal Config access remains separate.
     private static final String KEY_VNC_ENABLED = "vnc_enabled";
     private static final String KEY_VNC_REMOTE_COMMAND_ENABLED = "vnc_remote_command_enabled";
     private static final String KEY_VNC_ENGINE = "vnc_engine";
@@ -1113,12 +1104,12 @@ final class Config {
         }
     }
 
-    long settingsLastExportMillis() {
-        return prefs.getLong(KEY_SETTINGS_LAST_EXPORT_MILLIS, 0L);
+    long lastBackupMillis() {
+        return prefs.getLong(KEY_LAST_BACKUP_MILLIS, 0L);
     }
 
-    void setSettingsLastExportMillis(long timestampMillis) {
-        prefs.edit().putLong(KEY_SETTINGS_LAST_EXPORT_MILLIS, Math.max(0L, timestampMillis)).apply();
+    void setLastBackupMillis(long timestampMillis) {
+        prefs.edit().putLong(KEY_LAST_BACKUP_MILLIS, Math.max(0L, timestampMillis)).apply();
     }
 
     void saveGpsConfig(
@@ -1428,187 +1419,8 @@ final class Config {
                 .apply();
     }
 
-    int exportSettingsXml(OutputStream output) throws Exception {
-        Map<String, ?> values = new TreeMap<>(prefs.getAll());
-        XmlSerializer serializer = Xml.newSerializer();
-        serializer.setOutput(output, "UTF-8");
-        serializer.startDocument("UTF-8", true);
-        serializer.startTag(null, "system-manager-settings");
-        serializer.attribute(null, "version", "1");
-        serializer.attribute(null, "prefs", PREFS);
-        for (Map.Entry<String, ?> entry : values.entrySet()) {
-            writeSetting(serializer, entry.getKey(), entry.getValue());
-        }
-        serializer.endTag(null, "system-manager-settings");
-        serializer.endDocument();
-        serializer.flush();
-        return values.size();
-    }
-
-    int importSettingsXml(InputStream input) throws Exception {
-        XmlPullParser parser = Xml.newPullParser();
-        parser.setInput(input, "UTF-8");
-
-        int event;
-        do {
-            event = parser.next();
-        } while (event != XmlPullParser.START_TAG && event != XmlPullParser.END_DOCUMENT);
-        if (event != XmlPullParser.START_TAG || !"system-manager-settings".equals(parser.getName())) {
-            throw new IllegalArgumentException("Not a System Manager settings XML file");
-        }
-
-        int rootDepth = parser.getDepth();
-        Map<String, Object> values = new TreeMap<>();
-        while ((event = parser.next()) != XmlPullParser.END_DOCUMENT) {
-            if (event == XmlPullParser.END_TAG
-                    && parser.getDepth() == rootDepth
-                    && "system-manager-settings".equals(parser.getName())) {
-                break;
-            }
-            if (event != XmlPullParser.START_TAG) {
-                continue;
-            }
-            if (!"setting".equals(parser.getName())) {
-                skipTag(parser);
-                continue;
-            }
-            String key = parser.getAttributeValue(null, "key");
-            String type = parser.getAttributeValue(null, "type");
-            if (key == null || key.trim().isEmpty()) {
-                skipTag(parser);
-                continue;
-            }
-            values.put(key.trim(), readSettingValue(parser, type));
-        }
-
-        SharedPreferences.Editor editor = prefs.edit().clear();
-        for (Map.Entry<String, Object> entry : values.entrySet()) {
-            putValue(editor, entry.getKey(), entry.getValue());
-        }
-        if (!editor.commit()) {
-            throw new IllegalStateException("Could not save imported settings");
-        }
-        migrateVncAvailabilitySettings(prefs);
-        return values.size();
-    }
-
     private String string(String key, String fallback) {
         return clean(prefs.getString(key, fallback), fallback);
-    }
-
-    private static void writeSetting(XmlSerializer serializer, String key, Object value) throws Exception {
-        if (key == null || value == null) {
-            return;
-        }
-        serializer.startTag(null, "setting");
-        serializer.attribute(null, "key", key);
-        serializer.attribute(null, "type", settingType(value));
-        if (value instanceof Set) {
-            @SuppressWarnings("unchecked")
-            Set<String> values = (Set<String>) value;
-            for (String item : new TreeSet<>(values)) {
-                serializer.startTag(null, "item");
-                serializer.text(item == null ? "" : item);
-                serializer.endTag(null, "item");
-            }
-        } else {
-            serializer.text(String.valueOf(value));
-        }
-        serializer.endTag(null, "setting");
-    }
-
-    private static String settingType(Object value) {
-        if (value instanceof Boolean) {
-            return "boolean";
-        }
-        if (value instanceof Integer) {
-            return "int";
-        }
-        if (value instanceof Long) {
-            return "long";
-        }
-        if (value instanceof Float) {
-            return "float";
-        }
-        if (value instanceof Set) {
-            return "string-set";
-        }
-        return "string";
-    }
-
-    private static Object readSettingValue(XmlPullParser parser, String type) throws Exception {
-        String cleanType = type == null ? "string" : type.trim();
-        if ("string-set".equals(cleanType)) {
-            return readStringSet(parser);
-        }
-
-        String text = parser.nextText();
-        if ("boolean".equals(cleanType)) {
-            return Boolean.valueOf(text.trim());
-        }
-        if ("int".equals(cleanType)) {
-            return Integer.valueOf(text.trim());
-        }
-        if ("long".equals(cleanType)) {
-            return Long.valueOf(text.trim());
-        }
-        if ("float".equals(cleanType)) {
-            return Float.valueOf(text.trim());
-        }
-        return text;
-    }
-
-    private static Set<String> readStringSet(XmlPullParser parser) throws Exception {
-        int settingDepth = parser.getDepth();
-        Set<String> values = new HashSet<>();
-        int event;
-        while ((event = parser.next()) != XmlPullParser.END_DOCUMENT) {
-            if (event == XmlPullParser.END_TAG
-                    && parser.getDepth() == settingDepth
-                    && "setting".equals(parser.getName())) {
-                break;
-            }
-            if (event != XmlPullParser.START_TAG) {
-                continue;
-            }
-            if ("item".equals(parser.getName())) {
-                values.add(parser.nextText());
-            } else {
-                skipTag(parser);
-            }
-        }
-        return values;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static void putValue(SharedPreferences.Editor editor, String key, Object value) {
-        if (value instanceof Boolean) {
-            editor.putBoolean(key, (Boolean) value);
-        } else if (value instanceof Integer) {
-            editor.putInt(key, (Integer) value);
-        } else if (value instanceof Long) {
-            editor.putLong(key, (Long) value);
-        } else if (value instanceof Float) {
-            editor.putFloat(key, (Float) value);
-        } else if (value instanceof Set) {
-            editor.putStringSet(key, (Set<String>) value);
-        } else {
-            editor.putString(key, value == null ? "" : String.valueOf(value));
-        }
-    }
-
-    private static void skipTag(XmlPullParser parser) throws Exception {
-        int depth = 1;
-        while (depth > 0) {
-            int event = parser.next();
-            if (event == XmlPullParser.START_TAG) {
-                depth++;
-            } else if (event == XmlPullParser.END_TAG) {
-                depth--;
-            } else if (event == XmlPullParser.END_DOCUMENT) {
-                break;
-            }
-        }
     }
 
     private int intValue(String key, int fallback, int min, int max) {
