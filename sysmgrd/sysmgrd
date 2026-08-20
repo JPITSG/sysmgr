@@ -37,6 +37,7 @@ const NOTIF_STORE_MAX_FIELD = 4000;
 // How many recently-stored notification keys to remember for idempotent retries.
 const NOTIF_KEY_MEMORY = 5000;
 const BACKUP_HTTP_PATH = '/backup';
+const UPGRADE_HTTP_PATH = '/upgrade.apk';
 // Bounds a malformed or accidental upload without forcing normal app backups
 // into memory. The request body is streamed directly to disk.
 const BACKUP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
@@ -85,7 +86,7 @@ const commandLineArgs = parseArgs(process.argv.slice(2));
 const configArgs = commandLineArgs.config ? parseConfigFile(commandLineArgs.config) : {};
 const args = Object.assign({}, configArgs, commandLineArgs);
 if (!args.bindip || !args.bindport || !args.log || !args.users) {
-  console.error('usage: sysmgrd [--config=<path>] --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>] [--statefile=<path>] [--statefilevpn=<path>] [--statefilevnc=<path>]');
+  console.error('usage: sysmgrd [--config=<path>] --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>] [--upgradeapk=<path>] [--statefile=<path>] [--statefilevpn=<path>] [--statefilevnc=<path>]');
   process.exit(2);
 }
 
@@ -106,6 +107,7 @@ if (users.size === 0) {
 const gpsMysql = parseGpsMysqlConfig(args);
 const notificationStore = createNotificationStore(args);
 const backupStore = createBackupStore(args);
+const upgradeStore = createUpgradeStore(args);
 // Optional state files mirror the link and service statuses for openHAB. Empty
 // paths disable their respective outputs.
 const remoteLinkStateFile = {path: args.statefile ? String(args.statefile) : '', last: ''};
@@ -481,6 +483,23 @@ function createBackupStore(parsedArgs) {
   return {enabled: true, path: target, upload: null};
 }
 
+function createUpgradeStore(parsedArgs) {
+  const target = String(parsedArgs.upgradeapk || '').trim();
+  if (!target) {
+    return {enabled: false, path: ''};
+  }
+  try {
+    const existing = fs.existsSync(target) ? fs.statSync(target) : null;
+    if (existing && !existing.isFile()) {
+      throw new Error('target exists and is not a regular file');
+    }
+  } catch (err) {
+    console.error(`could not prepare upgrade APK: ${err.message}`);
+    process.exit(2);
+  }
+  return {enabled: true, path: target};
+}
+
 function backupInfo() {
   if (!backupStore.enabled) {
     return {backup: false, backup_exists: false, backup_mtime: 0};
@@ -500,11 +519,32 @@ function backupInfo() {
   }
 }
 
-function sendBackupStatus(socket, type, extra) {
+function upgradeInfo() {
+  if (!upgradeStore.enabled) {
+    return {upgrade_apk: false, upgrade_exists: false, upgrade_size: 0, upgrade_mtime: 0};
+  }
+  try {
+    const stat = fs.statSync(upgradeStore.path);
+    const exists = stat.isFile();
+    return {
+      upgrade_apk: true,
+      upgrade_exists: exists,
+      upgrade_size: exists ? stat.size : 0,
+      upgrade_mtime: exists ? Math.round(stat.mtimeMs) : 0
+    };
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      log(`upgrade APK status failed path=${upgradeStore.path} error=${err.message}`);
+    }
+    return {upgrade_apk: true, upgrade_exists: false, upgrade_size: 0, upgrade_mtime: 0};
+  }
+}
+
+function sendServerStatus(socket, type, extra) {
   sendJson(socket, Object.assign({
     type,
     ts: Math.floor(Date.now() / 1000)
-  }, backupInfo(), extra || {}));
+  }, backupInfo(), upgradeInfo(), extra || {}));
 }
 
 function cleanNotifKey(value) {
@@ -823,7 +863,7 @@ function handleTextMessage(connectionId, socket, text) {
       ` vnc_enabled=${logValue(parsed.vnc_enabled)}` +
       ` vnc_connected=${logValue(parsed.vnc_connected)}`);
     syncStateFiles();
-    sendBackupStatus(socket, 'heartbeat_ack', {notif_backup: notificationStore.enabled});
+    sendServerStatus(socket, 'heartbeat_ack', {notif_backup: notificationStore.enabled});
     return;
   }
   if (parsed.type === 'gps') {
@@ -849,6 +889,14 @@ function handleTextMessage(connectionId, socket, text) {
       enabled: notificationStore.enabled,
       ts: Math.floor(Date.now() / 1000)
     });
+    return;
+  }
+  if (parsed.type === 'upgrade_probe') {
+    sendJson(socket, Object.assign({
+      type: 'upgrade_status',
+      id: String(parsed.id || ''),
+      ts: Math.floor(Date.now() / 1000)
+    }, upgradeInfo()));
     return;
   }
   if (parsed.type === 'throughput_start') {
@@ -879,7 +927,7 @@ function handleTextMessage(connectionId, socket, text) {
   if (parsed.type === 'hello') {
     const uuid = assignClientUuid(connectionId, socket, parsed.uuid || parsed.client_uuid || parsed.device_uuid);
     log(`hello received connection=${connectionId} app=${parsed.app || ''} version=${parsed.version || ''} uuid=${uuid || ''} heartbeat_seconds=${parsed.heartbeat_seconds || ''}`);
-    sendBackupStatus(socket, 'hello_ack', {notif_backup: notificationStore.enabled});
+    sendServerStatus(socket, 'hello_ack', {notif_backup: notificationStore.enabled});
     flushRedeliveryQueue('hello').catch((err) => log(`redelivery flush error ${err && err.stack ? err.stack : err}`));
     return;
   }
@@ -1426,7 +1474,7 @@ function generateSelfSignedCertificate() {
 
 const tlsOptions = generateSelfSignedCertificate();
 
-function backupRequestPath(req) {
+function requestPath(req) {
   try {
     return new URL(req.url, 'https://sysmgrd.local').pathname;
   } catch (err) {
@@ -1434,7 +1482,7 @@ function backupRequestPath(req) {
   }
 }
 
-function sendBackupHttpError(res, status, message) {
+function sendHttpError(res, status, message) {
   if (res.headersSent) {
     res.destroy();
     return;
@@ -1450,18 +1498,18 @@ function sendBackupHttpError(res, status, message) {
 
 function handleBackupUpload(req, res) {
   if (!backupStore.enabled) {
-    sendBackupHttpError(res, 503, 'backup file is not configured');
+    sendHttpError(res, 503, 'backup file is not configured');
     return;
   }
   if (backupStore.upload) {
-    sendBackupHttpError(res, 409, 'another backup is already in progress');
+    sendHttpError(res, 409, 'another backup is already in progress');
     return;
   }
 
   const declaredLength = Number(req.headers['content-length']);
   if (Number.isFinite(declaredLength) &&
       (declaredLength < 1 || declaredLength > BACKUP_MAX_BYTES)) {
-    sendBackupHttpError(res, 413, 'backup archive size is invalid');
+    sendHttpError(res, 413, 'backup archive size is invalid');
     return;
   }
 
@@ -1470,7 +1518,7 @@ function handleBackupUpload(req, res) {
   try {
     output = fs.createWriteStream(tempPath, {flags: 'wx', mode: 0o600});
   } catch (err) {
-    sendBackupHttpError(res, 500, 'could not create backup archive');
+    sendHttpError(res, 500, 'could not create backup archive');
     log(`backup upload create failed path=${backupStore.path} error=${err.message}`);
     return;
   }
@@ -1504,7 +1552,7 @@ function handleBackupUpload(req, res) {
       // Best-effort cleanup below handles the temporary file.
     }
     cleanupTemp();
-    sendBackupHttpError(res, status, publicMessage);
+    sendHttpError(res, status, publicMessage);
     log(`backup upload failed path=${backupStore.path} bytes=${upload.bytes} error=${err && err.message ? err.message : publicMessage}`);
   }
 
@@ -1565,7 +1613,7 @@ function handleBackupUpload(req, res) {
 
 function handleBackupDownload(req, res) {
   if (!backupStore.enabled) {
-    sendBackupHttpError(res, 503, 'backup file is not configured');
+    sendHttpError(res, 503, 'backup file is not configured');
     return;
   }
   let stat;
@@ -1576,9 +1624,9 @@ function handleBackupDownload(req, res) {
     }
   } catch (err) {
     if (err.code === 'ENOENT') {
-      sendBackupHttpError(res, 404, 'no backup is available');
+      sendHttpError(res, 404, 'no backup is available');
     } else {
-      sendBackupHttpError(res, 500, 'could not read backup archive');
+      sendHttpError(res, 500, 'could not read backup archive');
       log(`backup download stat failed path=${backupStore.path} error=${err.message}`);
     }
     return;
@@ -1617,6 +1665,53 @@ function handleBackupRequest(req, res) {
   res.end();
 }
 
+function handleUpgradeRequest(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, {'allow': 'GET, HEAD', 'content-length': '0'});
+    res.end();
+    return;
+  }
+  if (!upgradeStore.enabled) {
+    sendHttpError(res, 503, 'upgrade APK is not configured');
+    return;
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(upgradeStore.path);
+    if (!stat.isFile()) {
+      throw new Error('upgrade APK target is not a regular file');
+    }
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      sendHttpError(res, 404, 'upgrade APK is not available');
+    } else {
+      sendHttpError(res, 500, 'could not read upgrade APK');
+      log(`upgrade APK stat failed path=${upgradeStore.path} error=${err.message}`);
+    }
+    return;
+  }
+
+  res.writeHead(200, {
+    'content-type': 'application/vnd.android.package-archive',
+    'content-length': stat.size,
+    'content-disposition': 'attachment; filename="SystemManager.apk"',
+    'last-modified': stat.mtime.toUTCString(),
+    'cache-control': 'no-store'
+  });
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  const input = fs.createReadStream(upgradeStore.path);
+  input.on('error', (err) => {
+    log(`upgrade APK download failed path=${upgradeStore.path} error=${err.message}`);
+    res.destroy();
+  });
+  res.on('finish', () => log(`upgrade APK sent path=${upgradeStore.path} bytes=${stat.size}`));
+  input.pipe(res);
+}
+
 const server = https.createServer(tlsOptions, (req, res) => {
   const credentials = authorizedCredentials(req.headers.authorization);
   if (!credentials) {
@@ -1629,9 +1724,15 @@ const server = https.createServer(tlsOptions, (req, res) => {
     res.end('unauthorized\n');
     return;
   }
-  if (backupRequestPath(req) === BACKUP_HTTP_PATH) {
+  const pathname = requestPath(req);
+  if (pathname === BACKUP_HTTP_PATH) {
     log(`http backup ${req.method} from=${clientAddress(req.socket)} user=${credentials.username}`);
     handleBackupRequest(req, res);
+    return;
+  }
+  if (pathname === UPGRADE_HTTP_PATH) {
+    log(`http upgrade ${req.method} from=${clientAddress(req.socket)} user=${credentials.username}`);
+    handleUpgradeRequest(req, res);
     return;
   }
   log(`http ${req.method} ${req.url} from=${clientAddress(req.socket)}`);
@@ -1734,7 +1835,7 @@ tcpServer.on('error', (err) => {
   process.exitCode = 1;
 });
 tcpServer.listen(bindPort, bindIp, () => {
-  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'} backup_file=${backupStore.enabled ? `enabled path=${backupStore.path}` : 'disabled'} statefile=${remoteLinkStateFile.path || 'disabled'} statefilevpn=${vpnStateFile.path || 'disabled'} statefilevnc=${vncStateFile.path || 'disabled'}`);
+  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'} backup_file=${backupStore.enabled ? `enabled path=${backupStore.path}` : 'disabled'} upgrade_apk=${upgradeStore.enabled ? `enabled path=${upgradeStore.path}` : 'disabled'} statefile=${remoteLinkStateFile.path || 'disabled'} statefilevpn=${vpnStateFile.path || 'disabled'} statefilevnc=${vncStateFile.path || 'disabled'}`);
   // No clients yet, so this also clears stale values left by a hard kill.
   syncStateFiles();
 });

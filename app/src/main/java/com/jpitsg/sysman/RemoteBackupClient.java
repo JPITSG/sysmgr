@@ -29,7 +29,7 @@ import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
-/** Uploads and downloads the archive from sysmgrd using Remote Link settings. */
+/** Backup transfer plus shared authenticated HTTP setup for Remote Link files. */
 final class RemoteBackupClient {
     private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
     private static final int TRANSFER_TIMEOUT_MILLIS = 5 * 60_000;
@@ -110,15 +110,20 @@ final class RemoteBackupClient {
     }
 
     private static HttpURLConnection open(Context context, String method) throws Exception {
+        return open(context, method, "/backup", "application/gzip, application/json");
+    }
+
+    static HttpURLConnection open(Context context, String method, String endpointPath,
+                                  String accept) throws Exception {
         Config config = Config.get(context);
-        URL url = backupUrl(config.remoteLinkEndpoint());
+        URL url = endpointUrl(config.remoteLinkEndpoint(), endpointPath);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(CONNECT_TIMEOUT_MILLIS);
         connection.setReadTimeout(TRANSFER_TIMEOUT_MILLIS);
         connection.setUseCaches(false);
         connection.setInstanceFollowRedirects(false);
-        connection.setRequestProperty("Accept", "application/gzip, application/json");
+        connection.setRequestProperty("Accept", accept);
         connection.setRequestProperty("Cache-Control", "no-store");
         String credentials = config.remoteLinkUsername() + ":" + config.remoteLinkPassword();
         connection.setRequestProperty("Authorization", "Basic "
@@ -136,7 +141,7 @@ final class RemoteBackupClient {
         return connection;
     }
 
-    private static URL backupUrl(String endpoint) throws Exception {
+    private static URL endpointUrl(String endpoint, String endpointPath) throws Exception {
         String value = endpoint == null ? "" : endpoint.trim();
         if (value.isEmpty()) {
             throw new IOException("Remote Link endpoint is missing");
@@ -155,7 +160,7 @@ final class RemoteBackupClient {
             throw new IOException("Remote Link endpoint is missing a host");
         }
         return new URI(scheme, null, original.getHost(), original.getPort(),
-                "/backup", null, null).toURL();
+                endpointPath, null, null).toURL();
     }
 
     private static SSLSocketFactory trustAnySslSocketFactory() throws Exception {
@@ -180,8 +185,8 @@ final class RemoteBackupClient {
         return ssl.getSocketFactory();
     }
 
-    private static IOException responseError(HttpURLConnection connection, int status,
-                                             String fallback) {
+    static IOException responseError(HttpURLConnection connection, int status,
+                                     String fallback) {
         String detail = readResponseBody(connection.getErrorStream());
         if (detail.isEmpty()) {
             detail = fallback + " (HTTP " + status + ")";

@@ -29,6 +29,7 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Both declared not-required: the legacy BLUETOOTH permissions would
          otherwise imply android.hardware.bluetooth as required, which would
@@ -163,6 +164,12 @@
         <provider
             android:name=".NotificationImageProvider"
             android:authorities="com.jpitsg.sysman.notificationimages"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <provider
+            android:name=".UpgradeApkProvider"
+            android:authorities="com.jpitsg.sysman.upgradeapk"
             android:exported="false"
             android:grantUriPermissions="true" />
 

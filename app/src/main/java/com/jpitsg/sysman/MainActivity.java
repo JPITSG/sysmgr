@@ -15,6 +15,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
@@ -69,6 +70,7 @@ import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
@@ -88,6 +90,7 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_IMPORT_VPN_CERT = 24;
     private static final int REQUEST_VPN_CONSENT = 25;
     private static final int REQUEST_PROJECTION_CONSENT = 26;
+    private static final int REQUEST_INSTALL_UNKNOWN_APPS = 27;
 
     /** Set on the intent when a notification is asking for screen-capture consent. */
     static final String EXTRA_REQUEST_PROJECTION = "request_projection";
@@ -156,6 +159,12 @@ public final class MainActivity extends Activity {
     private TextView notificationBackupStatus;
     private TextView notificationBackupCountPill;
     private TextView systemBackupPill;
+    private Panel upgradePanel;
+    private TextView upgradePill;
+    private TextView upgradeDateValue;
+    private TextView upgradeSizeValue;
+    private Button upgradeRefreshButton;
+    private Button upgradeInstallButton;
     private TextView wifiBadge;
     private TextView wifiSummary;
     private TextView wifiMonitorWarning;
@@ -373,6 +382,8 @@ public final class MainActivity extends Activity {
     private volatile boolean logIoRequested;
     private volatile boolean backupOperationInFlight;
     private volatile boolean backupRestoreInFlight;
+    private volatile boolean upgradeDownloadInFlight;
+    private File pendingUpgradeApk;
     private String renderedNotificationHistoryKey;
     private final LruCache<String, Bitmap> notificationImageCache =
             new LruCache<String, Bitmap>(notificationImageCacheSizeKb()) {
@@ -390,11 +401,13 @@ public final class MainActivity extends Activity {
     };
 
     private static final class Panel {
+        final View card;
         final LinearLayout content;
         final TextView pill;
         final TextView indicator;
 
-        Panel(LinearLayout content, TextView pill, TextView indicator) {
+        Panel(View card, LinearLayout content, TextView pill, TextView indicator) {
+            this.card = card;
             this.content = content;
             this.pill = pill;
             this.indicator = indicator;
@@ -555,6 +568,8 @@ public final class MainActivity extends Activity {
         registerLogChangedReceiver();
         registerNetworkStateReceiver();
         registerSystemStateReceiver();
+        UpgradeStateStore.setRefreshing(this);
+        RemoteLinkManager.probeUpgrade(this, "activity-resume");
         NotificationCleaner.clearOnAppOpen(this);
         OpenVpnManager.syncStateOnLaunch(this);
         VncManager.syncStateOnLaunch(this);
@@ -695,6 +710,7 @@ public final class MainActivity extends Activity {
         buildRebootPanel(root);
         buildSettingsTransferPanel(root);
         buildPermissionsPanel(root);
+        buildUpgradePanel(root);
         buildLogPanel(root);
 
         setContentView(scrollView);
@@ -1485,6 +1501,27 @@ public final class MainActivity extends Activity {
         LinearLayout r7 = newRow();
         frame.content.addView(r7, stack(frame.content));
         addRowButton(r7, tonalButton("Notification Settings", action("notification_settings")));
+    }
+
+    private void buildUpgradePanel(LinearLayout root) {
+        Panel frame = addExpandablePanel(root, "Upgrade", true);
+        upgradePanel = frame;
+        upgradePill = frame.pill;
+        frame.card.setVisibility(View.GONE);
+
+        LinearLayout metadata = newColumn();
+        metadata.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
+        metadata.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        frame.content.addView(metadata, stack(frame.content));
+        upgradeDateValue = addInfoRow(metadata, "File date", "Unknown", COLOR_TEXT_DIM);
+        upgradeSizeValue = addInfoRow(metadata, "File size", "Unknown", COLOR_TEXT_DIM);
+
+        LinearLayout buttons = newRow();
+        frame.content.addView(buttons, stack(frame.content));
+        upgradeRefreshButton = tonalButton("Refresh", action("refresh_upgrade"));
+        upgradeInstallButton = primaryButton("Upgrade", action("install_upgrade"));
+        addRowButton(buttons, upgradeRefreshButton);
+        addRowButton(buttons, upgradeInstallButton);
     }
 
     private void buildLogPanel(LinearLayout root) {
@@ -3310,7 +3347,7 @@ public final class MainActivity extends Activity {
             }
         });
 
-        Panel panel = new Panel(content, panelPill, indicator);
+        Panel panel = new Panel(card, content, panelPill, indicator);
         panels.add(panel);
         return panel;
     }
@@ -3997,6 +4034,7 @@ public final class MainActivity extends Activity {
         refreshNotificationBackupStatus();
         setEnabledPill(logPill, switchValue(logEnabledSwitch, config.logEnabled()));
         refreshSystemBackupStatus();
+        refreshUpgradeStatus();
         applyButtonState(startTrackingButton, !tracking, COLOR_PRIMARY, Color.WHITE);
         applyButtonState(stopTrackingButton, tracking, COLOR_DANGER, Color.WHITE);
 
@@ -4260,11 +4298,13 @@ public final class MainActivity extends Activity {
                 refreshRemoteLinkTestStatus();
                 refreshNotificationBackupStatus();
                 refreshSystemBackupStatus();
+                refreshUpgradeStatus();
             }
         };
         IntentFilter filter = new IntentFilter(RemoteLinkStateStore.ACTION_STATE_CHANGED);
         filter.addAction(RemoteLinkTestStateStore.ACTION_STATE_CHANGED);
         filter.addAction(SystemBackupStateStore.ACTION_STATE_CHANGED);
+        filter.addAction(UpgradeStateStore.ACTION_STATE_CHANGED);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(remoteLinkStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -4514,6 +4554,78 @@ public final class MainActivity extends Activity {
                 COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
         applyButtonState(restoreBackupButton, canBackUp && exists,
                 COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+    }
+
+    private void refreshUpgradeStatus() {
+        if (upgradePanel == null) {
+            return;
+        }
+        boolean configured = UpgradeStateStore.isConfigured(this);
+        if (!configured) {
+            upgradePanel.content.setVisibility(View.GONE);
+            upgradePanel.indicator.setRotation(-90f);
+            upgradePanel.card.setVisibility(View.GONE);
+            return;
+        }
+        upgradePanel.card.setVisibility(View.VISIBLE);
+
+        boolean connected = Config.get(this).remoteLinkEnabled()
+                && RemoteLinkStateStore.isConnected(this);
+        boolean checked = UpgradeStateStore.isChecked(this);
+        boolean exists = UpgradeStateStore.apkExists(this);
+        String label;
+        int background;
+        int foreground;
+        if (upgradeDownloadInFlight) {
+            label = "DOWNLOADING";
+            background = COLOR_PRIMARY_CONTAINER;
+            foreground = COLOR_PRIMARY_ON_CONTAINER;
+        } else if (!connected) {
+            label = "LINK OFFLINE";
+            background = COLOR_DANGER_CONTAINER;
+            foreground = COLOR_DANGER_ON_CONTAINER;
+        } else if (!checked) {
+            label = "CHECKING";
+            background = COLOR_NEUTRAL_CONTAINER;
+            foreground = COLOR_NEUTRAL_ON_CONTAINER;
+        } else if (!exists) {
+            label = "MISSING";
+            background = COLOR_DANGER_CONTAINER;
+            foreground = COLOR_DANGER_ON_CONTAINER;
+        } else {
+            label = "AVAILABLE";
+            background = COLOR_PRIMARY_CONTAINER;
+            foreground = COLOR_PRIMARY_ON_CONTAINER;
+        }
+        setPillState(upgradePill, label, background, foreground);
+
+        if (!checked) {
+            upgradeDateValue.setText("Checking…");
+            upgradeSizeValue.setText("Checking…");
+            upgradeDateValue.setTextColor(COLOR_TEXT_DIM);
+            upgradeSizeValue.setTextColor(COLOR_TEXT_DIM);
+        } else if (exists) {
+            long modifiedAt = UpgradeStateStore.apkModifiedAtMillis(this);
+            long sizeBytes = UpgradeStateStore.apkSizeBytes(this);
+            upgradeDateValue.setText(modifiedAt > 0L
+                    ? new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                    .format(new Date(modifiedAt))
+                    : "Unknown");
+            upgradeSizeValue.setText(OpenVpnService.formatBytes(sizeBytes));
+            upgradeDateValue.setTextColor(modifiedAt > 0L ? COLOR_TEXT : COLOR_TEXT_DIM);
+            upgradeSizeValue.setTextColor(COLOR_TEXT);
+        } else {
+            upgradeDateValue.setText("Unknown");
+            upgradeSizeValue.setText("Unknown");
+            upgradeDateValue.setTextColor(COLOR_TEXT_DIM);
+            upgradeSizeValue.setTextColor(COLOR_TEXT_DIM);
+        }
+
+        boolean idleAndConnected = connected && !upgradeDownloadInFlight;
+        applyButtonState(upgradeRefreshButton, idleAndConnected,
+                COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+        applyButtonState(upgradeInstallButton, idleAndConnected && checked && exists,
+                COLOR_PRIMARY, Color.WHITE);
     }
 
     private void setPillState(TextView target, String text, int bg, int fg) {
@@ -5886,7 +5998,7 @@ public final class MainActivity extends Activity {
                             Toast.makeText(MainActivity.this, "Backup completed",
                                     Toast.LENGTH_SHORT).show();
                         } else {
-                            String detail = backupFailureMessage(resultFailure, "Backup failed");
+                            String detail = operationFailureMessage(resultFailure, "Backup failed");
                             LogStore.append(MainActivity.this, "backup", "Backup failed: " + detail);
                             Toast.makeText(MainActivity.this, detail, Toast.LENGTH_LONG).show();
                         }
@@ -5969,7 +6081,7 @@ public final class MainActivity extends Activity {
                                     Toast.LENGTH_SHORT).show();
                             refreshNotificationHistory();
                         } else {
-                            String detail = backupFailureMessage(resultFailure, "Restore failed");
+                            String detail = operationFailureMessage(resultFailure, "Restore failed");
                             LogStore.append(MainActivity.this, "backup", "Restore failed: " + detail);
                             Toast.makeText(MainActivity.this, detail, Toast.LENGTH_LONG).show();
                         }
@@ -6011,6 +6123,145 @@ public final class MainActivity extends Activity {
         return true;
     }
 
+    private void refreshUpgradeMetadata() {
+        UpgradeStateStore.setRefreshing(this);
+        refreshUpgradeStatus();
+        if (!RemoteLinkManager.probeUpgrade(this, "upgrade-refresh")) {
+            Toast.makeText(this, "Waiting for Remote Link", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void startUpgradeDownload() {
+        if (upgradeDownloadInFlight) {
+            Toast.makeText(this, "An upgrade download is already running",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!Config.get(this).remoteLinkEnabled()
+                || !RemoteLinkStateStore.isConnected(this)) {
+            Toast.makeText(this, "Remote Link is not connected", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!UpgradeStateStore.isChecked(this)) {
+            Toast.makeText(this, "Waiting for upgrade status from Remote Link",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!UpgradeStateStore.isConfigured(this)
+                || !UpgradeStateStore.apkExists(this)) {
+            Toast.makeText(this, "Upgrade APK is not available", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        final Context app = getApplicationContext();
+        pendingUpgradeApk = null;
+        upgradeDownloadInFlight = true;
+        refreshUpgradeStatus();
+        LogStore.append(app, "upgrade", "Upgrade APK download started");
+        Toast.makeText(this, "Downloading upgrade APK", Toast.LENGTH_SHORT).show();
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                File apk = null;
+                Exception failure = null;
+                try {
+                    apk = RemoteUpgradeClient.download(app);
+                    validateUpgradeApk(apk);
+                } catch (Exception e) {
+                    failure = e;
+                    if (apk != null) {
+                        //noinspection ResultOfMethodCallIgnored
+                        apk.delete();
+                    }
+                }
+                final File downloadedApk = apk;
+                final Exception resultFailure = failure;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        upgradeDownloadInFlight = false;
+                        refreshUpgradeStatus();
+                        if (resultFailure != null) {
+                            String detail = operationFailureMessage(
+                                    resultFailure, "Upgrade download failed");
+                            LogStore.append(MainActivity.this, "upgrade",
+                                    "Upgrade download failed: " + detail);
+                            Toast.makeText(MainActivity.this, detail,
+                                    Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        LogStore.append(MainActivity.this, "upgrade",
+                                "Upgrade APK downloaded bytes=" + downloadedApk.length());
+                        prepareUpgradeInstall(downloadedApk);
+                    }
+                });
+            }
+        }, "SystemManagerUpgrade").start();
+    }
+
+    private void validateUpgradeApk(File apk) throws IOException {
+        if (apk == null || !apk.isFile() || apk.length() < 1L) {
+            throw new IOException("Downloaded upgrade APK is empty");
+        }
+        PackageInfo archive = getPackageManager().getPackageArchiveInfo(
+                apk.getAbsolutePath(), 0);
+        if (archive == null || archive.packageName == null) {
+            throw new IOException("Downloaded file is not a valid Android APK");
+        }
+        if (!getPackageName().equals(archive.packageName)) {
+            throw new IOException("Downloaded APK is for a different application");
+        }
+    }
+
+    private void prepareUpgradeInstall(File apk) {
+        pendingUpgradeApk = apk;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && !getPackageManager().canRequestPackageInstalls()) {
+            Intent permission = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName()));
+            try {
+                startActivityForResult(permission, REQUEST_INSTALL_UNKNOWN_APPS);
+                Toast.makeText(this, "Allow installs from System Manager, then return",
+                        Toast.LENGTH_LONG).show();
+            } catch (RuntimeException e) {
+                pendingUpgradeApk = null;
+                LogStore.append(this, "upgrade", "Could not open install permission: "
+                        + e.getMessage());
+                Toast.makeText(this, "Could not open install permission settings",
+                        Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+        launchUpgradeInstaller();
+    }
+
+    private void launchUpgradeInstaller() {
+        File apk = pendingUpgradeApk;
+        if (apk == null || !apk.isFile()) {
+            pendingUpgradeApk = null;
+            Toast.makeText(this, "Downloaded upgrade APK is no longer available",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        Uri uri = UpgradeApkProvider.apkUri();
+        Intent install = new Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, UpgradeApkProvider.MIME_TYPE);
+        install.setClipData(ClipData.newRawUri("System Manager upgrade", uri));
+        install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(install);
+            pendingUpgradeApk = null;
+            LogStore.append(this, "upgrade", "Android package installer opened");
+        } catch (RuntimeException e) {
+            pendingUpgradeApk = null;
+            LogStore.append(this, "upgrade", "Could not open package installer: "
+                    + e.getMessage());
+            Toast.makeText(this, "Could not open Android's package installer",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void prepareForSystemRestore(Context context) {
         HighPriorityAlertPlayer.stop(context, "backup-restore");
         OpenVpnManager.disconnect(context, "backup-restore");
@@ -6031,7 +6282,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private String backupFailureMessage(Exception error, String fallback) {
+    private String operationFailureMessage(Exception error, String fallback) {
         if (error == null) {
             return fallback;
         }
@@ -6096,6 +6347,18 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_INSTALL_UNKNOWN_APPS) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O
+                    || getPackageManager().canRequestPackageInstalls()) {
+                launchUpgradeInstaller();
+            } else {
+                pendingUpgradeApk = null;
+                LogStore.append(this, "upgrade", "Install permission was not granted");
+                Toast.makeText(this, "Install permission was not granted",
+                        Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
         if (requestCode == REQUEST_PROJECTION_CONSENT) {
             if (resultCode == RESULT_OK && data != null) {
                 // Handed straight to the service: it has to be foreground with
@@ -6182,6 +6445,10 @@ public final class MainActivity extends Activity {
                     startSystemBackup();
                 } else if ("restore_backup".equals(command)) {
                     confirmSystemRestore();
+                } else if ("refresh_upgrade".equals(command)) {
+                    refreshUpgradeMetadata();
+                } else if ("install_upgrade".equals(command)) {
+                    startUpgradeDownload();
                 } else if ("common_permissions".equals(command)) {
                     requestCommonPermissions();
                 } else if ("background_location".equals(command)) {

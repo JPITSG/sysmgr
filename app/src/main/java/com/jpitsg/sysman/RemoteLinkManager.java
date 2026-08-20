@@ -50,6 +50,20 @@ final class RemoteLinkManager {
         return RemoteLinkService.sendBackupProbeIfRunning(app, reason);
     }
 
+    static boolean probeUpgrade(Context context, String reason) {
+        Context app = context.getApplicationContext();
+        if (!Config.get(app).remoteLinkEnabled()) {
+            UpgradeStateStore.setServerState(app, false, false, 0L, 0L);
+            return false;
+        }
+        boolean queued = RemoteLinkService.sendUpgradeProbeIfRunning(app, reason);
+        if (!queued) {
+            // A hello response includes the same state after the service starts.
+            sync(app, reason);
+        }
+        return queued;
+    }
+
     static boolean ping(Context context, String reason) {
         Context app = context.getApplicationContext();
         if (!Config.get(app).remoteLinkEnabled()) {

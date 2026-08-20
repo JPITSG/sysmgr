@@ -164,7 +164,7 @@ Node 14+.
 ### sysmgrd
 
 ```
-sysmgrd [--config=<path>] --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>]
+sysmgrd [--config=<path>] --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>] [--upgradeapk=<path>]
 ```
 
 Daemon options can also be read from `--config=<path>`. Each non-empty line
@@ -194,6 +194,13 @@ restores the authenticated archive through the Remote Link server at
 `/backup`; sysmgrd streams uploads to a temporary file and atomically replaces
 the configured `tar.gz` with mode `0600`. The Backup panel remains unavailable
 unless the Remote Link is connected and this option is configured.
+
+In-app upgrades are enabled with `--upgradeapk=<path>` (or
+`upgradeapk /path/to/SystemManager.apk` in the config file). When configured,
+the app shows an Upgrade panel, reports the APK's modification date and size,
+and downloads it from the authenticated `/upgrade.apk` endpoint before handing
+it to Android's package installer. The APK may be replaced at that path without
+restarting sysmgrd; Refresh reads the current file metadata.
 
 Optional state-file outputs for automation are enabled with `--statefile`,
 `--statefilevpn`, and `--statefilevnc`. The first contains `Online` or `Offline`.

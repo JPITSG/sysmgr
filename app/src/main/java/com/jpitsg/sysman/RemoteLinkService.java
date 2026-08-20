@@ -84,6 +84,8 @@ public final class RemoteLinkService extends Service {
     private final java.util.Map<String, Long> backupInFlight = new java.util.HashMap<>();
     private final AtomicBoolean backupProbeRequested = new AtomicBoolean(false);
     private volatile String backupProbeReason = "";
+    private final AtomicBoolean upgradeProbeRequested = new AtomicBoolean(false);
+    private volatile String upgradeProbeReason = "";
     private volatile boolean backupOutboxDirty = true;
     private final Object linkTestLock = new Object();
     private String pendingLinkTest = "";
@@ -226,6 +228,16 @@ public final class RemoteLinkService extends Service {
         return true;
     }
 
+    static boolean sendUpgradeProbeIfRunning(Context context, String reason) {
+        RemoteLinkService service = activeService;
+        if (service == null) {
+            return false;
+        }
+        service.upgradeProbeReason = reason == null ? "unknown" : reason;
+        service.upgradeProbeRequested.set(true);
+        return true;
+    }
+
     private void startWorkerIfNeeded(final String reason) {
         if (!workerRunning.compareAndSet(false, true)) {
             return;
@@ -257,6 +269,7 @@ public final class RemoteLinkService extends Service {
                 try {
                     NotificationBackupStateStore.setChecking(this);
                     SystemBackupStateStore.setChecking(this);
+                    UpgradeStateStore.setChecking(this);
                     LogStore.append(this, "remote", "Connecting to " + config.remoteLinkEndpoint());
                     current.connect();
                     connected = true;
@@ -335,6 +348,7 @@ public final class RemoteLinkService extends Service {
             expireThroughputTest(current);
             sendQueuedPings(current);
             sendBackupProbeIfRequested(current);
+            sendUpgradeProbeIfRequested(current);
             String message = current.readTextFrame();
             long inboundAt = current.lastInboundAtMillis();
             if (inboundAt > lastInboundAt) {
@@ -417,6 +431,13 @@ public final class RemoteLinkService extends Service {
                 LogStore.append(this, "remote", "Notification backup status from server enabled=" + enabled);
                 return true;
             }
+            if ("upgrade_status".equals(type)) {
+                applyUpgradeStatus(json);
+                LogStore.append(this, "remote", "Upgrade APK status from server configured="
+                        + json.optBoolean("upgrade_apk", false)
+                        + " exists=" + json.optBoolean("upgrade_exists", false));
+                return true;
+            }
             if ("hello_ack".equals(type) || "heartbeat_ack".equals(type)) {
                 if (json.has("notif_backup")) {
                     NotificationBackupStateStore.setServerAvailable(this, json.optBoolean("notif_backup", false));
@@ -431,6 +452,12 @@ public final class RemoteLinkService extends Service {
                     // An older daemon does not advertise full-backup support.
                     SystemBackupStateStore.setServerState(this, false, false, 0L);
                 }
+                if (json.has("upgrade_apk")) {
+                    applyUpgradeStatus(json);
+                } else if ("hello_ack".equals(type)) {
+                    // An older daemon does not advertise in-app upgrade support.
+                    UpgradeStateStore.setServerState(this, false, false, 0L, 0L);
+                }
                 // Server signalled liveness; re-check the outbox (covers a server that
                 // re-enables the store mid-session even if a queue nudge was missed).
                 backupOutboxDirty = true;
@@ -439,6 +466,15 @@ public final class RemoteLinkService extends Service {
         } catch (Exception ignored) {
         }
         return false;
+    }
+
+    private void applyUpgradeStatus(JSONObject json) {
+        UpgradeStateStore.setServerState(
+                this,
+                json.optBoolean("upgrade_apk", false),
+                json.optBoolean("upgrade_exists", false),
+                json.optLong("upgrade_size", 0L),
+                json.optLong("upgrade_mtime", 0L));
     }
 
     private void handleGpsAck(JSONObject json) {
@@ -498,6 +534,25 @@ public final class RemoteLinkService extends Service {
             LogStore.append(this, "remote", "Notification backup probe sent reason=" + backupProbeReason);
         } catch (Exception e) {
             LogStore.append(this, "remote", "Notification backup probe failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            current.close();
+        }
+    }
+
+    private void sendUpgradeProbeIfRequested(RemoteWebSocketClient current) {
+        if (!upgradeProbeRequested.compareAndSet(true, false)) {
+            return;
+        }
+        try {
+            JSONObject probe = new JSONObject();
+            probe.put("type", "upgrade_probe");
+            probe.put("id", "android-" + UUID.randomUUID().toString());
+            probe.put("ts", System.currentTimeMillis() / 1000L);
+            current.sendText(probe.toString());
+            LogStore.append(this, "remote", "Upgrade APK probe sent reason="
+                    + upgradeProbeReason);
+        } catch (Exception e) {
+            LogStore.append(this, "remote", "Upgrade APK probe failed: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());
             current.close();
         }
