@@ -453,6 +453,10 @@ public final class RemoteLinkService extends Service {
                 handleThroughputUploadAck(current, json);
                 return true;
             }
+            if ("throughput_ack".equals(type)) {
+                handleLegacyThroughputAck(json);
+                return true;
+            }
             if ("throughput_download_start".equals(type)) {
                 handleThroughputDownloadStart(json);
                 return true;
@@ -1005,6 +1009,17 @@ public final class RemoteLinkService extends Service {
                                 + json.optString("reason", "invalid measurement"));
             }
         }
+    }
+
+    private void handleLegacyThroughputAck(JSONObject json) {
+        ThroughputTest test = throughputTest;
+        if (test == null || !test.id.equals(json.optString("id", ""))) {
+            LogStore.append(this, "remote",
+                    "Legacy throughput acknowledgement ignored; no matching test");
+            return;
+        }
+        failThroughputTest(test,
+                "sysmgrd uses the legacy upload-only throughput protocol; restart or update it");
     }
 
     private void handleThroughputDownloadStart(JSONObject json) {
