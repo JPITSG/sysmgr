@@ -41,7 +41,7 @@ const UPGRADE_HTTP_PATH = '/upgrade.apk';
 // Bounds a malformed or accidental upload without forcing normal app backups
 // into memory. The request body is streamed directly to disk.
 const BACKUP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
-const THROUGHPUT_TEST_BYTES = 10 * 1024 * 1024;
+const THROUGHPUT_TEST_BYTES = 1024 * 1024;
 const THROUGHPUT_CHUNK_MAX_BYTES = 64 * 1024;
 const THROUGHPUT_TEST_TIMEOUT_MS = 3 * 60000;
 
@@ -766,14 +766,25 @@ function assignClientUuid(connectionId, socket, rawUuid) {
   return uuid;
 }
 
-function sendThroughputAck(socket, id, ok, reason, bytes, durationMs) {
+function sendThroughputUploadAck(socket, id, ok, reason, bytes, durationMs) {
   sendJson(socket, {
-    type: 'throughput_ack',
+    type: 'throughput_upload_ack',
     id,
     ok,
     reason,
-    bytes,
-    duration_ms: durationMs,
+    upload_bytes: bytes,
+    upload_duration_ms: durationMs,
+    ts: Math.floor(Date.now() / 1000)
+  });
+}
+
+function sendThroughputComplete(socket, id, ok, reason, downloadBytes) {
+  sendJson(socket, {
+    type: 'throughput_complete',
+    id,
+    ok,
+    reason,
+    download_bytes: downloadBytes,
     ts: Math.floor(Date.now() / 1000)
   });
 }
@@ -781,60 +792,114 @@ function sendThroughputAck(socket, id, ok, reason, bytes, durationMs) {
 function startThroughputTest(connectionId, socket, parsed) {
   const client = clients.get(connectionId);
   const id = String(parsed.id || '').slice(0, 128);
-  const expectedBytes = Number(parsed.bytes);
-  if (!client || !id || expectedBytes !== THROUGHPUT_TEST_BYTES) {
-    sendThroughputAck(socket, id, false, 'invalid test request', 0, 0);
-    log(`throughput test rejected connection=${connectionId} id=${logValue(id)} bytes=${logValue(parsed.bytes)}`);
+  const uploadBytes = Number(parsed.upload_bytes);
+  const downloadBytes = Number(parsed.download_bytes);
+  if (!client || !id || uploadBytes !== THROUGHPUT_TEST_BYTES ||
+      downloadBytes !== THROUGHPUT_TEST_BYTES) {
+    sendThroughputUploadAck(socket, id, false, 'invalid test request', 0, 0);
+    log(`throughput test rejected connection=${connectionId} id=${logValue(id)} upload_bytes=${logValue(parsed.upload_bytes)} download_bytes=${logValue(parsed.download_bytes)}`);
     return;
   }
   if (client.throughputTest && Date.now() > client.throughputTest.expiresAt) {
-    log(`throughput test expired connection=${connectionId} id=${logValue(client.throughputTest.id)} bytes=${client.throughputTest.receivedBytes}`);
+    log(`throughput test expired connection=${connectionId} id=${logValue(client.throughputTest.id)} phase=${client.throughputTest.phase}`);
     client.throughputTest = null;
   }
   if (client.throughputTest) {
-    sendThroughputAck(socket, id, false, 'test already running', 0, 0);
+    sendThroughputUploadAck(socket, id, false, 'test already running', 0, 0);
     log(`throughput test rejected connection=${connectionId} id=${logValue(id)} reason=already-running`);
     return;
   }
   client.throughputTest = {
     id,
-    expectedBytes,
-    receivedBytes: 0,
-    startedAtNanos: process.hrtime.bigint(),
+    uploadBytes,
+    downloadBytes,
+    receivedUploadBytes: 0,
+    uploadStartedAtNanos: process.hrtime.bigint(),
+    phase: 'upload',
     expiresAt: Date.now() + THROUGHPUT_TEST_TIMEOUT_MS
   };
-  log(`throughput test started connection=${connectionId} id=${logValue(id)} bytes=${expectedBytes}`);
+  log(`throughput test started connection=${connectionId} id=${logValue(id)} upload_bytes=${uploadBytes} download_bytes=${downloadBytes}`);
 }
 
 function handleBinaryMessage(connectionId, socket, payload) {
   const client = clients.get(connectionId);
   const test = client && client.throughputTest;
-  if (!test) {
-    log(`binary frame ignored connection=${connectionId} bytes=${payload.length} reason=no-throughput-test`);
+  if (!test || test.phase !== 'upload') {
+    log(`binary frame ignored connection=${connectionId} bytes=${payload.length} reason=${test ? `throughput-phase-${test.phase}` : 'no-throughput-test'}`);
     return;
   }
   if (Date.now() > test.expiresAt) {
     client.throughputTest = null;
-    sendThroughputAck(socket, test.id, false, 'test timed out', test.receivedBytes, 0);
-    log(`throughput test timed out connection=${connectionId} id=${logValue(test.id)} bytes=${test.receivedBytes}`);
+    sendThroughputUploadAck(socket, test.id, false, 'upload timed out', test.receivedUploadBytes, 0);
+    log(`throughput upload timed out connection=${connectionId} id=${logValue(test.id)} bytes=${test.receivedUploadBytes}`);
     return;
   }
-  if (payload.length > THROUGHPUT_CHUNK_MAX_BYTES ||
-      test.receivedBytes + payload.length > test.expectedBytes) {
+  if (payload.length < 1 || payload.length > THROUGHPUT_CHUNK_MAX_BYTES ||
+      test.receivedUploadBytes + payload.length > test.uploadBytes) {
     client.throughputTest = null;
-    sendThroughputAck(socket, test.id, false, 'invalid payload size', test.receivedBytes, 0);
-    log(`throughput test rejected connection=${connectionId} id=${logValue(test.id)} reason=invalid-payload-size chunk_bytes=${payload.length} received_bytes=${test.receivedBytes}`);
+    sendThroughputUploadAck(socket, test.id, false, 'invalid upload payload size', test.receivedUploadBytes, 0);
+    log(`throughput upload rejected connection=${connectionId} id=${logValue(test.id)} reason=invalid-payload-size chunk_bytes=${payload.length} received_bytes=${test.receivedUploadBytes}`);
     return;
   }
 
-  test.receivedBytes += payload.length;
-  if (test.receivedBytes !== test.expectedBytes) {
+  test.receivedUploadBytes += payload.length;
+  if (test.receivedUploadBytes !== test.uploadBytes) {
     return;
   }
-  const durationMs = Number(process.hrtime.bigint() - test.startedAtNanos) / 1e6;
-  client.throughputTest = null;
-  sendThroughputAck(socket, test.id, true, 'received', test.receivedBytes, durationMs);
-  log(`throughput test completed connection=${connectionId} id=${logValue(test.id)} bytes=${test.receivedBytes} duration_ms=${durationMs.toFixed(3)}`);
+  const durationMs = Number(process.hrtime.bigint() - test.uploadStartedAtNanos) / 1e6;
+  test.phase = 'download-ready';
+  test.expiresAt = Date.now() + THROUGHPUT_TEST_TIMEOUT_MS;
+  sendThroughputUploadAck(socket, test.id, true, 'upload received',
+    test.receivedUploadBytes, durationMs);
+  log(`throughput upload completed connection=${connectionId} id=${logValue(test.id)} bytes=${test.receivedUploadBytes} duration_ms=${durationMs.toFixed(3)}`);
+}
+
+function handleThroughputDownloadReady(connectionId, socket, parsed) {
+  const client = clients.get(connectionId);
+  const test = client && client.throughputTest;
+  const id = String(parsed.id || '').slice(0, 128);
+  const downloadBytes = Number(parsed.download_bytes);
+  if (!test || test.id !== id) {
+    sendThroughputComplete(socket, id, false, 'no matching test', 0);
+    log(`throughput download rejected connection=${connectionId} id=${logValue(id)} reason=no-matching-test`);
+    return;
+  }
+  if (Date.now() > test.expiresAt) {
+    client.throughputTest = null;
+    sendThroughputComplete(socket, id, false, 'download timed out', 0);
+    log(`throughput download rejected connection=${connectionId} id=${logValue(id)} reason=timed-out`);
+    return;
+  }
+  if (test.phase !== 'download-ready' || downloadBytes !== test.downloadBytes) {
+    client.throughputTest = null;
+    sendThroughputComplete(socket, id, false, 'invalid download request', 0);
+    log(`throughput download rejected connection=${connectionId} id=${logValue(id)} reason=invalid-request phase=${test.phase} bytes=${logValue(parsed.download_bytes)}`);
+    return;
+  }
+
+  test.phase = 'download';
+  try {
+    sendJson(socket, {
+      type: 'throughput_download_start',
+      id,
+      download_bytes: test.downloadBytes,
+      ts: Math.floor(Date.now() / 1000)
+    });
+    const chunk = Buffer.alloc(THROUGHPUT_CHUNK_MAX_BYTES);
+    let sentBytes = 0;
+    while (sentBytes < test.downloadBytes) {
+      const count = Math.min(chunk.length, test.downloadBytes - sentBytes);
+      sendFrame(socket, 0x2, count === chunk.length ? chunk : chunk.subarray(0, count));
+      sentBytes += count;
+    }
+    client.throughputTest = null;
+    sendThroughputComplete(socket, id, true, 'download sent', sentBytes);
+    log(`throughput download completed connection=${connectionId} id=${logValue(id)} bytes=${sentBytes}`);
+  } catch (err) {
+    client.throughputTest = null;
+    log(`throughput download failed connection=${connectionId} id=${logValue(id)} error=${err.message}`);
+    socket.destroy();
+  }
 }
 
 function handleTextMessage(connectionId, socket, text) {
@@ -901,6 +966,10 @@ function handleTextMessage(connectionId, socket, text) {
   }
   if (parsed.type === 'throughput_start') {
     startThroughputTest(connectionId, socket, parsed);
+    return;
+  }
+  if (parsed.type === 'throughput_download_ready') {
+    handleThroughputDownloadReady(connectionId, socket, parsed);
     return;
   }
   if (parsed.type === 'ack' && parsed.id) {

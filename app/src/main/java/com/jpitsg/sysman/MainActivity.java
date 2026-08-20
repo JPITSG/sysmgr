@@ -246,7 +246,8 @@ public final class MainActivity extends Activity {
     private EditText remoteLinkPasswordField;
     private EditText remoteLinkHeartbeatSecondsField;
     private TextView remoteLinkLatencyValue;
-    private TextView remoteLinkThroughputValue;
+    private TextView remoteLinkUploadThroughputValue;
+    private TextView remoteLinkDownloadThroughputValue;
     private Button remoteLinkLatencyButton;
     private Button remoteLinkThroughputButton;
     private TextView openVpnPill;
@@ -1419,7 +1420,10 @@ public final class MainActivity extends Activity {
         testStatus.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
         frame.content.addView(testStatus, stack(frame.content));
         remoteLinkLatencyValue = addInfoRow(testStatus, "Latency", "Unknown", COLOR_TEXT_DIM);
-        remoteLinkThroughputValue = addInfoRow(testStatus, "Throughput", "Unknown", COLOR_TEXT_DIM);
+        remoteLinkUploadThroughputValue = addInfoRow(
+                testStatus, "Send throughput", "Unknown", COLOR_TEXT_DIM);
+        remoteLinkDownloadThroughputValue = addInfoRow(
+                testStatus, "Receive throughput", "Unknown", COLOR_TEXT_DIM);
 
         LinearLayout testRow = newRow();
         frame.content.addView(testRow, stack(frame.content));
@@ -4239,13 +4243,17 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshRemoteLinkTestStatus() {
-        if (remoteLinkLatencyValue == null || remoteLinkThroughputValue == null) {
+        if (remoteLinkLatencyValue == null
+                || remoteLinkUploadThroughputValue == null
+                || remoteLinkDownloadThroughputValue == null) {
             return;
         }
         boolean latencyTesting = RemoteLinkTestStateStore.isLatencyTesting(this);
         boolean throughputTesting = RemoteLinkTestStateStore.isThroughputTesting(this);
         long latencyMicros = RemoteLinkTestStateStore.latencyMicros(this);
-        long throughputBps = RemoteLinkTestStateStore.throughputBitsPerSecond(this);
+        String throughputPhase = RemoteLinkTestStateStore.throughputPhase(this);
+        long uploadBps = RemoteLinkTestStateStore.uploadBitsPerSecond(this);
+        long downloadBps = RemoteLinkTestStateStore.downloadBitsPerSecond(this);
 
         if (latencyTesting) {
             remoteLinkLatencyValue.setText("Testing for 10 s…");
@@ -4259,23 +4267,23 @@ public final class MainActivity extends Activity {
             remoteLinkLatencyValue.setTextColor(COLOR_TEXT_DIM);
         }
 
-        if (throughputTesting) {
-            remoteLinkThroughputValue.setText("Sending 10 MB…");
-            remoteLinkThroughputValue.setTextColor(COLOR_PRIMARY_ON_CONTAINER);
-        } else if (throughputBps >= 1_000_000L) {
-            remoteLinkThroughputValue.setText(String.format(
-                    Locale.US, "%.1f Mbps", throughputBps / 1_000_000.0));
-            remoteLinkThroughputValue.setTextColor(COLOR_TEXT);
-        } else if (throughputBps >= 1000L) {
-            remoteLinkThroughputValue.setText(String.format(
-                    Locale.US, "%.1f Kbps", throughputBps / 1000.0));
-            remoteLinkThroughputValue.setTextColor(COLOR_TEXT);
-        } else if (throughputBps >= 0L) {
-            remoteLinkThroughputValue.setText(throughputBps + " bps");
-            remoteLinkThroughputValue.setTextColor(COLOR_TEXT);
+        if (throughputTesting
+                && RemoteLinkTestStateStore.THROUGHPUT_PHASE_UPLOAD.equals(throughputPhase)) {
+            remoteLinkUploadThroughputValue.setText("Sending 1 MB…");
+            remoteLinkUploadThroughputValue.setTextColor(COLOR_PRIMARY_ON_CONTAINER);
         } else {
-            remoteLinkThroughputValue.setText("Unknown");
-            remoteLinkThroughputValue.setTextColor(COLOR_TEXT_DIM);
+            setThroughputValue(remoteLinkUploadThroughputValue, uploadBps);
+        }
+
+        if (throughputTesting
+                && RemoteLinkTestStateStore.THROUGHPUT_PHASE_DOWNLOAD.equals(throughputPhase)) {
+            remoteLinkDownloadThroughputValue.setText("Receiving 1 MB…");
+            remoteLinkDownloadThroughputValue.setTextColor(COLOR_PRIMARY_ON_CONTAINER);
+        } else if (throughputTesting) {
+            remoteLinkDownloadThroughputValue.setText("Waiting…");
+            remoteLinkDownloadThroughputValue.setTextColor(COLOR_TEXT_DIM);
+        } else {
+            setThroughputValue(remoteLinkDownloadThroughputValue, downloadBps);
         }
 
         boolean connected = Config.get(this).remoteLinkEnabled()
@@ -4285,6 +4293,24 @@ public final class MainActivity extends Activity {
                 COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
         applyButtonState(remoteLinkThroughputButton, canTest,
                 COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+    }
+
+    private void setThroughputValue(TextView target, long bitsPerSecond) {
+        if (bitsPerSecond >= 1_000_000L) {
+            target.setText(String.format(
+                    Locale.US, "%.1f Mbps", bitsPerSecond / 1_000_000.0));
+            target.setTextColor(COLOR_TEXT);
+        } else if (bitsPerSecond >= 1000L) {
+            target.setText(String.format(
+                    Locale.US, "%.1f Kbps", bitsPerSecond / 1000.0));
+            target.setTextColor(COLOR_TEXT);
+        } else if (bitsPerSecond >= 0L) {
+            target.setText(bitsPerSecond + " bps");
+            target.setTextColor(COLOR_TEXT);
+        } else {
+            target.setText("Unknown");
+            target.setTextColor(COLOR_TEXT_DIM);
+        }
     }
 
     private void registerRemoteLinkStateReceiver() {
@@ -5863,7 +5889,7 @@ public final class MainActivity extends Activity {
         LogStore.append(this, "ui", "Remote Link throughput test requested");
         boolean started = RemoteLinkManager.testThroughput(this);
         Toast.makeText(this,
-                started ? "Sending 10 MB to measure Remote Link throughput"
+                started ? "Testing a 1 MB send, then a 1 MB receive"
                         : "Remote Link is unavailable or another test is running",
                 Toast.LENGTH_SHORT).show();
         refreshRemoteLinkTestStatus();

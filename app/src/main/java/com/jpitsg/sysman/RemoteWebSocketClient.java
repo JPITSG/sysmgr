@@ -50,6 +50,32 @@ final class RemoteWebSocketClient implements Closeable {
     private OutputStream out;
     private volatile long lastInboundAtMillis;
 
+    static final class Frame {
+        private final int opcode;
+        private final byte[] payload;
+
+        Frame(int opcode, byte[] payload) {
+            this.opcode = opcode;
+            this.payload = payload;
+        }
+
+        boolean isText() {
+            return opcode == OPCODE_TEXT;
+        }
+
+        boolean isBinary() {
+            return opcode == OPCODE_BINARY;
+        }
+
+        String text() {
+            return new String(payload, StandardCharsets.UTF_8);
+        }
+
+        byte[] binaryPayload() {
+            return payload;
+        }
+    }
+
     RemoteWebSocketClient(String endpoint, String username, String password, boolean acceptAnySslCert) {
         this.endpoint = endpoint;
         this.username = username == null ? "" : username;
@@ -96,7 +122,7 @@ final class RemoteWebSocketClient implements Closeable {
         return lastInboundAtMillis;
     }
 
-    String readTextFrame() throws IOException {
+    Frame readFrame() throws IOException {
         int first;
         try {
             first = in.read();
@@ -135,8 +161,8 @@ final class RemoteWebSocketClient implements Closeable {
         }
 
         int opcode = first & 0x0f;
-        if (opcode == OPCODE_TEXT) {
-            return new String(payload, StandardCharsets.UTF_8);
+        if (opcode == OPCODE_TEXT || opcode == OPCODE_BINARY) {
+            return new Frame(opcode, payload);
         }
         if (opcode == OPCODE_PING) {
             sendFrame(OPCODE_PONG, payload);

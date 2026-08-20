@@ -53,9 +53,13 @@ public final class RemoteLinkService extends Service {
     private static final String LINK_TEST_THROUGHPUT = "throughput";
     private static final long LATENCY_TEST_DURATION_MILLIS = 10_000L;
     private static final long LATENCY_SAMPLE_INTERVAL_MILLIS = 500L;
-    private static final int THROUGHPUT_TEST_BYTES = 10 * 1024 * 1024;
+    private static final int THROUGHPUT_TEST_BYTES = 1024 * 1024;
     private static final int THROUGHPUT_CHUNK_BYTES = 64 * 1024;
-    private static final long THROUGHPUT_ACK_TIMEOUT_MILLIS = 3L * 60_000L;
+    private static final long THROUGHPUT_TEST_TIMEOUT_MILLIS = 3L * 60_000L;
+    private static final String THROUGHPUT_PHASE_UPLOAD = "upload";
+    private static final String THROUGHPUT_PHASE_DOWNLOAD_READY = "download-ready";
+    private static final String THROUGHPUT_PHASE_DOWNLOAD = "download";
+    private static final String THROUGHPUT_PHASE_COMPLETE = "complete";
     // If the platform ever times the foreground service out anyway, come back
     // on this delay rather than the watchdog's, but slowly enough that a
     // still-exhausted runtime budget cannot turn into a restart loop.
@@ -90,8 +94,9 @@ public final class RemoteLinkService extends Service {
     private final Object linkTestLock = new Object();
     private String pendingLinkTest = "";
     private String activeLinkTest = "";
-    // Latency is advanced on the socket worker. Throughput is written on its
-    // own thread so a slow upload never blocks incoming commands or pings.
+    // Latency and the throughput download are consumed on the socket worker.
+    // Throughput upload writes on its own thread so it never blocks incoming
+    // commands or pings.
     private LatencyTest latencyTest;
     private volatile ThroughputTest throughputTest;
     private Thread worker;
@@ -349,7 +354,7 @@ public final class RemoteLinkService extends Service {
             sendQueuedPings(current);
             sendBackupProbeIfRequested(current);
             sendUpgradeProbeIfRequested(current);
-            String message = current.readTextFrame();
+            RemoteWebSocketClient.Frame frame = current.readFrame();
             long inboundAt = current.lastInboundAtMillis();
             if (inboundAt > lastInboundAt) {
                 lastInboundAt = inboundAt;
@@ -358,9 +363,14 @@ public final class RemoteLinkService extends Service {
                 LogStore.append(this, "remote", "Heartbeat timer reset by inbound traffic next_in="
                         + config.remoteLinkHeartbeatSeconds() + "s");
             }
-            if (message != null) {
-                if (!handleServiceMessage(message)) {
-                    RemoteEventHandler.handle(this, current, message);
+            if (frame != null) {
+                if (frame.isText()) {
+                    String message = frame.text();
+                    if (!handleServiceMessage(current, message)) {
+                        RemoteEventHandler.handle(this, current, message);
+                    }
+                } else if (frame.isBinary()) {
+                    handleThroughputBinary(current, frame.binaryPayload());
                 }
             }
             advanceLatencyTest(current);
@@ -404,7 +414,7 @@ public final class RemoteLinkService extends Service {
         }
     }
 
-    private boolean handleServiceMessage(String message) {
+    private boolean handleServiceMessage(RemoteWebSocketClient current, String message) {
         try {
             JSONObject json = new JSONObject(message);
             String type = json.optString("type", "");
@@ -419,8 +429,16 @@ public final class RemoteLinkService extends Service {
             if ("pong".equals(type) && handleLatencyPong(json)) {
                 return true;
             }
-            if ("throughput_ack".equals(type)) {
-                handleThroughputAck(json);
+            if ("throughput_upload_ack".equals(type)) {
+                handleThroughputUploadAck(current, json);
+                return true;
+            }
+            if ("throughput_download_start".equals(type)) {
+                handleThroughputDownloadStart(json);
+                return true;
+            }
+            if ("throughput_complete".equals(type)) {
+                handleThroughputComplete(json);
                 return true;
             }
             if ("notif_backup_status".equals(type)) {
@@ -805,13 +823,14 @@ public final class RemoteLinkService extends Service {
         final ThroughputTest test = new ThroughputTest(
                 id,
                 THROUGHPUT_TEST_BYTES,
-                now + THROUGHPUT_ACK_TIMEOUT_MILLIS);
+                now + THROUGHPUT_TEST_TIMEOUT_MILLIS);
         throughputTest = test;
         try {
             JSONObject start = new JSONObject();
             start.put("type", "throughput_start");
             start.put("id", id);
-            start.put("bytes", THROUGHPUT_TEST_BYTES);
+            start.put("upload_bytes", THROUGHPUT_TEST_BYTES);
+            start.put("download_bytes", THROUGHPUT_TEST_BYTES);
             start.put("ts", System.currentTimeMillis() / 1000L);
             current.sendText(start.toString());
         } catch (Exception e) {
@@ -840,8 +859,8 @@ public final class RemoteLinkService extends Service {
             }
             if (sent == test.expectedBytes && throughputTest == test) {
                 heartbeatResetAtMillis = SystemClock.elapsedRealtime();
-                LogStore.append(this, "remote", "Throughput payload sent id=" + test.id
-                        + " bytes=" + sent + " awaiting server measurement");
+                LogStore.append(this, "remote", "Throughput upload sent id=" + test.id
+                        + " bytes=" + sent + " awaiting upload measurement");
             }
         } catch (Exception e) {
             if (failThroughputTest(test, "payload send failed: "
@@ -851,34 +870,138 @@ public final class RemoteLinkService extends Service {
         }
     }
 
-    private void handleThroughputAck(JSONObject json) {
+    private void handleThroughputUploadAck(RemoteWebSocketClient current, JSONObject json) {
         ThroughputTest test = throughputTest;
         if (test == null || !test.id.equals(json.optString("id", ""))) {
-            LogStore.append(this, "remote", "Throughput ack ignored; no matching test");
+            LogStore.append(this, "remote", "Throughput upload ack ignored; no matching test");
+            return;
+        }
+        if (!THROUGHPUT_PHASE_UPLOAD.equals(test.phase)) {
+            LogStore.append(this, "remote", "Throughput upload ack ignored; phase="
+                    + test.phase);
             return;
         }
         boolean ok = json.optBoolean("ok", false);
-        long bytes = json.optLong("bytes", -1L);
-        double durationMillis = json.optDouble("duration_ms", Double.NaN);
+        long bytes = json.optLong("upload_bytes", -1L);
+        double durationMillis = json.optDouble("upload_duration_ms", Double.NaN);
         double measuredBps = durationMillis > 0.0
                 ? (bytes * 8000.0) / durationMillis
                 : Double.NaN;
         if (ok && bytes == test.expectedBytes && Double.isFinite(measuredBps)
                 && measuredBps >= 0.0 && measuredBps <= Long.MAX_VALUE) {
-            long bitsPerSecond = Math.round(measuredBps);
+            test.uploadBitsPerSecond = Math.round(measuredBps);
+            test.phase = THROUGHPUT_PHASE_DOWNLOAD_READY;
+            test.deadlineAtMillis = SystemClock.elapsedRealtime()
+                    + THROUGHPUT_TEST_TIMEOUT_MILLIS;
+            RemoteLinkTestStateStore.setThroughputReceiving(
+                    this, test.uploadBitsPerSecond);
+            try {
+                JSONObject ready = new JSONObject();
+                ready.put("type", "throughput_download_ready");
+                ready.put("id", test.id);
+                ready.put("download_bytes", test.expectedBytes);
+                ready.put("ts", System.currentTimeMillis() / 1000L);
+                current.sendText(ready.toString());
+                heartbeatResetAtMillis = SystemClock.elapsedRealtime();
+            } catch (Exception e) {
+                if (failThroughputTest(test, "download ready send failed: "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage())) {
+                    current.close();
+                }
+                return;
+            }
+            LogStore.append(this, "remote", "Throughput upload completed bytes=" + bytes
+                    + " duration_ms=" + durationMillis + " bits_per_second="
+                    + test.uploadBitsPerSecond + "; download requested");
+        } else {
+            failThroughputTest(test,
+                    "server rejected upload measurement: "
+                            + json.optString("reason", "invalid measurement"));
+        }
+    }
+
+    private void handleThroughputDownloadStart(JSONObject json) {
+        ThroughputTest test = throughputTest;
+        if (test == null || !test.id.equals(json.optString("id", ""))) {
+            LogStore.append(this, "remote", "Throughput download start ignored; no matching test");
+            return;
+        }
+        long bytes = json.optLong("download_bytes", -1L);
+        if (!THROUGHPUT_PHASE_DOWNLOAD_READY.equals(test.phase)
+                || bytes != test.expectedBytes) {
+            failThroughputTest(test, "invalid download start");
+            return;
+        }
+        test.phase = THROUGHPUT_PHASE_DOWNLOAD;
+        test.downloadReceivedBytes = 0;
+        test.downloadStartedAtNanos = SystemClock.elapsedRealtimeNanos();
+        test.deadlineAtMillis = SystemClock.elapsedRealtime()
+                + THROUGHPUT_TEST_TIMEOUT_MILLIS;
+        LogStore.append(this, "remote", "Throughput download started id=" + test.id
+                + " bytes=" + bytes);
+    }
+
+    private void handleThroughputBinary(RemoteWebSocketClient current, byte[] payload) {
+        ThroughputTest test = throughputTest;
+        if (test == null) {
+            LogStore.append(this, "remote", "Binary frame ignored; no throughput test");
+            return;
+        }
+        int length = payload == null ? 0 : payload.length;
+        if (!THROUGHPUT_PHASE_DOWNLOAD.equals(test.phase)
+                || length < 1 || length > THROUGHPUT_CHUNK_BYTES
+                || test.downloadReceivedBytes + length > test.expectedBytes) {
+            if (failThroughputTest(test, "invalid download payload bytes=" + length
+                    + " phase=" + test.phase)) {
+                current.close();
+            }
+            return;
+        }
+        test.downloadReceivedBytes += length;
+        if (test.downloadReceivedBytes == test.expectedBytes) {
+            test.downloadCompletedAtNanos = SystemClock.elapsedRealtimeNanos();
+            test.phase = THROUGHPUT_PHASE_COMPLETE;
+            LogStore.append(this, "remote", "Throughput download payload received id="
+                    + test.id + " bytes=" + test.downloadReceivedBytes
+                    + " awaiting server completion");
+        }
+    }
+
+    private void handleThroughputComplete(JSONObject json) {
+        ThroughputTest test = throughputTest;
+        if (test == null || !test.id.equals(json.optString("id", ""))) {
+            LogStore.append(this, "remote", "Throughput completion ignored; no matching test");
+            return;
+        }
+        long bytes = json.optLong("download_bytes", -1L);
+        long durationNanos = test.downloadCompletedAtNanos - test.downloadStartedAtNanos;
+        double measuredBps = durationNanos > 0L
+                ? (bytes * 8_000_000_000.0) / durationNanos
+                : Double.NaN;
+        if (json.optBoolean("ok", false)
+                && THROUGHPUT_PHASE_COMPLETE.equals(test.phase)
+                && bytes == test.expectedBytes
+                && test.downloadReceivedBytes == test.expectedBytes
+                && test.uploadBitsPerSecond >= 0L
+                && Double.isFinite(measuredBps)
+                && measuredBps >= 0.0 && measuredBps <= Long.MAX_VALUE) {
+            long downloadBitsPerSecond = Math.round(measuredBps);
             synchronized (linkTestLock) {
                 if (throughputTest != test) {
                     return;
                 }
                 throughputTest = null;
                 activeLinkTest = "";
-                RemoteLinkTestStateStore.setThroughputResult(this, bitsPerSecond);
+                RemoteLinkTestStateStore.setThroughputResult(
+                        this, test.uploadBitsPerSecond, downloadBitsPerSecond);
             }
-            LogStore.append(this, "remote", "Throughput test completed bytes=" + bytes
-                    + " duration_ms=" + durationMillis + " bits_per_second=" + bitsPerSecond);
+            LogStore.append(this, "remote", "Throughput test completed upload_bps="
+                    + test.uploadBitsPerSecond + " download_bps=" + downloadBitsPerSecond
+                    + " download_bytes=" + bytes
+                    + " download_duration_ms=" + (durationNanos / 1_000_000.0));
         } else {
-            failThroughputTest(test,
-                    "server rejected measurement: " + json.optString("reason", "invalid measurement"));
+            failThroughputTest(test, "server rejected download: "
+                    + json.optString("reason", "invalid measurement"));
         }
     }
 
@@ -887,8 +1010,8 @@ public final class RemoteLinkService extends Service {
         if (test == null || SystemClock.elapsedRealtime() < test.deadlineAtMillis) {
             return;
         }
-        if (failThroughputTest(test, "ack timed out after "
-                + THROUGHPUT_ACK_TIMEOUT_MILLIS + "ms")) {
+        if (failThroughputTest(test, "phase=" + test.phase + " timed out after "
+                + THROUGHPUT_TEST_TIMEOUT_MILLIS + "ms")) {
             current.close();
         }
     }
@@ -900,7 +1023,8 @@ public final class RemoteLinkService extends Service {
             }
             throughputTest = null;
             activeLinkTest = "";
-            RemoteLinkTestStateStore.setThroughputUnknown(this);
+            RemoteLinkTestStateStore.setThroughputFailed(
+                    this, test.uploadBitsPerSecond);
         }
         LogStore.append(this, "remote", "Throughput test failed id=" + test.id
                 + " reason=" + reason);
@@ -909,6 +1033,7 @@ public final class RemoteLinkService extends Service {
 
     private void cancelLinkTest(String reason) {
         String type;
+        long partialUploadBitsPerSecond = -1L;
         synchronized (linkTestLock) {
             type = !activeLinkTest.isEmpty() ? activeLinkTest : pendingLinkTest;
             activeLinkTest = "";
@@ -916,8 +1041,12 @@ public final class RemoteLinkService extends Service {
             if (LINK_TEST_LATENCY.equals(type)) {
                 RemoteLinkTestStateStore.setLatencyUnknown(this);
             } else if (LINK_TEST_THROUGHPUT.equals(type)) {
+                if (throughputTest != null) {
+                    partialUploadBitsPerSecond = throughputTest.uploadBitsPerSecond;
+                }
                 throughputTest = null;
-                RemoteLinkTestStateStore.setThroughputUnknown(this);
+                RemoteLinkTestStateStore.setThroughputFailed(
+                        this, partialUploadBitsPerSecond);
             }
         }
         latencyTest = null;
@@ -943,7 +1072,12 @@ public final class RemoteLinkService extends Service {
     private static final class ThroughputTest {
         final String id;
         final int expectedBytes;
-        final long deadlineAtMillis;
+        long deadlineAtMillis;
+        String phase = THROUGHPUT_PHASE_UPLOAD;
+        long uploadBitsPerSecond = -1L;
+        int downloadReceivedBytes;
+        long downloadStartedAtNanos;
+        long downloadCompletedAtNanos;
 
         ThroughputTest(String id, int expectedBytes, long deadlineAtMillis) {
             this.id = id;

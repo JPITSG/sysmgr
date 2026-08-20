@@ -13,7 +13,13 @@ final class RemoteLinkTestStateStore {
     private static final String KEY_LATENCY_TESTING = "latency_testing";
     private static final String KEY_LATENCY_MICROS = "latency_micros";
     private static final String KEY_THROUGHPUT_TESTING = "throughput_testing";
-    private static final String KEY_THROUGHPUT_BPS = "throughput_bps";
+    private static final String KEY_THROUGHPUT_PHASE = "throughput_phase";
+    private static final String KEY_THROUGHPUT_UPLOAD_BPS = "throughput_upload_bps";
+    private static final String KEY_THROUGHPUT_DOWNLOAD_BPS = "throughput_download_bps";
+    private static final String KEY_LEGACY_THROUGHPUT_BPS = "throughput_bps";
+
+    static final String THROUGHPUT_PHASE_UPLOAD = "upload";
+    static final String THROUGHPUT_PHASE_DOWNLOAD = "download";
 
     private RemoteLinkTestStateStore() {
     }
@@ -53,24 +59,49 @@ final class RemoteLinkTestStateStore {
     static void setThroughputTesting(Context context) {
         prefs(context).edit()
                 .putBoolean(KEY_THROUGHPUT_TESTING, true)
-                .remove(KEY_THROUGHPUT_BPS)
+                .putString(KEY_THROUGHPUT_PHASE, THROUGHPUT_PHASE_UPLOAD)
+                .remove(KEY_THROUGHPUT_UPLOAD_BPS)
+                .remove(KEY_THROUGHPUT_DOWNLOAD_BPS)
+                .remove(KEY_LEGACY_THROUGHPUT_BPS)
                 .apply();
         notifyChanged(context);
     }
 
-    static void setThroughputResult(Context context, long bitsPerSecond) {
+    static void setThroughputReceiving(Context context, long uploadBitsPerSecond) {
         prefs(context).edit()
-                .putBoolean(KEY_THROUGHPUT_TESTING, false)
-                .putLong(KEY_THROUGHPUT_BPS, Math.max(0L, bitsPerSecond))
+                .putBoolean(KEY_THROUGHPUT_TESTING, true)
+                .putString(KEY_THROUGHPUT_PHASE, THROUGHPUT_PHASE_DOWNLOAD)
+                .putLong(KEY_THROUGHPUT_UPLOAD_BPS, Math.max(0L, uploadBitsPerSecond))
+                .remove(KEY_THROUGHPUT_DOWNLOAD_BPS)
+                .remove(KEY_LEGACY_THROUGHPUT_BPS)
                 .apply();
         notifyChanged(context);
     }
 
-    static void setThroughputUnknown(Context context) {
+    static void setThroughputResult(Context context, long uploadBitsPerSecond,
+                                    long downloadBitsPerSecond) {
         prefs(context).edit()
                 .putBoolean(KEY_THROUGHPUT_TESTING, false)
-                .remove(KEY_THROUGHPUT_BPS)
+                .remove(KEY_THROUGHPUT_PHASE)
+                .putLong(KEY_THROUGHPUT_UPLOAD_BPS, Math.max(0L, uploadBitsPerSecond))
+                .putLong(KEY_THROUGHPUT_DOWNLOAD_BPS, Math.max(0L, downloadBitsPerSecond))
+                .remove(KEY_LEGACY_THROUGHPUT_BPS)
                 .apply();
+        notifyChanged(context);
+    }
+
+    static void setThroughputFailed(Context context, long uploadBitsPerSecond) {
+        SharedPreferences.Editor edit = prefs(context).edit()
+                .putBoolean(KEY_THROUGHPUT_TESTING, false)
+                .remove(KEY_THROUGHPUT_PHASE)
+                .remove(KEY_THROUGHPUT_DOWNLOAD_BPS)
+                .remove(KEY_LEGACY_THROUGHPUT_BPS);
+        if (uploadBitsPerSecond >= 0L) {
+            edit.putLong(KEY_THROUGHPUT_UPLOAD_BPS, uploadBitsPerSecond);
+        } else {
+            edit.remove(KEY_THROUGHPUT_UPLOAD_BPS);
+        }
+        edit.apply();
         notifyChanged(context);
     }
 
@@ -78,8 +109,16 @@ final class RemoteLinkTestStateStore {
         return prefs(context).getBoolean(KEY_THROUGHPUT_TESTING, false);
     }
 
-    static long throughputBitsPerSecond(Context context) {
-        return prefs(context).getLong(KEY_THROUGHPUT_BPS, -1L);
+    static String throughputPhase(Context context) {
+        return prefs(context).getString(KEY_THROUGHPUT_PHASE, "");
+    }
+
+    static long uploadBitsPerSecond(Context context) {
+        return prefs(context).getLong(KEY_THROUGHPUT_UPLOAD_BPS, -1L);
+    }
+
+    static long downloadBitsPerSecond(Context context) {
+        return prefs(context).getLong(KEY_THROUGHPUT_DOWNLOAD_BPS, -1L);
     }
 
     /** A process death can leave a persisted Testing label with no worker behind it. */
@@ -87,7 +126,8 @@ final class RemoteLinkTestStateStore {
         SharedPreferences state = prefs(context);
         boolean latency = state.getBoolean(KEY_LATENCY_TESTING, false);
         boolean throughput = state.getBoolean(KEY_THROUGHPUT_TESTING, false);
-        if (!latency && !throughput) {
+        boolean hasLegacyThroughput = state.contains(KEY_LEGACY_THROUGHPUT_BPS);
+        if (!latency && !throughput && !hasLegacyThroughput) {
             return;
         }
         SharedPreferences.Editor edit = state.edit();
@@ -95,7 +135,16 @@ final class RemoteLinkTestStateStore {
             edit.putBoolean(KEY_LATENCY_TESTING, false).remove(KEY_LATENCY_MICROS);
         }
         if (throughput) {
-            edit.putBoolean(KEY_THROUGHPUT_TESTING, false).remove(KEY_THROUGHPUT_BPS);
+            edit.putBoolean(KEY_THROUGHPUT_TESTING, false)
+                    .remove(KEY_THROUGHPUT_PHASE)
+                    .remove(KEY_THROUGHPUT_DOWNLOAD_BPS);
+        }
+        if (hasLegacyThroughput) {
+            if (!state.contains(KEY_THROUGHPUT_UPLOAD_BPS)) {
+                edit.putLong(KEY_THROUGHPUT_UPLOAD_BPS,
+                        Math.max(0L, state.getLong(KEY_LEGACY_THROUGHPUT_BPS, 0L)));
+            }
+            edit.remove(KEY_LEGACY_THROUGHPUT_BPS);
         }
         edit.apply();
         notifyChanged(context);
