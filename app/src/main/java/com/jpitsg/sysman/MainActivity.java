@@ -236,6 +236,10 @@ public final class MainActivity extends Activity {
     private EditText remoteLinkUsernameField;
     private EditText remoteLinkPasswordField;
     private EditText remoteLinkHeartbeatSecondsField;
+    private TextView remoteLinkLatencyValue;
+    private TextView remoteLinkThroughputValue;
+    private Button remoteLinkLatencyButton;
+    private Button remoteLinkThroughputButton;
     private TextView openVpnPill;
     private Panel openVpnPanel;
     private LinearLayout openVpnProfileSummary;
@@ -1393,6 +1397,20 @@ public final class MainActivity extends Activity {
         addRowButton(row, tonalButton("Reconnect", action("remote_link_reconnect")));
         addRowButton(row, tonalButton("Ping", action("remote_link_ping")));
 
+        addSubsectionLabel(frame.content, "Link Test");
+        LinearLayout testStatus = newColumn();
+        testStatus.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
+        testStatus.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        frame.content.addView(testStatus, stack(frame.content));
+        remoteLinkLatencyValue = addInfoRow(testStatus, "Latency", "Unknown", COLOR_TEXT_DIM);
+        remoteLinkThroughputValue = addInfoRow(testStatus, "Throughput", "Unknown", COLOR_TEXT_DIM);
+
+        LinearLayout testRow = newRow();
+        frame.content.addView(testRow, stack(frame.content));
+        remoteLinkLatencyButton = tonalButton("Test Latency", action("remote_link_latency"));
+        remoteLinkThroughputButton = tonalButton("Test Throughput", action("remote_link_throughput"));
+        addRowButton(testRow, remoteLinkLatencyButton);
+        addRowButton(testRow, remoteLinkThroughputButton);
     }
 
     private void buildSettingsTransferPanel(LinearLayout root) {
@@ -3975,6 +3993,7 @@ public final class MainActivity extends Activity {
         refreshBeaconPanel();
         setEnabledPill(rebootPill, switchValue(rebootAutomationEnabledSwitch, config.rebootAutomationEnabled()));
         setRemoteLinkPill(RemoteLinkStateStore.isConnected(this));
+        refreshRemoteLinkTestStatus();
         refreshNotificationBackupStatus();
         setEnabledPill(logPill, switchValue(logEnabledSwitch, config.logEnabled()));
         refreshSystemBackupStatus();
@@ -4181,6 +4200,55 @@ public final class MainActivity extends Activity {
                 connected ? COLOR_PRIMARY_ON_CONTAINER : COLOR_DANGER_ON_CONTAINER);
     }
 
+    private void refreshRemoteLinkTestStatus() {
+        if (remoteLinkLatencyValue == null || remoteLinkThroughputValue == null) {
+            return;
+        }
+        boolean latencyTesting = RemoteLinkTestStateStore.isLatencyTesting(this);
+        boolean throughputTesting = RemoteLinkTestStateStore.isThroughputTesting(this);
+        long latencyMicros = RemoteLinkTestStateStore.latencyMicros(this);
+        long throughputBps = RemoteLinkTestStateStore.throughputBitsPerSecond(this);
+
+        if (latencyTesting) {
+            remoteLinkLatencyValue.setText("Testing for 10 s…");
+            remoteLinkLatencyValue.setTextColor(COLOR_PRIMARY_ON_CONTAINER);
+        } else if (latencyMicros >= 0L) {
+            remoteLinkLatencyValue.setText(String.format(
+                    Locale.US, "%.1f ms", latencyMicros / 1000.0));
+            remoteLinkLatencyValue.setTextColor(COLOR_TEXT);
+        } else {
+            remoteLinkLatencyValue.setText("Unknown");
+            remoteLinkLatencyValue.setTextColor(COLOR_TEXT_DIM);
+        }
+
+        if (throughputTesting) {
+            remoteLinkThroughputValue.setText("Sending 10 MB…");
+            remoteLinkThroughputValue.setTextColor(COLOR_PRIMARY_ON_CONTAINER);
+        } else if (throughputBps >= 1_000_000L) {
+            remoteLinkThroughputValue.setText(String.format(
+                    Locale.US, "%.1f Mbps", throughputBps / 1_000_000.0));
+            remoteLinkThroughputValue.setTextColor(COLOR_TEXT);
+        } else if (throughputBps >= 1000L) {
+            remoteLinkThroughputValue.setText(String.format(
+                    Locale.US, "%.1f Kbps", throughputBps / 1000.0));
+            remoteLinkThroughputValue.setTextColor(COLOR_TEXT);
+        } else if (throughputBps >= 0L) {
+            remoteLinkThroughputValue.setText(throughputBps + " bps");
+            remoteLinkThroughputValue.setTextColor(COLOR_TEXT);
+        } else {
+            remoteLinkThroughputValue.setText("Unknown");
+            remoteLinkThroughputValue.setTextColor(COLOR_TEXT_DIM);
+        }
+
+        boolean connected = Config.get(this).remoteLinkEnabled()
+                && RemoteLinkStateStore.isConnected(this);
+        boolean canTest = connected && !latencyTesting && !throughputTesting;
+        applyButtonState(remoteLinkLatencyButton, canTest,
+                COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+        applyButtonState(remoteLinkThroughputButton, canTest,
+                COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+    }
+
     private void registerRemoteLinkStateReceiver() {
         if (remoteLinkStateReceiver != null) {
             return;
@@ -4189,11 +4257,13 @@ public final class MainActivity extends Activity {
             @Override
             public void onReceive(Context context, Intent intent) {
                 setRemoteLinkPill(RemoteLinkStateStore.isConnected(MainActivity.this));
+                refreshRemoteLinkTestStatus();
                 refreshNotificationBackupStatus();
                 refreshSystemBackupStatus();
             }
         };
         IntentFilter filter = new IntentFilter(RemoteLinkStateStore.ACTION_STATE_CHANGED);
+        filter.addAction(RemoteLinkTestStateStore.ACTION_STATE_CHANGED);
         filter.addAction(SystemBackupStateStore.ACTION_STATE_CHANGED);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(remoteLinkStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -5667,6 +5737,26 @@ public final class MainActivity extends Activity {
         refreshStatusAndLog();
     }
 
+    private void testRemoteLinkLatency() {
+        LogStore.append(this, "ui", "Remote Link latency test requested");
+        boolean started = RemoteLinkManager.testLatency(this);
+        Toast.makeText(this,
+                started ? "Measuring Remote Link latency for 10 seconds"
+                        : "Remote Link is unavailable or another test is running",
+                Toast.LENGTH_SHORT).show();
+        refreshRemoteLinkTestStatus();
+    }
+
+    private void testRemoteLinkThroughput() {
+        LogStore.append(this, "ui", "Remote Link throughput test requested");
+        boolean started = RemoteLinkManager.testThroughput(this);
+        Toast.makeText(this,
+                started ? "Sending 10 MB to measure Remote Link throughput"
+                        : "Remote Link is unavailable or another test is running",
+                Toast.LENGTH_SHORT).show();
+        refreshRemoteLinkTestStatus();
+    }
+
     private boolean saveRebootConfigOnly() {
         if (!rebootNotificationTriggerEnabledSwitch.isChecked()) {
             rebootTriggerPackageField.setError(null);
@@ -6128,6 +6218,10 @@ public final class MainActivity extends Activity {
                     }
                 } else if ("remote_link_ping".equals(command)) {
                     pingRemoteLink();
+                } else if ("remote_link_latency".equals(command)) {
+                    testRemoteLinkLatency();
+                } else if ("remote_link_throughput".equals(command)) {
+                    testRemoteLinkThroughput();
                 } else if ("vpn_import_profile".equals(command)) {
                     importVpnProfile();
                 } else if ("vpn_edit_profile".equals(command)) {

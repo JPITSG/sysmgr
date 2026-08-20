@@ -63,6 +63,26 @@ final class RemoteLinkManager {
         return true;
     }
 
+    static boolean testLatency(Context context) {
+        Context app = context.getApplicationContext();
+        if (!Config.get(app).remoteLinkEnabled()
+                || !RemoteLinkService.startLatencyTestIfRunning(app)) {
+            LogStore.append(app, "remote", "Remote Link latency test skipped; link unavailable or test busy");
+            return false;
+        }
+        return true;
+    }
+
+    static boolean testThroughput(Context context) {
+        Context app = context.getApplicationContext();
+        if (!Config.get(app).remoteLinkEnabled()
+                || !RemoteLinkService.startThroughputTestIfRunning(app)) {
+            LogStore.append(app, "remote", "Remote Link throughput test skipped; link unavailable or test busy");
+            return false;
+        }
+        return true;
+    }
+
     static void stop(Context context) {
         RemoteLinkStateStore.setConnected(context, false);
         AlarmScheduler.cancelRemoteLinkWatchdog(context);

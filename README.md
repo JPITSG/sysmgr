@@ -83,6 +83,9 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
 - **Full backup/restore over Remote Link** — one compressed `tar.gz` preserves
   all app preferences, credentials, notification history and images, the app
   log, queued notification backups, and the complete OpenVPN profile.
+- **Remote Link quality tests** — measure average round-trip latency over a
+  10-second sample window and upstream throughput with an exact 10 MiB upload
+  to sysmgrd. Results remain `Unknown` until each test is run.
 
 **Embedded OpenVPN client**
 - A cross-compiled `openvpn` 2.7.5 binary (OpenSSL 3.5.7, LZO 2.10, LZ4 1.10.0)

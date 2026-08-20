@@ -33,9 +33,11 @@ final class RemoteWebSocketClient implements Closeable {
     private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
     private static final String ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     private static final int OPCODE_TEXT = 0x1;
+    private static final int OPCODE_BINARY = 0x2;
     private static final int OPCODE_CLOSE = 0x8;
     private static final int OPCODE_PING = 0x9;
     private static final int OPCODE_PONG = 0xA;
+    private static final int WRITE_CHUNK_BYTES = 16 * 1024;
 
     private final String endpoint;
     private final String username;
@@ -82,8 +84,12 @@ final class RemoteWebSocketClient implements Closeable {
         return socket != null && socket.isConnected() && !socket.isClosed();
     }
 
-    synchronized void sendText(String text) throws IOException {
+    void sendText(String text) throws IOException {
         sendFrame(OPCODE_TEXT, text == null ? new byte[0] : text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    void sendBinary(byte[] payload) throws IOException {
+        sendFrame(OPCODE_BINARY, payload == null ? new byte[0] : payload);
     }
 
     long lastInboundAtMillis() {
@@ -302,33 +308,41 @@ final class RemoteWebSocketClient implements Closeable {
         return buffer.toString("US-ASCII");
     }
 
-    private void sendFrame(int opcode, byte[] payload) throws IOException {
+    private synchronized void sendFrame(int opcode, byte[] payload) throws IOException {
         if (out == null) {
             throw new IOException("not connected");
         }
         int length = payload == null ? 0 : payload.length;
-        ByteArrayOutputStream frame = new ByteArrayOutputStream();
-        frame.write(0x80 | opcode);
+        ByteArrayOutputStream header = new ByteArrayOutputStream(14);
+        header.write(0x80 | opcode);
         if (length <= 125) {
-            frame.write(0x80 | length);
+            header.write(0x80 | length);
         } else if (length <= 65535) {
-            frame.write(0x80 | 126);
-            frame.write((length >>> 8) & 0xff);
-            frame.write(length & 0xff);
+            header.write(0x80 | 126);
+            header.write((length >>> 8) & 0xff);
+            header.write(length & 0xff);
         } else {
             long longLength = length;
-            frame.write(0x80 | 127);
+            header.write(0x80 | 127);
             for (int i = 7; i >= 0; i--) {
-                frame.write((int) ((longLength >>> (8 * i)) & 0xff));
+                header.write((int) ((longLength >>> (8 * i)) & 0xff));
             }
         }
         byte[] mask = new byte[4];
         random.nextBytes(mask);
-        frame.write(mask);
-        for (int i = 0; i < length; i++) {
-            frame.write(payload[i] ^ mask[i % 4]);
+        header.write(mask, 0, mask.length);
+        out.write(header.toByteArray());
+
+        byte[] masked = new byte[Math.min(WRITE_CHUNK_BYTES, Math.max(1, length))];
+        int offset = 0;
+        while (offset < length) {
+            int count = Math.min(masked.length, length - offset);
+            for (int i = 0; i < count; i++) {
+                masked[i] = (byte) (payload[offset + i] ^ mask[(offset + i) % mask.length]);
+            }
+            out.write(masked, 0, count);
+            offset += count;
         }
-        out.write(frame.toByteArray());
         out.flush();
     }
 

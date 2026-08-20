@@ -16,6 +16,7 @@ import android.os.SystemClock;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +49,13 @@ public final class RemoteLinkService extends Service {
     private static final long BACKUP_RETRY_MILLIS = 60_000L;
     // Cap how many notifications are outstanding (sent, awaiting ack) at once.
     private static final int BACKUP_MAX_IN_FLIGHT = 100;
+    private static final String LINK_TEST_LATENCY = "latency";
+    private static final String LINK_TEST_THROUGHPUT = "throughput";
+    private static final long LATENCY_TEST_DURATION_MILLIS = 10_000L;
+    private static final long LATENCY_SAMPLE_INTERVAL_MILLIS = 500L;
+    private static final int THROUGHPUT_TEST_BYTES = 10 * 1024 * 1024;
+    private static final int THROUGHPUT_CHUNK_BYTES = 64 * 1024;
+    private static final long THROUGHPUT_ACK_TIMEOUT_MILLIS = 3L * 60_000L;
     // If the platform ever times the foreground service out anyway, come back
     // on this delay rather than the watchdog's, but slowly enough that a
     // still-exhausted runtime budget cannot turn into a restart loop.
@@ -77,6 +85,13 @@ public final class RemoteLinkService extends Service {
     private final AtomicBoolean backupProbeRequested = new AtomicBoolean(false);
     private volatile String backupProbeReason = "";
     private volatile boolean backupOutboxDirty = true;
+    private final Object linkTestLock = new Object();
+    private String pendingLinkTest = "";
+    private String activeLinkTest = "";
+    // Latency is advanced on the socket worker. Throughput is written on its
+    // own thread so a slow upload never blocks incoming commands or pings.
+    private LatencyTest latencyTest;
+    private volatile ThroughputTest throughputTest;
     private Thread worker;
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
@@ -85,6 +100,7 @@ public final class RemoteLinkService extends Service {
     public void onCreate() {
         super.onCreate();
         activeService = this;
+        RemoteLinkTestStateStore.clearInterruptedTests(this);
         RemoteLinkStateStore.setConnected(this, false);
         ensureNotificationChannel();
         registerNetworkCallback();
@@ -180,6 +196,16 @@ public final class RemoteLinkService extends Service {
         return service.queueManualPing(reason == null ? "unknown" : reason);
     }
 
+    static boolean startLatencyTestIfRunning(Context context) {
+        RemoteLinkService service = activeService;
+        return service != null && service.queueLinkTest(LINK_TEST_LATENCY);
+    }
+
+    static boolean startThroughputTestIfRunning(Context context) {
+        RemoteLinkService service = activeService;
+        return service != null && service.queueLinkTest(LINK_TEST_THROUGHPUT);
+    }
+
     static boolean sendGpsIfRunning(Context context, JSONObject payload) {
         RemoteLinkService service = activeService;
         if (service == null) {
@@ -248,6 +274,7 @@ public final class RemoteLinkService extends Service {
                     consecutiveFailures = 0;
                 } catch (Exception e) {
                     RemoteLinkStateStore.setConnected(this, false);
+                    cancelLinkTest("connection lost");
                     long delayMillis;
                     if (connected) {
                         long lifetimeMillis = SystemClock.elapsedRealtime() - connectedAtMillis;
@@ -270,6 +297,7 @@ public final class RemoteLinkService extends Service {
                         LogStore.append(this, "remote", "Remote Link retry resumed early by network change");
                     }
                 } finally {
+                    cancelLinkTest("connection closed");
                     current.close();
                     connectedNetwork = null;
                     linkOnWifi = false;
@@ -279,6 +307,7 @@ public final class RemoteLinkService extends Service {
                 }
             }
         } finally {
+            cancelLinkTest("worker stopped");
             RemoteLinkStateStore.setConnected(this, false);
             workerRunning.set(false);
             if (!stopRequested && Config.get(this).remoteLinkEnabled()) {
@@ -301,6 +330,9 @@ public final class RemoteLinkService extends Service {
         livenessProbeRequested.set(false);
         while (!stopRequested && Config.get(this).remoteLinkEnabled() && current.isOpen()) {
             Config config = Config.get(this);
+            startRequestedLinkTest(current);
+            advanceLatencyTest(current);
+            expireThroughputTest(current);
             sendQueuedPings(current);
             sendBackupProbeIfRequested(current);
             String message = current.readTextFrame();
@@ -317,6 +349,8 @@ public final class RemoteLinkService extends Service {
                     RemoteEventHandler.handle(this, current, message);
                 }
             }
+            advanceLatencyTest(current);
+            expireThroughputTest(current);
             drainBackupOutbox(current);
             if (livenessProbeRequested.compareAndSet(true, false)) {
                 sendManualPing(current, "liveness:" + livenessProbeReason);
@@ -366,6 +400,13 @@ public final class RemoteLinkService extends Service {
             }
             if ("notif_backup_ack".equals(type)) {
                 handleNotifBackupAck(json);
+                return true;
+            }
+            if ("pong".equals(type) && handleLatencyPong(json)) {
+                return true;
+            }
+            if ("throughput_ack".equals(type)) {
+                handleThroughputAck(json);
                 return true;
             }
             if ("notif_backup_status".equals(type)) {
@@ -591,6 +632,268 @@ public final class RemoteLinkService extends Service {
             LogStore.append(this, "remote", "Manual ping failed id=" + id + ": "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());
             current.close();
+        }
+    }
+
+    private boolean queueLinkTest(String type) {
+        RemoteWebSocketClient current = client;
+        if (current == null || !current.isOpen() || !RemoteLinkStateStore.isConnected(this)) {
+            return false;
+        }
+        synchronized (linkTestLock) {
+            if (!pendingLinkTest.isEmpty() || !activeLinkTest.isEmpty()) {
+                return false;
+            }
+            pendingLinkTest = type;
+            if (LINK_TEST_LATENCY.equals(type)) {
+                RemoteLinkTestStateStore.setLatencyTesting(this);
+            } else {
+                RemoteLinkTestStateStore.setThroughputTesting(this);
+            }
+        }
+        LogStore.append(this, "remote", "Remote Link " + type + " test queued");
+        return true;
+    }
+
+    private void startRequestedLinkTest(RemoteWebSocketClient current) {
+        String type;
+        synchronized (linkTestLock) {
+            if (pendingLinkTest.isEmpty() || !activeLinkTest.isEmpty()) {
+                return;
+            }
+            type = pendingLinkTest;
+            pendingLinkTest = "";
+            activeLinkTest = type;
+        }
+        if (LINK_TEST_LATENCY.equals(type)) {
+            long now = SystemClock.elapsedRealtime();
+            latencyTest = new LatencyTest(now, now + LATENCY_TEST_DURATION_MILLIS);
+            LogStore.append(this, "remote", "Latency test started duration_ms="
+                    + LATENCY_TEST_DURATION_MILLIS);
+            return;
+        }
+        startThroughputTest(current);
+    }
+
+    private void advanceLatencyTest(RemoteWebSocketClient current) {
+        LatencyTest test = latencyTest;
+        if (test == null) {
+            return;
+        }
+        long nowMillis = SystemClock.elapsedRealtime();
+        if (nowMillis >= test.deadlineAtMillis) {
+            latencyTest = null;
+            if (test.sampleCount > 0) {
+                long averageMicros = (test.totalRoundTripNanos / test.sampleCount) / 1000L;
+                synchronized (linkTestLock) {
+                    activeLinkTest = "";
+                    RemoteLinkTestStateStore.setLatencyResult(this, averageMicros);
+                }
+                LogStore.append(this, "remote", "Latency test completed samples="
+                        + test.sampleCount + " average_ms=" + (averageMicros / 1000.0));
+            } else {
+                synchronized (linkTestLock) {
+                    activeLinkTest = "";
+                    RemoteLinkTestStateStore.setLatencyUnknown(this);
+                }
+                LogStore.append(this, "remote", "Latency test failed; no pong samples received");
+            }
+            return;
+        }
+        if (nowMillis < test.nextSampleAtMillis) {
+            return;
+        }
+
+        String id = "latency-" + UUID.randomUUID().toString();
+        try {
+            JSONObject ping = new JSONObject();
+            ping.put("type", "ping");
+            ping.put("id", id);
+            ping.put("ts", System.currentTimeMillis() / 1000L);
+            ping.put("source", "android-latency-test");
+            long sentAtNanos = SystemClock.elapsedRealtimeNanos();
+            current.sendText(ping.toString());
+            test.sentAtNanos.put(id, sentAtNanos);
+            test.nextSampleAtMillis = nowMillis + LATENCY_SAMPLE_INTERVAL_MILLIS;
+            heartbeatResetAtMillis = nowMillis;
+        } catch (Exception e) {
+            latencyTest = null;
+            synchronized (linkTestLock) {
+                activeLinkTest = "";
+                RemoteLinkTestStateStore.setLatencyUnknown(this);
+            }
+            LogStore.append(this, "remote", "Latency test send failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            current.close();
+        }
+    }
+
+    private boolean handleLatencyPong(JSONObject json) {
+        LatencyTest test = latencyTest;
+        if (test == null) {
+            return false;
+        }
+        String id = json.optString("id", "");
+        Long sentAtNanos = test.sentAtNanos.remove(id);
+        if (sentAtNanos == null) {
+            return false;
+        }
+        long elapsedNanos = Math.max(0L, SystemClock.elapsedRealtimeNanos() - sentAtNanos);
+        test.totalRoundTripNanos += elapsedNanos;
+        test.sampleCount++;
+        return true;
+    }
+
+    private void startThroughputTest(RemoteWebSocketClient current) {
+        String id = "throughput-" + UUID.randomUUID().toString();
+        long now = SystemClock.elapsedRealtime();
+        final ThroughputTest test = new ThroughputTest(
+                id,
+                THROUGHPUT_TEST_BYTES,
+                now + THROUGHPUT_ACK_TIMEOUT_MILLIS);
+        throughputTest = test;
+        try {
+            JSONObject start = new JSONObject();
+            start.put("type", "throughput_start");
+            start.put("id", id);
+            start.put("bytes", THROUGHPUT_TEST_BYTES);
+            start.put("ts", System.currentTimeMillis() / 1000L);
+            current.sendText(start.toString());
+        } catch (Exception e) {
+            failThroughputTest(test, "start send failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            current.close();
+            return;
+        }
+
+        Thread sender = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                sendThroughputPayload(current, test);
+            }
+        }, "SystemManagerRemoteLinkThroughput");
+        sender.start();
+    }
+
+    private void sendThroughputPayload(RemoteWebSocketClient current, ThroughputTest test) {
+        byte[] chunk = new byte[THROUGHPUT_CHUNK_BYTES];
+        int sent = 0;
+        try {
+            while (sent < test.expectedBytes && throughputTest == test) {
+                current.sendBinary(chunk);
+                sent += chunk.length;
+            }
+            if (sent == test.expectedBytes && throughputTest == test) {
+                heartbeatResetAtMillis = SystemClock.elapsedRealtime();
+                LogStore.append(this, "remote", "Throughput payload sent id=" + test.id
+                        + " bytes=" + sent + " awaiting server measurement");
+            }
+        } catch (Exception e) {
+            if (failThroughputTest(test, "payload send failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage())) {
+                current.close();
+            }
+        }
+    }
+
+    private void handleThroughputAck(JSONObject json) {
+        ThroughputTest test = throughputTest;
+        if (test == null || !test.id.equals(json.optString("id", ""))) {
+            LogStore.append(this, "remote", "Throughput ack ignored; no matching test");
+            return;
+        }
+        boolean ok = json.optBoolean("ok", false);
+        long bytes = json.optLong("bytes", -1L);
+        double durationMillis = json.optDouble("duration_ms", Double.NaN);
+        double measuredBps = durationMillis > 0.0
+                ? (bytes * 8000.0) / durationMillis
+                : Double.NaN;
+        if (ok && bytes == test.expectedBytes && Double.isFinite(measuredBps)
+                && measuredBps >= 0.0 && measuredBps <= Long.MAX_VALUE) {
+            long bitsPerSecond = Math.round(measuredBps);
+            synchronized (linkTestLock) {
+                if (throughputTest != test) {
+                    return;
+                }
+                throughputTest = null;
+                activeLinkTest = "";
+                RemoteLinkTestStateStore.setThroughputResult(this, bitsPerSecond);
+            }
+            LogStore.append(this, "remote", "Throughput test completed bytes=" + bytes
+                    + " duration_ms=" + durationMillis + " bits_per_second=" + bitsPerSecond);
+        } else {
+            failThroughputTest(test,
+                    "server rejected measurement: " + json.optString("reason", "invalid measurement"));
+        }
+    }
+
+    private void expireThroughputTest(RemoteWebSocketClient current) {
+        ThroughputTest test = throughputTest;
+        if (test == null || SystemClock.elapsedRealtime() < test.deadlineAtMillis) {
+            return;
+        }
+        if (failThroughputTest(test, "ack timed out after "
+                + THROUGHPUT_ACK_TIMEOUT_MILLIS + "ms")) {
+            current.close();
+        }
+    }
+
+    private boolean failThroughputTest(ThroughputTest test, String reason) {
+        synchronized (linkTestLock) {
+            if (throughputTest != test) {
+                return false;
+            }
+            throughputTest = null;
+            activeLinkTest = "";
+            RemoteLinkTestStateStore.setThroughputUnknown(this);
+        }
+        LogStore.append(this, "remote", "Throughput test failed id=" + test.id
+                + " reason=" + reason);
+        return true;
+    }
+
+    private void cancelLinkTest(String reason) {
+        String type;
+        synchronized (linkTestLock) {
+            type = !activeLinkTest.isEmpty() ? activeLinkTest : pendingLinkTest;
+            activeLinkTest = "";
+            pendingLinkTest = "";
+            if (LINK_TEST_LATENCY.equals(type)) {
+                RemoteLinkTestStateStore.setLatencyUnknown(this);
+            } else if (LINK_TEST_THROUGHPUT.equals(type)) {
+                throughputTest = null;
+                RemoteLinkTestStateStore.setThroughputUnknown(this);
+            }
+        }
+        latencyTest = null;
+        if (!type.isEmpty()) {
+            LogStore.append(this, "remote", "Remote Link " + type
+                    + " test canceled reason=" + reason);
+        }
+    }
+
+    private static final class LatencyTest {
+        final long deadlineAtMillis;
+        final Map<String, Long> sentAtNanos = new HashMap<>();
+        long nextSampleAtMillis;
+        long totalRoundTripNanos;
+        int sampleCount;
+
+        LatencyTest(long startedAtMillis, long deadlineAtMillis) {
+            this.nextSampleAtMillis = startedAtMillis;
+            this.deadlineAtMillis = deadlineAtMillis;
+        }
+    }
+
+    private static final class ThroughputTest {
+        final String id;
+        final int expectedBytes;
+        final long deadlineAtMillis;
+
+        ThroughputTest(String id, int expectedBytes, long deadlineAtMillis) {
+            this.id = id;
+            this.expectedBytes = expectedBytes;
+            this.deadlineAtMillis = deadlineAtMillis;
         }
     }
 

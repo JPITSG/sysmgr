@@ -40,6 +40,9 @@ const BACKUP_HTTP_PATH = '/backup';
 // Bounds a malformed or accidental upload without forcing normal app backups
 // into memory. The request body is streamed directly to disk.
 const BACKUP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const THROUGHPUT_TEST_BYTES = 10 * 1024 * 1024;
+const THROUGHPUT_CHUNK_MAX_BYTES = 64 * 1024;
+const THROUGHPUT_TEST_TIMEOUT_MS = 3 * 60000;
 
 function parseArgs(argv) {
   const args = {};
@@ -723,6 +726,77 @@ function assignClientUuid(connectionId, socket, rawUuid) {
   return uuid;
 }
 
+function sendThroughputAck(socket, id, ok, reason, bytes, durationMs) {
+  sendJson(socket, {
+    type: 'throughput_ack',
+    id,
+    ok,
+    reason,
+    bytes,
+    duration_ms: durationMs,
+    ts: Math.floor(Date.now() / 1000)
+  });
+}
+
+function startThroughputTest(connectionId, socket, parsed) {
+  const client = clients.get(connectionId);
+  const id = String(parsed.id || '').slice(0, 128);
+  const expectedBytes = Number(parsed.bytes);
+  if (!client || !id || expectedBytes !== THROUGHPUT_TEST_BYTES) {
+    sendThroughputAck(socket, id, false, 'invalid test request', 0, 0);
+    log(`throughput test rejected connection=${connectionId} id=${logValue(id)} bytes=${logValue(parsed.bytes)}`);
+    return;
+  }
+  if (client.throughputTest && Date.now() > client.throughputTest.expiresAt) {
+    log(`throughput test expired connection=${connectionId} id=${logValue(client.throughputTest.id)} bytes=${client.throughputTest.receivedBytes}`);
+    client.throughputTest = null;
+  }
+  if (client.throughputTest) {
+    sendThroughputAck(socket, id, false, 'test already running', 0, 0);
+    log(`throughput test rejected connection=${connectionId} id=${logValue(id)} reason=already-running`);
+    return;
+  }
+  client.throughputTest = {
+    id,
+    expectedBytes,
+    receivedBytes: 0,
+    startedAtNanos: process.hrtime.bigint(),
+    expiresAt: Date.now() + THROUGHPUT_TEST_TIMEOUT_MS
+  };
+  log(`throughput test started connection=${connectionId} id=${logValue(id)} bytes=${expectedBytes}`);
+}
+
+function handleBinaryMessage(connectionId, socket, payload) {
+  const client = clients.get(connectionId);
+  const test = client && client.throughputTest;
+  if (!test) {
+    log(`binary frame ignored connection=${connectionId} bytes=${payload.length} reason=no-throughput-test`);
+    return;
+  }
+  if (Date.now() > test.expiresAt) {
+    client.throughputTest = null;
+    sendThroughputAck(socket, test.id, false, 'test timed out', test.receivedBytes, 0);
+    log(`throughput test timed out connection=${connectionId} id=${logValue(test.id)} bytes=${test.receivedBytes}`);
+    return;
+  }
+  if (payload.length > THROUGHPUT_CHUNK_MAX_BYTES ||
+      test.receivedBytes + payload.length > test.expectedBytes) {
+    client.throughputTest = null;
+    sendThroughputAck(socket, test.id, false, 'invalid payload size', test.receivedBytes, 0);
+    log(`throughput test rejected connection=${connectionId} id=${logValue(test.id)} reason=invalid-payload-size chunk_bytes=${payload.length} received_bytes=${test.receivedBytes}`);
+    return;
+  }
+
+  test.receivedBytes += payload.length;
+  if (test.receivedBytes !== test.expectedBytes) {
+    return;
+  }
+  const durationMs = Number(process.hrtime.bigint() - test.startedAtNanos) / 1e6;
+  client.throughputTest = null;
+  sendThroughputAck(socket, test.id, true, 'received', test.receivedBytes, durationMs);
+  log(`throughput test completed connection=${connectionId} id=${logValue(test.id)} bytes=${test.receivedBytes} duration_ms=${durationMs.toFixed(3)}`);
+}
+
 function handleTextMessage(connectionId, socket, text) {
   let parsed = null;
   try {
@@ -775,6 +849,10 @@ function handleTextMessage(connectionId, socket, text) {
       enabled: notificationStore.enabled,
       ts: Math.floor(Date.now() / 1000)
     });
+    return;
+  }
+  if (parsed.type === 'throughput_start') {
+    startThroughputTest(connectionId, socket, parsed);
     return;
   }
   if (parsed.type === 'ack' && parsed.id) {
@@ -1593,7 +1671,8 @@ server.on('upgrade', (req, socket) => {
     vpnEnabled: null,
     vpnConnected: null,
     vncEnabled: null,
-    vncConnected: null
+    vncConnected: null,
+    throughputTest: null
   };
   clients.set(connectionId, client);
   socket.write(
@@ -1613,6 +1692,8 @@ server.on('upgrade', (req, socket) => {
       parseFrames(state, chunk, (opcode, payload) => {
         if (opcode === 0x1) {
           handleTextMessage(connectionId, socket, payload.toString('utf8'));
+        } else if (opcode === 0x2) {
+          handleBinaryMessage(connectionId, socket, payload);
         } else if (opcode === 0x8) {
           log(`websocket close frame connection=${connectionId}`);
           socket.end();
