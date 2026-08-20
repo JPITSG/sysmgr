@@ -902,6 +902,24 @@ function handleThroughputDownloadReady(connectionId, socket, parsed) {
   }
 }
 
+function cancelThroughputTest(connectionId, socket, parsed) {
+  const client = clients.get(connectionId);
+  const id = String(parsed.id || '').slice(0, 128);
+  const test = client && client.throughputTest;
+  const cancelled = Boolean(test && id && test.id === id);
+  if (cancelled) {
+    client.throughputTest = null;
+  }
+  sendJson(socket, {
+    type: 'throughput_cancelled',
+    id,
+    ok: true,
+    cancelled,
+    ts: Math.floor(Date.now() / 1000)
+  });
+  log(`throughput cancellation connection=${connectionId} id=${logValue(id)} cancelled=${cancelled}`);
+}
+
 function handleTextMessage(connectionId, socket, text) {
   let parsed = null;
   try {
@@ -970,6 +988,10 @@ function handleTextMessage(connectionId, socket, text) {
   }
   if (parsed.type === 'throughput_download_ready') {
     handleThroughputDownloadReady(connectionId, socket, parsed);
+    return;
+  }
+  if (parsed.type === 'throughput_cancel') {
+    cancelThroughputTest(connectionId, socket, parsed);
     return;
   }
   if (parsed.type === 'ack' && parsed.id) {
