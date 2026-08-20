@@ -161,8 +161,21 @@ Node 14+.
 ### sysmgrd
 
 ```
-sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>]
+sysmgrd [--config=<path>] --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>]
 ```
+
+Daemon options can also be read from `--config=<path>`. Each non-empty line
+contains an option name, whitespace, and its value (without the leading `--`
+or `=`), for example:
+
+```
+# Full app backup archive
+backupfile /etc/scripts/tmp/sysmgr.backup.tar.gz
+```
+
+Blank lines and lines beginning with `#` are ignored. If an option is present
+in both places, the command-line value wins. Keep config files containing
+credentials outside version control and readable only by the daemon user.
 
 Optional GPS→MySQL persistence is enabled by adding `--gps-mysql-*`
 (host/socket, database, table, user, password) and `--gps-home-lat/lon` args.

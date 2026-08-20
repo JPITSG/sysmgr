@@ -52,9 +52,37 @@ function parseArgs(argv) {
   return args;
 }
 
-const args = parseArgs(process.argv.slice(2));
+function parseConfigFile(configPath) {
+  let contents;
+  try {
+    contents = fs.readFileSync(configPath, 'utf8').replace(/^\uFEFF/, '');
+  } catch (err) {
+    console.error(`could not read --config file ${configPath}: ${err.message}`);
+    process.exit(2);
+  }
+
+  const configArgs = {};
+  const lines = contents.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+    const match = line.match(/^([A-Za-z0-9][A-Za-z0-9-]*)\s+(.+)$/);
+    if (!match) {
+      console.error(`invalid config entry at ${configPath}:${index + 1}`);
+      process.exit(2);
+    }
+    configArgs[match[1]] = match[2].trim();
+  }
+  return configArgs;
+}
+
+const commandLineArgs = parseArgs(process.argv.slice(2));
+const configArgs = commandLineArgs.config ? parseConfigFile(commandLineArgs.config) : {};
+const args = Object.assign({}, configArgs, commandLineArgs);
 if (!args.bindip || !args.bindport || !args.log || !args.users) {
-  console.error('usage: sysmgrd --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>] [--statefile=<path>] [--statefilevpn=<path>] [--statefilevnc=<path>]');
+  console.error('usage: sysmgrd [--config=<path>] --bindip=<ip> --bindport=<port> --log=<path> --users=<user:pass,user2:pass2> [--backupfile=<path>] [--statefile=<path>] [--statefilevpn=<path>] [--statefilevnc=<path>]');
   process.exit(2);
 }
 

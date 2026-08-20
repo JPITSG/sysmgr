@@ -12,3 +12,6 @@
 /native/build/
 /native/prefix/
 /app/src/main/jniLibs/
+
+# Live sysmgrd settings contain credentials.
+/sysmgrd/sysmgrd.conf
