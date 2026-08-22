@@ -189,7 +189,9 @@ All credentials are supplied at runtime — nothing is stored in the repository.
 Optional notification backup is enabled by adding `--notificationstore=<path>`;
 the daemon appends each backed-up notification as one JSON object per line
 (JSON Lines) to that file, created `0600`. Point it outside the repository. The
-file only grows — rotate or prune it yourself if needed.
+file only grows — rotate or prune it yourself if needed. The app's Notification
+Backup panel tracks the last acknowledged send and the cumulative number of
+notifications successfully delivered from that device.
 
 Full app backups are enabled with `--backupfile=<path>`. The app uploads and
 restores the authenticated archive through the Remote Link server at

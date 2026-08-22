@@ -158,6 +158,8 @@ public final class MainActivity extends Activity {
     private View notificationBackupDot;
     private TextView notificationBackupStatus;
     private TextView notificationBackupCountPill;
+    private TextView notificationBackupLastSentValue;
+    private TextView notificationBackupSentCountValue;
     private TextView systemBackupPill;
     private Panel upgradePanel;
     private TextView upgradePill;
@@ -816,6 +818,16 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
 
         frame.content.addView(statusCard, stack(frame.content));
+
+        addSubsectionLabel(frame.content, "Statistics");
+        LinearLayout statsCard = newColumn();
+        statsCard.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
+        statsCard.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        frame.content.addView(statsCard, stack(frame.content));
+        notificationBackupLastSentValue = addInfoRow(
+                statsCard, "Last notification sent", "Never", COLOR_TEXT_DIM);
+        notificationBackupSentCountValue = addInfoRow(
+                statsCard, "Notifications sent", "0", COLOR_TEXT_DIM);
     }
 
     private void buildGpsLoggerPanel(LinearLayout root) {
@@ -5346,6 +5358,10 @@ public final class MainActivity extends Activity {
             @Override
             public void run() {
                 final int queued = NotificationBackupStore.count(MainActivity.this);
+                final long sentCount =
+                        NotificationBackupStateStore.sentCount(MainActivity.this);
+                final long lastSentAtMillis =
+                        NotificationBackupStateStore.lastSentAtMillis(MainActivity.this);
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -5358,7 +5374,9 @@ public final class MainActivity extends Activity {
                                 RemoteLinkStateStore.isConnected(MainActivity.this),
                                 NotificationBackupStateStore.isChecked(MainActivity.this),
                                 NotificationBackupStateStore.isServerAvailable(MainActivity.this),
-                                queued);
+                                queued,
+                                sentCount,
+                                lastSentAtMillis);
                         if (pendingNotificationBackupRefresh) {
                             pendingNotificationBackupRefresh = false;
                             refreshNotificationBackupStatus();
@@ -5370,9 +5388,24 @@ public final class MainActivity extends Activity {
     }
 
     private void applyNotificationBackupStatus(boolean enabled, boolean linkEnabled, boolean linkConnected,
-                                               boolean serverChecked, boolean serverAvailable, int queued) {
+                                               boolean serverChecked, boolean serverAvailable, int queued,
+                                               long sentCount, long lastSentAtMillis) {
         if (notificationBackupPill == null) {
             return;
+        }
+        if (notificationBackupLastSentValue != null) {
+            notificationBackupLastSentValue.setText(lastSentAtMillis > 0L
+                    ? new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                    .format(new Date(lastSentAtMillis))
+                    : "Never");
+            notificationBackupLastSentValue.setTextColor(
+                    lastSentAtMillis > 0L ? COLOR_TEXT : COLOR_TEXT_DIM);
+        }
+        if (notificationBackupSentCountValue != null) {
+            notificationBackupSentCountValue.setText(
+                    String.format(Locale.US, "%,d", Math.max(0L, sentCount)));
+            notificationBackupSentCountValue.setTextColor(
+                    sentCount > 0L ? COLOR_TEXT : COLOR_TEXT_DIM);
         }
         String pillText;
         int pillBg;

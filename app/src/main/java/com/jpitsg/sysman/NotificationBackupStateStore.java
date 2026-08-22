@@ -16,6 +16,9 @@ final class NotificationBackupStateStore {
     private static final String PREFS = "system_manager_notification_backup_state";
     private static final String KEY_SERVER_AVAILABLE = "server_available";
     private static final String KEY_CHECKED = "checked";
+    private static final String KEY_SENT_COUNT = "sent_count";
+    private static final String KEY_LAST_SENT_AT_MILLIS = "last_sent_at_millis";
+    private static final Object STATS_LOCK = new Object();
 
     private NotificationBackupStateStore() {
     }
@@ -58,5 +61,31 @@ final class NotificationBackupStateStore {
         return context.getApplicationContext()
                 .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getBoolean(KEY_CHECKED, false);
+    }
+
+    static void recordSuccessfulSend(Context context) {
+        Context app = context.getApplicationContext();
+        synchronized (STATS_LOCK) {
+            SharedPreferences prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            long current = Math.max(0L, prefs.getLong(KEY_SENT_COUNT, 0L));
+            long updated = current == Long.MAX_VALUE ? Long.MAX_VALUE : current + 1L;
+            prefs.edit()
+                    .putLong(KEY_SENT_COUNT, updated)
+                    .putLong(KEY_LAST_SENT_AT_MILLIS, System.currentTimeMillis())
+                    .apply();
+        }
+        app.sendBroadcast(new Intent(ACTION_STATE_CHANGED).setPackage(app.getPackageName()));
+    }
+
+    static long sentCount(Context context) {
+        return Math.max(0L, context.getApplicationContext()
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getLong(KEY_SENT_COUNT, 0L));
+    }
+
+    static long lastSentAtMillis(Context context) {
+        return Math.max(0L, context.getApplicationContext()
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getLong(KEY_LAST_SENT_AT_MILLIS, 0L));
     }
 }

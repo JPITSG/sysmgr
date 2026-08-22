@@ -553,7 +553,9 @@ public final class RemoteLinkService extends Service {
         String reason = json.optString("reason", "");
         if (ok) {
             backupInFlight.remove(key);
-            NotificationBackupStore.remove(this, key);
+            if (NotificationBackupStore.remove(this, key)) {
+                NotificationBackupStateStore.recordSuccessfulSend(this);
+            }
             NotificationBackupStateStore.setServerAvailable(this, true);
         } else if ("store-not-configured".equals(reason)) {
             // Server has Notification Backup turned off. Keep the record queued and
