@@ -201,10 +201,12 @@ unless the Remote Link is connected and this option is configured.
 
 In-app upgrades are enabled with `--upgradeapk=<path>` (or
 `upgradeapk /path/to/SystemManager.apk` in the config file). When configured,
-the app shows an Upgrade panel, reports the APK's modification date and size,
-and downloads it from the authenticated `/upgrade.apk` endpoint before handing
-it to Android's package installer. The APK may be replaced at that path without
-restarting sysmgrd; Refresh reads the current file metadata.
+the app shows an Upgrade panel with the currently installed version and the
+served APK's version, modification date, and size. Refresh downloads the APK
+from the authenticated `/upgrade.apk` endpoint and reads its embedded manifest
+to display the served version. Upgrade downloads and validates the APK before
+handing it to Android's package installer. The APK may be replaced at that path
+without restarting sysmgrd.
 
 Optional state-file outputs for automation are enabled with `--statefile`,
 `--statefilevpn`, and `--statefilevnc`. The first contains `Online` or `Offline`.

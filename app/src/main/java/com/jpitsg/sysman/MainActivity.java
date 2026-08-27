@@ -163,6 +163,8 @@ public final class MainActivity extends Activity {
     private TextView systemBackupPill;
     private Panel upgradePanel;
     private TextView upgradePill;
+    private TextView upgradeCurrentVersionValue;
+    private TextView upgradeAvailableVersionValue;
     private TextView upgradeDateValue;
     private TextView upgradeSizeValue;
     private Button upgradeRefreshButton;
@@ -1529,6 +1531,10 @@ public final class MainActivity extends Activity {
         metadata.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
         metadata.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
         frame.content.addView(metadata, stack(frame.content));
+        upgradeCurrentVersionValue = addInfoRow(
+                metadata, "Current version", AppVersion.name(this), COLOR_TEXT);
+        upgradeAvailableVersionValue = addInfoRow(
+                metadata, "Available version", "Press Refresh", COLOR_TEXT_DIM);
         upgradeDateValue = addInfoRow(metadata, "File date", "Unknown", COLOR_TEXT_DIM);
         upgradeSizeValue = addInfoRow(metadata, "File size", "Unknown", COLOR_TEXT_DIM);
 
@@ -4654,6 +4660,23 @@ public final class MainActivity extends Activity {
         }
         setPillState(upgradePill, label, background, foreground);
 
+        upgradeCurrentVersionValue.setText(AppVersion.name(this));
+        upgradeCurrentVersionValue.setTextColor(COLOR_TEXT);
+        String availableVersion = UpgradeStateStore.apkVersionName(this);
+        if (upgradeDownloadInFlight || !checked) {
+            upgradeAvailableVersionValue.setText("Checking…");
+            upgradeAvailableVersionValue.setTextColor(COLOR_TEXT_DIM);
+        } else if (exists && !availableVersion.isEmpty()) {
+            upgradeAvailableVersionValue.setText(availableVersion);
+            upgradeAvailableVersionValue.setTextColor(COLOR_TEXT);
+        } else if (exists) {
+            upgradeAvailableVersionValue.setText("Press Refresh");
+            upgradeAvailableVersionValue.setTextColor(COLOR_TEXT_DIM);
+        } else {
+            upgradeAvailableVersionValue.setText("Unknown");
+            upgradeAvailableVersionValue.setTextColor(COLOR_TEXT_DIM);
+        }
+
         if (!checked) {
             upgradeDateValue.setText("Checking…");
             upgradeSizeValue.setText("Checking…");
@@ -6219,15 +6242,15 @@ public final class MainActivity extends Activity {
         return true;
     }
 
-    private void refreshUpgradeMetadata() {
-        UpgradeStateStore.setRefreshing(this);
-        refreshUpgradeStatus();
-        if (!RemoteLinkManager.probeUpgrade(this, "upgrade-refresh")) {
-            Toast.makeText(this, "Waiting for Remote Link", Toast.LENGTH_LONG).show();
-        }
+    private void refreshUpgradeApk() {
+        startUpgradeDownload(false);
     }
 
     private void startUpgradeDownload() {
+        startUpgradeDownload(true);
+    }
+
+    private void startUpgradeDownload(final boolean installAfterDownload) {
         if (upgradeDownloadInFlight) {
             Toast.makeText(this, "An upgrade download is already running",
                     Toast.LENGTH_SHORT).show();
@@ -6238,40 +6261,51 @@ public final class MainActivity extends Activity {
             Toast.makeText(this, "Remote Link is not connected", Toast.LENGTH_LONG).show();
             return;
         }
-        if (!UpgradeStateStore.isChecked(this)) {
+        if (installAfterDownload && !UpgradeStateStore.isChecked(this)) {
             Toast.makeText(this, "Waiting for upgrade status from Remote Link",
                     Toast.LENGTH_LONG).show();
             return;
         }
         if (!UpgradeStateStore.isConfigured(this)
-                || !UpgradeStateStore.apkExists(this)) {
+                || (installAfterDownload && !UpgradeStateStore.apkExists(this))) {
             Toast.makeText(this, "Upgrade APK is not available", Toast.LENGTH_LONG).show();
             return;
         }
 
         final Context app = getApplicationContext();
         pendingUpgradeApk = null;
+        if (!installAfterDownload) {
+            UpgradeStateStore.setApkVersionName(app, "");
+        }
         upgradeDownloadInFlight = true;
         refreshUpgradeStatus();
-        LogStore.append(app, "upgrade", "Upgrade APK download started");
-        Toast.makeText(this, "Downloading upgrade APK", Toast.LENGTH_SHORT).show();
+        LogStore.append(app, "upgrade", installAfterDownload
+                ? "Upgrade APK download started"
+                : "Upgrade APK version refresh started");
+        Toast.makeText(this, installAfterDownload
+                ? "Downloading upgrade APK"
+                : "Downloading APK to check its version", Toast.LENGTH_SHORT).show();
 
         new Thread(new Runnable() {
             @Override
             public void run() {
                 File apk = null;
+                String versionName = "";
                 Exception failure = null;
                 try {
                     apk = RemoteUpgradeClient.download(app);
-                    validateUpgradeApk(apk);
+                    versionName = validateUpgradeApk(apk);
+                    UpgradeStateStore.setApkVersionName(app, versionName);
                 } catch (Exception e) {
                     failure = e;
                     if (apk != null) {
+                        UpgradeStateStore.setApkVersionName(app, "");
                         //noinspection ResultOfMethodCallIgnored
                         apk.delete();
                     }
                 }
                 final File downloadedApk = apk;
+                final String downloadedVersionName = versionName;
                 final Exception resultFailure = failure;
                 runOnUiThread(new Runnable() {
                     @Override
@@ -6288,15 +6322,22 @@ public final class MainActivity extends Activity {
                             return;
                         }
                         LogStore.append(MainActivity.this, "upgrade",
-                                "Upgrade APK downloaded bytes=" + downloadedApk.length());
-                        prepareUpgradeInstall(downloadedApk);
+                                "Upgrade APK downloaded version=" + downloadedVersionName
+                                        + " bytes=" + downloadedApk.length());
+                        if (installAfterDownload) {
+                            prepareUpgradeInstall(downloadedApk);
+                        } else {
+                            Toast.makeText(MainActivity.this,
+                                    "Available version: " + downloadedVersionName,
+                                    Toast.LENGTH_LONG).show();
+                        }
                     }
                 });
             }
-        }, "SystemManagerUpgrade").start();
+        }, installAfterDownload ? "SystemManagerUpgrade" : "SystemManagerUpgradeRefresh").start();
     }
 
-    private void validateUpgradeApk(File apk) throws IOException {
+    private String validateUpgradeApk(File apk) throws IOException {
         if (apk == null || !apk.isFile() || apk.length() < 1L) {
             throw new IOException("Downloaded upgrade APK is empty");
         }
@@ -6308,6 +6349,11 @@ public final class MainActivity extends Activity {
         if (!getPackageName().equals(archive.packageName)) {
             throw new IOException("Downloaded APK is for a different application");
         }
+        String versionName = archive.versionName == null ? "" : archive.versionName.trim();
+        if (versionName.isEmpty()) {
+            throw new IOException("Downloaded APK does not declare a version name");
+        }
+        return versionName;
     }
 
     private void prepareUpgradeInstall(File apk) {
@@ -6542,7 +6588,7 @@ public final class MainActivity extends Activity {
                 } else if ("restore_backup".equals(command)) {
                     confirmSystemRestore();
                 } else if ("refresh_upgrade".equals(command)) {
-                    refreshUpgradeMetadata();
+                    refreshUpgradeApk();
                 } else if ("install_upgrade".equals(command)) {
                     startUpgradeDownload();
                 } else if ("common_permissions".equals(command)) {
