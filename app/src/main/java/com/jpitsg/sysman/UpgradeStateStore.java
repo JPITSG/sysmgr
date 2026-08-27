@@ -22,23 +22,25 @@ final class UpgradeStateStore {
     private UpgradeStateStore() {
     }
 
-    /** Clears capabilities while a newly-connected daemon is being identified. */
+    /** Marks the status pending while retaining the last result reported by the server. */
     static void setChecking(Context context) {
-        set(context, false, false, false, 0L, 0L, "", 0L, false);
+        setPending(context);
     }
 
-    /** Keeps the visible card stable while fresh daemon metadata is requested. */
+    /** Marks the status pending while fresh daemon metadata is requested. */
     static void setRefreshing(Context context) {
+        setPending(context);
+    }
+
+    private static void setPending(Context context) {
         Context app = context.getApplicationContext();
         SharedPreferences prefs = prefs(app);
-        set(app, false,
-                prefs.getBoolean(KEY_CONFIGURED, false),
-                prefs.getBoolean(KEY_EXISTS, false),
-                prefs.getLong(KEY_SIZE, 0L),
-                prefs.getLong(KEY_MTIME, 0L),
-                prefs.getString(KEY_VERSION, ""),
-                prefs.getLong(KEY_VERSION_CODE, 0L),
-                prefs.getBoolean(KEY_VERSION_READY, false));
+        if (!prefs.getBoolean(KEY_CHECKED, false)) {
+            return;
+        }
+        prefs.edit().putBoolean(KEY_CHECKED, false).apply();
+        app.sendBroadcast(new Intent(ACTION_STATE_CHANGED)
+                .setPackage(app.getPackageName()));
     }
 
     static void setServerState(Context context, boolean configured, boolean exists,

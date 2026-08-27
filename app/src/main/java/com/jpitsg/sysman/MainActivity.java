@@ -4670,12 +4670,15 @@ public final class MainActivity extends Activity {
         upgradeCurrentVersionValue.setText(AppVersion.name(this));
         upgradeCurrentVersionValue.setTextColor(COLOR_TEXT);
         String availableVersion = UpgradeStateStore.apkVersionName(this);
-        if (upgradeDownloadInFlight || !checked) {
-            upgradeAvailableVersionValue.setText("Checking…");
-            upgradeAvailableVersionValue.setTextColor(COLOR_TEXT_DIM);
-        } else if (exists && !availableVersion.isEmpty()) {
+        boolean cachedVersion = exists
+                && UpgradeStateStore.isApkVersionReady(this)
+                && !availableVersion.isEmpty();
+        if (cachedVersion) {
             upgradeAvailableVersionValue.setText(availableVersion);
             upgradeAvailableVersionValue.setTextColor(COLOR_TEXT);
+        } else if (upgradeDownloadInFlight || !checked) {
+            upgradeAvailableVersionValue.setText("Checking…");
+            upgradeAvailableVersionValue.setTextColor(COLOR_TEXT_DIM);
         } else if (exists) {
             upgradeAvailableVersionValue.setText("Press Refresh");
             upgradeAvailableVersionValue.setTextColor(COLOR_TEXT_DIM);
@@ -4684,12 +4687,7 @@ public final class MainActivity extends Activity {
             upgradeAvailableVersionValue.setTextColor(COLOR_TEXT_DIM);
         }
 
-        if (!checked) {
-            upgradeDateValue.setText("Checking…");
-            upgradeSizeValue.setText("Checking…");
-            upgradeDateValue.setTextColor(COLOR_TEXT_DIM);
-            upgradeSizeValue.setTextColor(COLOR_TEXT_DIM);
-        } else if (exists) {
+        if (exists) {
             long modifiedAt = UpgradeStateStore.apkModifiedAtMillis(this);
             long sizeBytes = UpgradeStateStore.apkSizeBytes(this);
             upgradeDateValue.setText(modifiedAt > 0L
@@ -4699,6 +4697,11 @@ public final class MainActivity extends Activity {
             upgradeSizeValue.setText(OpenVpnService.formatBytes(sizeBytes));
             upgradeDateValue.setTextColor(modifiedAt > 0L ? COLOR_TEXT : COLOR_TEXT_DIM);
             upgradeSizeValue.setTextColor(COLOR_TEXT);
+        } else if (!checked) {
+            upgradeDateValue.setText("Checking…");
+            upgradeSizeValue.setText("Checking…");
+            upgradeDateValue.setTextColor(COLOR_TEXT_DIM);
+            upgradeSizeValue.setTextColor(COLOR_TEXT_DIM);
         } else {
             upgradeDateValue.setText("Unknown");
             upgradeSizeValue.setText("Unknown");
@@ -6370,9 +6373,6 @@ public final class MainActivity extends Activity {
 
         final Context app = getApplicationContext();
         pendingUpgradeApk = null;
-        if (!installAfterDownload) {
-            UpgradeStateStore.setApkVersion(app, "", 0L);
-        }
         upgradeDownloadInFlight = true;
         refreshUpgradeStatus();
         LogStore.append(app, "upgrade", installAfterDownload
@@ -6405,7 +6405,6 @@ public final class MainActivity extends Activity {
                 } catch (Exception e) {
                     failure = e;
                     if (apk != null) {
-                        UpgradeStateStore.setApkVersion(app, "", 0L);
                         //noinspection ResultOfMethodCallIgnored
                         apk.delete();
                     }
