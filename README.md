@@ -114,7 +114,8 @@ app/                     Android app (plain Java, no Gradle)
   src/main/java/...       source
   src/main/res/...        resources
   src/main/AndroidManifest.xml
-sysmgrd/sysmgrd          Node.js server daemon (single file, no dependencies)
+sysmgrd/sysmgrd          Node.js server daemon entry point
+sysmgrd/apk-version.js   Dependency-free APK manifest/version reader
 native/build-openvpn.sh  Reproducible cross-compile of the embedded openvpn binary
 ISSUES.md                Internal audit notes / known issues
 ```
@@ -156,8 +157,8 @@ stamp is unchanged (`FORCE_NATIVE=1` forces a rebuild).
 
 ### Server (sysmgrd)
 
-`sysmgrd/sysmgrd` is a single Node.js file with no npm dependencies. Run it with
-Node 14+.
+`sysmgrd/sysmgrd` and its adjacent APK reader have no npm dependencies. Keep
+both files together and run the daemon with Node 14+.
 
 ---
 
@@ -202,11 +203,19 @@ unless the Remote Link is connected and this option is configured.
 In-app upgrades are enabled with `--upgradeapk=<path>` (or
 `upgradeapk /path/to/SystemManager.apk` in the config file). When configured,
 the app shows an Upgrade panel with the currently installed version and the
-served APK's version, modification date, and size. Refresh downloads the APK
-from the authenticated `/upgrade.apk` endpoint and reads its embedded manifest
-to display the served version. Upgrade downloads and validates the APK before
-handing it to Android's package installer. The APK may be replaced at that path
-without restarting sysmgrd.
+served APK's version, modification date, and size. On Linux, sysmgrd reads the
+version name and code from the APK's embedded manifest, caches them, and watches
+the containing directory with inotify. Direct writes and atomic replacements
+invalidate the cache before it is reparsed; no polling is used. Cached version
+metadata is included in Remote Link status messages, so the app can compare
+versions without downloading the APK.
+
+The Upgrade panel's automatic-upgrades switch checks this metadata whenever the
+app is entered with an active Remote Link. If the backend's version code is
+newer, the app prompts with the backend's version name and downloads the APK
+only after confirmation. Refresh still downloads and independently inspects the
+APK, while Upgrade downloads and validates it before handing it to Android's
+package installer. The APK may be replaced without restarting sysmgrd.
 
 Optional state-file outputs for automation are enabled with `--statefile`,
 `--statefilevpn`, and `--statefilevnc`. The first contains `Online` or `Offline`.

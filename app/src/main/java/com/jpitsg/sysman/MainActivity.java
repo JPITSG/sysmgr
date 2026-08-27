@@ -167,6 +167,7 @@ public final class MainActivity extends Activity {
     private TextView upgradeAvailableVersionValue;
     private TextView upgradeDateValue;
     private TextView upgradeSizeValue;
+    private Switch upgradeAutoSwitch;
     private Button upgradeRefreshButton;
     private Button upgradeInstallButton;
     private TextView wifiBadge;
@@ -389,6 +390,7 @@ public final class MainActivity extends Activity {
     private volatile boolean backupRestoreInFlight;
     private volatile boolean upgradeDownloadInFlight;
     private File pendingUpgradeApk;
+    private boolean autoUpgradeCheckPending;
     private String renderedNotificationHistoryKey;
     private final LruCache<String, Bitmap> notificationImageCache =
             new LruCache<String, Bitmap>(notificationImageCacheSizeKb()) {
@@ -559,6 +561,7 @@ public final class MainActivity extends Activity {
         // permission dialog, which only pauses the activity, leaves the screen
         // as the user left it.
         collapseAllPanels();
+        autoUpgradeCheckPending = Config.get(this).autoUpgradeEnabled();
     }
 
     @Override
@@ -1537,6 +1540,9 @@ public final class MainActivity extends Activity {
                 metadata, "Available version", "Press Refresh", COLOR_TEXT_DIM);
         upgradeDateValue = addInfoRow(metadata, "File date", "Unknown", COLOR_TEXT_DIM);
         upgradeSizeValue = addInfoRow(metadata, "File size", "Unknown", COLOR_TEXT_DIM);
+
+        LinearLayout automatic = addToggleGroup(frame.content);
+        upgradeAutoSwitch = addGroupedToggle(automatic, "Enable automatic upgrades");
 
         LinearLayout buttons = newRow();
         frame.content.addView(buttons, stack(frame.content));
@@ -4360,6 +4366,7 @@ public final class MainActivity extends Activity {
                 refreshNotificationBackupStatus();
                 refreshSystemBackupStatus();
                 refreshUpgradeStatus();
+                maybePromptAutoUpgrade();
             }
         };
         IntentFilter filter = new IntentFilter(RemoteLinkStateStore.ACTION_STATE_CHANGED);
@@ -4706,6 +4713,71 @@ public final class MainActivity extends Activity {
                 COLOR_PRIMARY, Color.WHITE);
     }
 
+    private void maybePromptAutoUpgrade() {
+        if (!autoUpgradeCheckPending || !Config.get(this).autoUpgradeEnabled()) {
+            return;
+        }
+        boolean connected = Config.get(this).remoteLinkEnabled()
+                && RemoteLinkStateStore.isConnected(this);
+        if (!connected || !UpgradeStateStore.isChecked(this)) {
+            return;
+        }
+        if (!UpgradeStateStore.isConfigured(this)) {
+            autoUpgradeCheckPending = false;
+            return;
+        }
+        if (!UpgradeStateStore.apkExists(this)) {
+            return;
+        }
+        if (!UpgradeStateStore.isApkVersionReady(this)) {
+            // An inotify event invalidates the daemon's cached version before
+            // it reparses the replacement. Wait for the follow-up status.
+            return;
+        }
+        final long availableCode = UpgradeStateStore.apkVersionCode(this);
+        long currentCode = AppVersion.code(this);
+        if (availableCode <= 0L || currentCode <= 0L) {
+            return;
+        }
+        if (availableCode <= currentCode) {
+            autoUpgradeCheckPending = false;
+            LogStore.append(this, "upgrade", "Automatic upgrade check is current"
+                    + " installed_code=" + currentCode
+                    + " available_code=" + availableCode);
+            return;
+        }
+
+        final String availableVersion = UpgradeStateStore.apkVersionName(this);
+        autoUpgradeCheckPending = false;
+        LogStore.append(this, "upgrade", "Automatic upgrade available version="
+                + availableVersion + " version_code=" + availableCode);
+        OpenVpnConfirmDialog.show(this,
+                "Upgrade to version " + availableVersion + "?",
+                "Version " + availableVersion + " is available. The installed version is "
+                        + AppVersion.name(this) + ". Would you like to upgrade now?",
+                "Upgrade", false, new OpenVpnConfirmDialog.Listener() {
+                    @Override
+                    public void onConfirm() {
+                        if (!UpgradeStateStore.isApkVersionReady(MainActivity.this)
+                                || UpgradeStateStore.apkVersionCode(MainActivity.this)
+                                != availableCode
+                                || !availableVersion.equals(
+                                        UpgradeStateStore.apkVersionName(
+                                                MainActivity.this))) {
+                            autoUpgradeCheckPending = Config.get(MainActivity.this)
+                                    .autoUpgradeEnabled();
+                            RemoteLinkManager.probeUpgrade(MainActivity.this,
+                                    "auto-upgrade-version-changed");
+                            Toast.makeText(MainActivity.this,
+                                    "The available APK changed; checking again",
+                                    Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        startUpgradeDownload(availableVersion, availableCode);
+                    }
+                });
+    }
+
     private void setPillState(TextView target, String text, int bg, int fg) {
         if (target == null) {
             return;
@@ -4801,6 +4873,7 @@ public final class MainActivity extends Activity {
             remoteLinkPasswordField.setText(config.remoteLinkPassword());
             remoteLinkHeartbeatSecondsField.setText(Integer.toString(config.remoteLinkHeartbeatSeconds()));
             remoteLinkAcceptAnySslCertSwitch.setChecked(config.remoteLinkAcceptAnySslCert());
+            upgradeAutoSwitch.setChecked(config.autoUpgradeEnabled());
             vpnUsernameField.setText(config.vpnUsername());
             vpnPasswordField.setText(config.vpnPassword());
             vpnKeyPassphraseField.setText(config.vpnKeyPassphrase());
@@ -4965,6 +5038,23 @@ public final class MainActivity extends Activity {
             }
         },
                 remoteLinkEnabledSwitch, remoteLinkAcceptAnySslCertSwitch);
+
+        final LiveSaveGroup upgradeSettings = liveSaveGroup(new LiveSaveAction() {
+            @Override
+            public boolean save() {
+                boolean enabled = upgradeAutoSwitch.isChecked();
+                Config.get(MainActivity.this).setAutoUpgradeEnabled(enabled);
+                autoUpgradeCheckPending = enabled;
+                if (enabled) {
+                    UpgradeStateStore.setRefreshing(MainActivity.this);
+                    RemoteLinkManager.probeUpgrade(MainActivity.this,
+                            "auto-upgrade-enabled");
+                }
+                refreshUpgradeStatus();
+                return true;
+            }
+        });
+        bindLiveToggles(upgradeSettings, upgradeAutoSwitch);
 
         vpnSettingsSave = liveSaveGroup(new LiveSaveAction() {
             @Override
@@ -6243,14 +6333,20 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshUpgradeApk() {
-        startUpgradeDownload(false);
+        startUpgradeDownload(false, "", 0L);
     }
 
     private void startUpgradeDownload() {
-        startUpgradeDownload(true);
+        startUpgradeDownload(true, "", 0L);
     }
 
-    private void startUpgradeDownload(final boolean installAfterDownload) {
+    private void startUpgradeDownload(String expectedVersionName, long expectedVersionCode) {
+        startUpgradeDownload(true, expectedVersionName, expectedVersionCode);
+    }
+
+    private void startUpgradeDownload(final boolean installAfterDownload,
+                                      final String expectedVersionName,
+                                      final long expectedVersionCode) {
         if (upgradeDownloadInFlight) {
             Toast.makeText(this, "An upgrade download is already running",
                     Toast.LENGTH_SHORT).show();
@@ -6275,7 +6371,7 @@ public final class MainActivity extends Activity {
         final Context app = getApplicationContext();
         pendingUpgradeApk = null;
         if (!installAfterDownload) {
-            UpgradeStateStore.setApkVersionName(app, "");
+            UpgradeStateStore.setApkVersion(app, "", 0L);
         }
         upgradeDownloadInFlight = true;
         refreshUpgradeStatus();
@@ -6291,22 +6387,34 @@ public final class MainActivity extends Activity {
             public void run() {
                 File apk = null;
                 String versionName = "";
+                long versionCode = 0L;
                 Exception failure = null;
+                boolean servedVersionChanged = false;
                 try {
                     apk = RemoteUpgradeClient.download(app);
-                    versionName = validateUpgradeApk(apk);
-                    UpgradeStateStore.setApkVersionName(app, versionName);
+                    PackageInfo archive = validateUpgradeApk(apk);
+                    versionName = archive.versionName.trim();
+                    versionCode = AppVersion.code(archive);
+                    if (expectedVersionCode > 0L
+                            && (versionCode != expectedVersionCode
+                                || !versionName.equals(expectedVersionName))) {
+                        servedVersionChanged = true;
+                        throw new IOException("The served APK changed after confirmation");
+                    }
+                    UpgradeStateStore.setApkVersion(app, versionName, versionCode);
                 } catch (Exception e) {
                     failure = e;
                     if (apk != null) {
-                        UpgradeStateStore.setApkVersionName(app, "");
+                        UpgradeStateStore.setApkVersion(app, "", 0L);
                         //noinspection ResultOfMethodCallIgnored
                         apk.delete();
                     }
                 }
                 final File downloadedApk = apk;
                 final String downloadedVersionName = versionName;
+                final long downloadedVersionCode = versionCode;
                 final Exception resultFailure = failure;
+                final boolean resultServedVersionChanged = servedVersionChanged;
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -6319,10 +6427,17 @@ public final class MainActivity extends Activity {
                                     "Upgrade download failed: " + detail);
                             Toast.makeText(MainActivity.this, detail,
                                     Toast.LENGTH_LONG).show();
+                            if (resultServedVersionChanged) {
+                                autoUpgradeCheckPending = Config.get(MainActivity.this)
+                                        .autoUpgradeEnabled();
+                                RemoteLinkManager.probeUpgrade(MainActivity.this,
+                                        "auto-upgrade-download-version-changed");
+                            }
                             return;
                         }
                         LogStore.append(MainActivity.this, "upgrade",
                                 "Upgrade APK downloaded version=" + downloadedVersionName
+                                        + " version_code=" + downloadedVersionCode
                                         + " bytes=" + downloadedApk.length());
                         if (installAfterDownload) {
                             prepareUpgradeInstall(downloadedApk);
@@ -6337,7 +6452,7 @@ public final class MainActivity extends Activity {
         }, installAfterDownload ? "SystemManagerUpgrade" : "SystemManagerUpgradeRefresh").start();
     }
 
-    private String validateUpgradeApk(File apk) throws IOException {
+    private PackageInfo validateUpgradeApk(File apk) throws IOException {
         if (apk == null || !apk.isFile() || apk.length() < 1L) {
             throw new IOException("Downloaded upgrade APK is empty");
         }
@@ -6353,7 +6468,10 @@ public final class MainActivity extends Activity {
         if (versionName.isEmpty()) {
             throw new IOException("Downloaded APK does not declare a version name");
         }
-        return versionName;
+        if (AppVersion.code(archive) < 1L) {
+            throw new IOException("Downloaded APK does not declare a valid version code");
+        }
+        return archive;
     }
 
     private void prepareUpgradeInstall(File apk) {

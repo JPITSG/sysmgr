@@ -98,6 +98,7 @@ final class Config {
     private static final String KEY_REMOTE_LINK_PASSWORD = "remote_link_password";
     private static final String KEY_REMOTE_LINK_HEARTBEAT_SECONDS = "remote_link_heartbeat_seconds";
     private static final String KEY_REMOTE_LINK_ACCEPT_ANY_SSL_CERT = "remote_link_accept_any_ssl_cert";
+    private static final String KEY_AUTO_UPGRADE_ENABLED = "auto_upgrade_enabled";
     // Keep the old key so an existing install retains the date of its last
     // settings export as the initial full-backup date.
     private static final String KEY_LAST_BACKUP_MILLIS = "settings_last_export_millis";
@@ -703,6 +704,14 @@ final class Config {
 
     int remoteLinkReconnectSeconds() {
         return 60;
+    }
+
+    boolean autoUpgradeEnabled() {
+        return prefs.getBoolean(KEY_AUTO_UPGRADE_ENABLED, false);
+    }
+
+    void setAutoUpgradeEnabled(boolean enabled) {
+        prefs.edit().putBoolean(KEY_AUTO_UPGRADE_ENABLED, enabled).apply();
     }
 
     String vpnUsername() {

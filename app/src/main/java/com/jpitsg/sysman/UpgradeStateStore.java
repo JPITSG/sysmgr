@@ -16,16 +16,18 @@ final class UpgradeStateStore {
     private static final String KEY_SIZE = "size";
     private static final String KEY_MTIME = "mtime";
     private static final String KEY_VERSION = "version";
+    private static final String KEY_VERSION_CODE = "version_code";
+    private static final String KEY_VERSION_READY = "version_ready";
 
     private UpgradeStateStore() {
     }
 
     /** Clears capabilities while a newly-connected daemon is being identified. */
     static void setChecking(Context context) {
-        set(context, false, false, false, 0L, 0L, "");
+        set(context, false, false, false, 0L, 0L, "", 0L, false);
     }
 
-    /** Keeps the visible card stable while a user-requested refresh is in flight. */
+    /** Keeps the visible card stable while fresh daemon metadata is requested. */
     static void setRefreshing(Context context) {
         Context app = context.getApplicationContext();
         SharedPreferences prefs = prefs(app);
@@ -34,7 +36,9 @@ final class UpgradeStateStore {
                 prefs.getBoolean(KEY_EXISTS, false),
                 prefs.getLong(KEY_SIZE, 0L),
                 prefs.getLong(KEY_MTIME, 0L),
-                prefs.getString(KEY_VERSION, ""));
+                prefs.getString(KEY_VERSION, ""),
+                prefs.getLong(KEY_VERSION_CODE, 0L),
+                prefs.getBoolean(KEY_VERSION_READY, false));
     }
 
     static void setServerState(Context context, boolean configured, boolean exists,
@@ -49,7 +53,24 @@ final class UpgradeStateStore {
                 && prefs.getLong(KEY_SIZE, 0L) == size
                 && sameTimestamp(prefs.getLong(KEY_MTIME, 0L), modifiedAt);
         set(app, true, configured, available, size, modifiedAt,
-                sameApk ? prefs.getString(KEY_VERSION, "") : "");
+                sameApk ? prefs.getString(KEY_VERSION, "") : "",
+                sameApk ? prefs.getLong(KEY_VERSION_CODE, 0L) : 0L,
+                sameApk && prefs.getBoolean(KEY_VERSION_READY, false));
+    }
+
+    static void setServerState(Context context, boolean configured, boolean exists,
+                               long sizeBytes, long modifiedAtMillis,
+                               String versionName, long versionCode,
+                               boolean versionReady) {
+        boolean available = configured && exists;
+        String version = available && versionReady && versionName != null
+                ? versionName.trim() : "";
+        long code = available && versionReady ? Math.max(0L, versionCode) : 0L;
+        boolean ready = available && versionReady && !version.isEmpty() && code > 0L;
+        set(context, true, configured, available,
+                available ? Math.max(0L, sizeBytes) : 0L,
+                available ? Math.max(0L, modifiedAtMillis) : 0L,
+                ready ? version : "", ready ? code : 0L, ready);
     }
 
     static boolean isChecked(Context context) {
@@ -76,21 +97,38 @@ final class UpgradeStateStore {
         return prefs(context).getString(KEY_VERSION, "");
     }
 
-    static void setApkVersionName(Context context, String versionName) {
+    static long apkVersionCode(Context context) {
+        return prefs(context).getLong(KEY_VERSION_CODE, 0L);
+    }
+
+    static boolean isApkVersionReady(Context context) {
+        return prefs(context).getBoolean(KEY_VERSION_READY, false);
+    }
+
+    static void setApkVersion(Context context, String versionName, long versionCode) {
         Context app = context.getApplicationContext();
         SharedPreferences prefs = prefs(app);
         String version = versionName == null ? "" : versionName.trim();
-        if (version.equals(prefs.getString(KEY_VERSION, ""))) {
+        long code = Math.max(0L, versionCode);
+        boolean ready = !version.isEmpty() && code > 0L;
+        if (version.equals(prefs.getString(KEY_VERSION, ""))
+                && code == prefs.getLong(KEY_VERSION_CODE, 0L)
+                && ready == prefs.getBoolean(KEY_VERSION_READY, false)) {
             return;
         }
-        prefs.edit().putString(KEY_VERSION, version).apply();
+        prefs.edit()
+                .putString(KEY_VERSION, ready ? version : "")
+                .putLong(KEY_VERSION_CODE, ready ? code : 0L)
+                .putBoolean(KEY_VERSION_READY, ready)
+                .apply();
         app.sendBroadcast(new Intent(ACTION_STATE_CHANGED)
                 .setPackage(app.getPackageName()));
     }
 
     private static void set(Context context, boolean checked, boolean configured,
                             boolean exists, long sizeBytes, long modifiedAtMillis,
-                            String versionName) {
+                            String versionName, long versionCode,
+                            boolean versionReady) {
         Context app = context.getApplicationContext();
         SharedPreferences prefs = prefs(app);
         boolean changed = prefs.getBoolean(KEY_CHECKED, false) != checked
@@ -98,7 +136,9 @@ final class UpgradeStateStore {
                 || prefs.getBoolean(KEY_EXISTS, false) != exists
                 || prefs.getLong(KEY_SIZE, 0L) != sizeBytes
                 || prefs.getLong(KEY_MTIME, 0L) != modifiedAtMillis
-                || !prefs.getString(KEY_VERSION, "").equals(versionName);
+                || !prefs.getString(KEY_VERSION, "").equals(versionName)
+                || prefs.getLong(KEY_VERSION_CODE, 0L) != versionCode
+                || prefs.getBoolean(KEY_VERSION_READY, false) != versionReady;
         prefs.edit()
                 .putBoolean(KEY_CHECKED, checked)
                 .putBoolean(KEY_CONFIGURED, configured)
@@ -106,6 +146,8 @@ final class UpgradeStateStore {
                 .putLong(KEY_SIZE, sizeBytes)
                 .putLong(KEY_MTIME, modifiedAtMillis)
                 .putString(KEY_VERSION, versionName)
+                .putLong(KEY_VERSION_CODE, versionCode)
+                .putBoolean(KEY_VERSION_READY, versionReady)
                 .apply();
         if (changed) {
             app.sendBroadcast(new Intent(ACTION_STATE_CHANGED)

@@ -481,7 +481,9 @@ public final class RemoteLinkService extends Service {
                 applyUpgradeStatus(json);
                 LogStore.append(this, "remote", "Upgrade APK status from server configured="
                         + json.optBoolean("upgrade_apk", false)
-                        + " exists=" + json.optBoolean("upgrade_exists", false));
+                        + " exists=" + json.optBoolean("upgrade_exists", false)
+                        + " version=" + json.optString("upgrade_version", "")
+                        + " version_code=" + json.optLong("upgrade_version_code", 0L));
                 return true;
             }
             if ("hello_ack".equals(type) || "heartbeat_ack".equals(type)) {
@@ -515,12 +517,24 @@ public final class RemoteLinkService extends Service {
     }
 
     private void applyUpgradeStatus(JSONObject json) {
-        UpgradeStateStore.setServerState(
-                this,
-                json.optBoolean("upgrade_apk", false),
-                json.optBoolean("upgrade_exists", false),
-                json.optLong("upgrade_size", 0L),
-                json.optLong("upgrade_mtime", 0L));
+        if (json.has("upgrade_version") || json.has("upgrade_version_code")) {
+            UpgradeStateStore.setServerState(
+                    this,
+                    json.optBoolean("upgrade_apk", false),
+                    json.optBoolean("upgrade_exists", false),
+                    json.optLong("upgrade_size", 0L),
+                    json.optLong("upgrade_mtime", 0L),
+                    json.optString("upgrade_version", ""),
+                    json.optLong("upgrade_version_code", 0L),
+                    json.optBoolean("upgrade_version_ready", false));
+        } else {
+            UpgradeStateStore.setServerState(
+                    this,
+                    json.optBoolean("upgrade_apk", false),
+                    json.optBoolean("upgrade_exists", false),
+                    json.optLong("upgrade_size", 0L),
+                    json.optLong("upgrade_mtime", 0L));
+        }
     }
 
     private void handleGpsAck(JSONObject json) {

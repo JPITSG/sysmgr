@@ -8,6 +8,7 @@ const https = require('https');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const {readApkVersion} = require('./apk-version');
 
 const CONTROL_SOCKET_PATH = '/tmp/sysmgrd.sock';
 const DELIVERY_ACK_TIMEOUT_MS = 10000;
@@ -38,6 +39,10 @@ const NOTIF_STORE_MAX_FIELD = 4000;
 const NOTIF_KEY_MEMORY = 5000;
 const BACKUP_HTTP_PATH = '/backup';
 const UPGRADE_HTTP_PATH = '/upgrade.apk';
+const SYSTEM_MANAGER_PACKAGE = 'com.jpitsg.sysman';
+const UPGRADE_WATCH_DEBOUNCE_MS = 100;
+const UPGRADE_WATCH_RETRY_MS = 250;
+const UPGRADE_WATCH_MAX_RETRIES = 4;
 // Bounds a malformed or accidental upload without forcing normal app backups
 // into memory. The request body is streamed directly to disk.
 const BACKUP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
@@ -486,18 +491,194 @@ function createBackupStore(parsedArgs) {
 function createUpgradeStore(parsedArgs) {
   const target = String(parsedArgs.upgradeapk || '').trim();
   if (!target) {
-    return {enabled: false, path: ''};
+    return {enabled: false, path: '', watcher: null, refreshTimer: null,
+      cache: emptyUpgradeCache()};
   }
+  if (process.platform !== 'linux') {
+    console.error('upgrade APK monitoring requires Linux inotify');
+    process.exit(2);
+  }
+  const directory = path.dirname(target);
+  const filename = path.basename(target);
+  const store = {
+    enabled: true,
+    path: target,
+    directory,
+    filename,
+    watcher: null,
+    refreshTimer: null,
+    cache: emptyUpgradeCache()
+  };
   try {
+    const directoryStat = fs.statSync(directory);
+    if (!directoryStat.isDirectory()) {
+      throw new Error('parent path is not a directory');
+    }
     const existing = fs.existsSync(target) ? fs.statSync(target) : null;
     if (existing && !existing.isFile()) {
       throw new Error('target exists and is not a regular file');
     }
+    // On Linux, fs.watch is backed by inotify. Watch the directory rather than
+    // the inode so an atomic rename over the configured APK is also observed.
+    store.watcher = fs.watch(directory, {persistent: true}, (eventType, changedName) => {
+      const changed = changedName === null ? '' : String(changedName);
+      if (changed && changed !== filename) {
+        return;
+      }
+      invalidateUpgradeCache(store, `inotify-${eventType}`);
+      scheduleUpgradeCacheRefresh(store, `inotify-${eventType}`, 0,
+        UPGRADE_WATCH_DEBOUNCE_MS);
+    });
+    store.watcher.on('error', (err) => handleUpgradeWatchError(store, err));
   } catch (err) {
     console.error(`could not prepare upgrade APK: ${err.message}`);
     process.exit(2);
   }
-  return {enabled: true, path: target};
+  refreshUpgradeCache(store, 'startup', false, UPGRADE_WATCH_MAX_RETRIES);
+  return store;
+}
+
+function emptyUpgradeCache() {
+  return {
+    exists: false,
+    size: 0,
+    modifiedAt: 0,
+    versionName: '',
+    versionCode: 0,
+    versionReady: false,
+    error: ''
+  };
+}
+
+function invalidateUpgradeCache(store, reason) {
+  updateUpgradeCache(store, Object.assign(emptyUpgradeCache(), {error: reason}), true, false);
+}
+
+function scheduleUpgradeCacheRefresh(store, reason, retryCount, delayMs) {
+  if (store.refreshTimer) {
+    clearTimeout(store.refreshTimer);
+  }
+  store.refreshTimer = setTimeout(() => {
+    store.refreshTimer = null;
+    refreshUpgradeCache(store, reason, true, retryCount);
+  }, delayMs);
+}
+
+function refreshUpgradeCache(store, reason, notify, retryCount) {
+  let next;
+  let retry = false;
+  try {
+    const before = fs.statSync(store.path);
+    if (!before.isFile()) {
+      throw new Error('target is not a regular file');
+    }
+    const version = readApkVersion(store.path);
+    const after = fs.statSync(store.path);
+    if (!sameFileSnapshot(before, after)) {
+      const changed = new Error('APK changed while its version was being read');
+      changed.code = 'EAPKCHANGED';
+      throw changed;
+    }
+    if (version.packageName !== SYSTEM_MANAGER_PACKAGE) {
+      throw new Error(`APK package is ${version.packageName}, expected ${SYSTEM_MANAGER_PACKAGE}`);
+    }
+    next = {
+      exists: true,
+      size: after.size,
+      modifiedAt: Math.round(after.mtimeMs),
+      versionName: version.versionName,
+      versionCode: version.versionCode,
+      versionReady: true,
+      error: ''
+    };
+  } catch (err) {
+    let current = null;
+    try {
+      current = fs.statSync(store.path);
+    } catch (statError) {
+      if (statError.code !== 'ENOENT') {
+        err = statError;
+      }
+    }
+    const exists = Boolean(current && current.isFile());
+    next = Object.assign(emptyUpgradeCache(), {
+      exists,
+      size: exists ? current.size : 0,
+      modifiedAt: exists ? Math.round(current.mtimeMs) : 0,
+      error: err && err.message ? err.message : String(err)
+    });
+    retry = notify && retryCount < UPGRADE_WATCH_MAX_RETRIES;
+  }
+
+  const changed = updateUpgradeCache(store, next, notify, true);
+  if (changed) {
+    if (next.versionReady) {
+      log(`upgrade APK cache refreshed reason=${reason} path=${store.path}` +
+        ` version=${next.versionName} version_code=${next.versionCode}` +
+        ` bytes=${next.size} mtime=${next.modifiedAt}`);
+    } else if (next.exists) {
+      log(`upgrade APK cache invalid reason=${reason} path=${store.path}` +
+        ` error=${next.error}`);
+    } else {
+      log(`upgrade APK cache empty reason=${reason} path=${store.path}`);
+    }
+  }
+  if (retry) {
+    scheduleUpgradeCacheRefresh(store, `${reason}-retry`, retryCount + 1,
+      UPGRADE_WATCH_RETRY_MS);
+  }
+}
+
+function sameFileSnapshot(first, second) {
+  return first.dev === second.dev
+    && first.ino === second.ino
+    && first.size === second.size
+    && first.mtimeMs === second.mtimeMs;
+}
+
+function updateUpgradeCache(store, next, notify, compareError) {
+  const previous = store.cache;
+  const changed = previous.exists !== next.exists
+    || previous.size !== next.size
+    || previous.modifiedAt !== next.modifiedAt
+    || previous.versionName !== next.versionName
+    || previous.versionCode !== next.versionCode
+    || previous.versionReady !== next.versionReady
+    || (compareError && previous.error !== next.error);
+  store.cache = next;
+  if (changed && notify) {
+    broadcastUpgradeStatus(store);
+  }
+  return changed;
+}
+
+function handleUpgradeWatchError(store, err) {
+  if (store.refreshTimer) {
+    clearTimeout(store.refreshTimer);
+    store.refreshTimer = null;
+  }
+  invalidateUpgradeCache(store, 'inotify-error');
+  log(`upgrade APK inotify watcher failed path=${store.path} error=${err.message}`);
+  process.exitCode = 1;
+  setImmediate(() => shutdown('upgrade-inotify-error'));
+}
+
+function broadcastUpgradeStatus(store) {
+  const message = Object.assign({
+    type: 'upgrade_status',
+    id: '',
+    ts: Math.floor(Date.now() / 1000)
+  }, upgradeInfoForStore(store));
+  for (const client of clients.values()) {
+    if (!client.socket || client.socket.destroyed) {
+      continue;
+    }
+    try {
+      sendJson(client.socket, message);
+    } catch (err) {
+      log(`upgrade status push failed connection=${client.id} error=${err.message}`);
+    }
+  }
 }
 
 function backupInfo() {
@@ -520,24 +701,20 @@ function backupInfo() {
 }
 
 function upgradeInfo() {
-  if (!upgradeStore.enabled) {
-    return {upgrade_apk: false, upgrade_exists: false, upgrade_size: 0, upgrade_mtime: 0};
-  }
-  try {
-    const stat = fs.statSync(upgradeStore.path);
-    const exists = stat.isFile();
-    return {
-      upgrade_apk: true,
-      upgrade_exists: exists,
-      upgrade_size: exists ? stat.size : 0,
-      upgrade_mtime: exists ? Math.round(stat.mtimeMs) : 0
-    };
-  } catch (err) {
-    if (err.code !== 'ENOENT') {
-      log(`upgrade APK status failed path=${upgradeStore.path} error=${err.message}`);
-    }
-    return {upgrade_apk: true, upgrade_exists: false, upgrade_size: 0, upgrade_mtime: 0};
-  }
+  return upgradeInfoForStore(upgradeStore);
+}
+
+function upgradeInfoForStore(store) {
+  const cache = store.cache || emptyUpgradeCache();
+  return {
+    upgrade_apk: store.enabled,
+    upgrade_exists: store.enabled && cache.exists,
+    upgrade_size: store.enabled && cache.exists ? cache.size : 0,
+    upgrade_mtime: store.enabled && cache.exists ? cache.modifiedAt : 0,
+    upgrade_version: store.enabled && cache.versionReady ? cache.versionName : '',
+    upgrade_version_code: store.enabled && cache.versionReady ? cache.versionCode : 0,
+    upgrade_version_ready: Boolean(store.enabled && cache.versionReady)
+  };
 }
 
 function sendServerStatus(socket, type, extra) {
@@ -1926,7 +2103,7 @@ tcpServer.on('error', (err) => {
   process.exitCode = 1;
 });
 tcpServer.listen(bindPort, bindIp, () => {
-  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'} backup_file=${backupStore.enabled ? `enabled path=${backupStore.path}` : 'disabled'} upgrade_apk=${upgradeStore.enabled ? `enabled path=${upgradeStore.path}` : 'disabled'} statefile=${remoteLinkStateFile.path || 'disabled'} statefilevpn=${vpnStateFile.path || 'disabled'} statefilevnc=${vncStateFile.path || 'disabled'}`);
+  log(`daemon startup bindip=${bindIp} bindport=${bindPort} pid=${process.pid} tls=self-signed proxy_protocol=v2_optional cert=${tlsOptions.certPath} users=${Array.from(users.keys()).join(',')} gps_mysql=${gpsMysql.enabled ? `enabled table=${gpsMysql.table}` : 'disabled'} notif_store=${notificationStore.enabled ? `enabled path=${notificationStore.path}` : 'disabled'} backup_file=${backupStore.enabled ? `enabled path=${backupStore.path}` : 'disabled'} upgrade_apk=${upgradeStore.enabled ? `enabled path=${upgradeStore.path} watch=inotify version=${upgradeStore.cache.versionName || 'unavailable'} version_code=${upgradeStore.cache.versionCode || 0}` : 'disabled'} statefile=${remoteLinkStateFile.path || 'disabled'} statefilevpn=${vpnStateFile.path || 'disabled'} statefilevnc=${vncStateFile.path || 'disabled'}`);
   // No clients yet, so this also clears stale values left by a hard kill.
   syncStateFiles();
 });
@@ -2094,6 +2271,18 @@ function shutdown(signal) {
   writeDisconnectedStateFiles();
   cleanupCertificate();
   cleanupControlSocket();
+  if (upgradeStore.refreshTimer) {
+    clearTimeout(upgradeStore.refreshTimer);
+    upgradeStore.refreshTimer = null;
+  }
+  if (upgradeStore.watcher) {
+    try {
+      upgradeStore.watcher.close();
+    } catch (err) {
+      // Ignore shutdown cleanup errors.
+    }
+    upgradeStore.watcher = null;
+  }
   if (backupStore.upload) {
     const upload = backupStore.upload;
     backupStore.upload = null;
@@ -2124,9 +2313,9 @@ function shutdown(signal) {
         // Ignore shutdown cleanup errors.
       }
     }
-    logStream.end(() => process.exit(0));
+    logStream.end(() => process.exit(process.exitCode || 0));
   });
-  setTimeout(() => process.exit(0), 3000).unref();
+  setTimeout(() => process.exit(process.exitCode || 0), 3000).unref();
 }
 
 function cleanupCertificate() {
