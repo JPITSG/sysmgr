@@ -678,7 +678,7 @@ public final class RemoteLinkService extends Service {
     }
 
     private void sendHello(RemoteWebSocketClient current, Config config) throws IOException {
-        current.sendText("{\"type\":\"hello\",\"app\":\"SystemManager\",\"version\":\"1.0\","
+        current.sendText("{\"type\":\"hello\",\"app\":\"SystemManager\",\"version\":\"1.0.1\","
                 + "\"uuid\":\"" + config.installUuid() + "\","
                 + "\"heartbeat_seconds\":" + config.remoteLinkHeartbeatSeconds() + "}");
     }
