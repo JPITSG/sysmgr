@@ -88,6 +88,10 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
   live byte progress during a sequential exact 1 MiB upload to sysmgrd and
   1 MiB download back to the app. Either test can be stopped while it runs;
   results remain `Unknown` until each test is run.
+- **Remote Link availability statistics** — persist connection transitions and
+  show uptime percentage plus total downtime (`HH:MM:SS`) over a rolling
+  24-hour window. A new installation accumulates its first window from the
+  first observed link state; no background polling is used.
 
 **Embedded OpenVPN client**
 - A cross-compiled `openvpn` 2.7.5 binary (OpenSSL 3.5.7, LZO 2.10, LZ4 1.10.0)

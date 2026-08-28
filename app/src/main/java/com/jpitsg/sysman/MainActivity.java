@@ -250,6 +250,8 @@ public final class MainActivity extends Activity {
     private EditText remoteLinkUsernameField;
     private EditText remoteLinkPasswordField;
     private EditText remoteLinkHeartbeatSecondsField;
+    private TextView remoteLinkUptimeValue;
+    private TextView remoteLinkDowntimeValue;
     private TextView remoteLinkLatencyValue;
     private TextView remoteLinkUploadThroughputValue;
     private TextView remoteLinkDownloadThroughputValue;
@@ -1430,6 +1432,16 @@ public final class MainActivity extends Activity {
         frame.content.addView(row, stack(frame.content));
         addRowButton(row, tonalButton("Reconnect", action("remote_link_reconnect")));
         addRowButton(row, tonalButton("Ping", action("remote_link_ping")));
+
+        addSubsectionLabel(frame.content, "Link Statistics");
+        LinearLayout statistics = newColumn();
+        statistics.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
+        statistics.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        frame.content.addView(statistics, stack(frame.content));
+        remoteLinkUptimeValue = addInfoRow(
+                statistics, "Up — last 24 hours", "100.000%", COLOR_TEXT);
+        remoteLinkDowntimeValue = addInfoRow(
+                statistics, "Down — last 24 hours", "00:00:00", COLOR_TEXT);
 
         addSubsectionLabel(frame.content, "Link Test");
         LinearLayout testStatus = newColumn();
@@ -3310,13 +3322,13 @@ public final class MainActivity extends Activity {
 
     private void updateTimeBasedStatus() {
         TextView duration = beaconAdvertisingDurationValue;
-        if (duration == null || !BeaconStateStore.isAdvertising(this)) {
-            return;
+        if (duration != null && BeaconStateStore.isAdvertising(this)) {
+            long since = BeaconStateStore.advertisingSinceMillis(this);
+            if (since > 0L) {
+                duration.setText(formatDuration(System.currentTimeMillis() - since));
+            }
         }
-        long since = BeaconStateStore.advertisingSinceMillis(this);
-        if (since > 0L) {
-            duration.setText(formatDuration(System.currentTimeMillis() - since));
-        }
+        refreshRemoteLinkStatistics();
     }
 
     // ============================================================
@@ -4058,6 +4070,7 @@ public final class MainActivity extends Activity {
         refreshBeaconPanel();
         setEnabledPill(rebootPill, switchValue(rebootAutomationEnabledSwitch, config.rebootAutomationEnabled()));
         setRemoteLinkPill(RemoteLinkStateStore.isConnected(this));
+        refreshRemoteLinkStatistics();
         refreshRemoteLinkTestStatus();
         refreshNotificationBackupStatus();
         setEnabledPill(logPill, switchValue(logEnabledSwitch, config.logEnabled()));
@@ -4266,6 +4279,27 @@ public final class MainActivity extends Activity {
                 connected ? COLOR_PRIMARY_ON_CONTAINER : COLOR_DANGER_ON_CONTAINER);
     }
 
+    private void refreshRemoteLinkStatistics() {
+        if (remoteLinkUptimeValue == null || remoteLinkDowntimeValue == null) {
+            return;
+        }
+        RemoteLinkAvailabilityStore.Snapshot statistics =
+                RemoteLinkAvailabilityStore.snapshot(this);
+        remoteLinkUptimeValue.setText(String.format(
+                Locale.US, "%.3f%%", statistics.upPercent));
+        remoteLinkDowntimeValue.setText(formatHms(statistics.downMillis));
+        remoteLinkUptimeValue.setTextColor(COLOR_TEXT);
+        remoteLinkDowntimeValue.setTextColor(COLOR_TEXT);
+    }
+
+    private static String formatHms(long millis) {
+        long totalSeconds = Math.max(0L, millis / 1000L);
+        long hours = totalSeconds / 3600L;
+        long minutes = (totalSeconds % 3600L) / 60L;
+        long seconds = totalSeconds % 60L;
+        return String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds);
+    }
+
     private void refreshRemoteLinkTestStatus() {
         if (remoteLinkLatencyValue == null
                 || remoteLinkUploadThroughputValue == null
@@ -4362,6 +4396,7 @@ public final class MainActivity extends Activity {
             @Override
             public void onReceive(Context context, Intent intent) {
                 setRemoteLinkPill(RemoteLinkStateStore.isConnected(MainActivity.this));
+                refreshRemoteLinkStatistics();
                 refreshRemoteLinkTestStatus();
                 refreshNotificationBackupStatus();
                 refreshSystemBackupStatus();

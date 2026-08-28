@@ -53,6 +53,7 @@ final class SystemBackupArchive {
             "system_manager_config",
             "system_manager_network_state",
             "system_manager_notification_backup_state",
+            "system_manager_remote_link_availability",
             "system_manager_remote_link_state",
             "system_manager_remote_link_test_state",
             "system_manager_vnc_secret",
