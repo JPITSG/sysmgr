@@ -32,7 +32,7 @@ final class RebootManager {
         return SystemManagerAccessibilityService.requestReboot(app, reason);
     }
 
-    static void handleNotification(Context context, String packageName, NotificationPayload payload, String notificationKey) {
+    static void handleNotification(Context context, String packageName, NotificationPayload payload) {
         Context app = context.getApplicationContext();
         Config config = Config.get(app);
         if (!config.rebootAutomationEnabled() || !config.rebootNotificationTriggerEnabled()) {
@@ -47,7 +47,8 @@ final class RebootManager {
         if (!containsIgnoreCase(payload.text, config.rebootTriggerText())) {
             return;
         }
-        if (NotificationDeduper.wasRecentlyHandled("reboot:" + notificationKey, payload.text, config.highPriorityDedupeSeconds())) {
+        if (NotificationDeduper.wasRecentlyHandled(NotificationDeduper.SCOPE_REBOOT, packageName,
+                payload.title, payload.text, config.highPriorityDedupeSeconds())) {
             LogStore.append(app, "reboot", "Duplicate reboot notification suppressed title=" + payload.shortTitle());
             return;
         }

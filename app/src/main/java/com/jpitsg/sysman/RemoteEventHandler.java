@@ -306,8 +306,8 @@ final class RemoteEventHandler {
             LogStore.append(app, "remote", "Remote Link high-priority alert ignored; " + rejection + " id=" + id);
             return false;
         }
-        String haystack = cleanedTitle + "\n" + message;
-        if (NotificationDeduper.wasRecentlyHandled("remote-socket", haystack, config.highPriorityRemoteDedupeSeconds())) {
+        if (NotificationDeduper.wasRecentlyHandled(NotificationDeduper.SCOPE_REMOTE, "",
+                cleanedTitle, message, config.highPriorityRemoteDedupeSeconds())) {
             LogStore.append(app, "remote", "Duplicate Remote Link high-priority alert suppressed id=" + id);
             return true;
         }

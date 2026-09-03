@@ -25,7 +25,7 @@ public final class HighPriorityNotificationListener extends NotificationListener
         Config config = Config.get(this);
         String packageName = sbn.getPackageName();
         NotificationPayload payload = NotificationTextExtractor.extract(sbn);
-        RebootManager.handleNotification(this, packageName, payload, sbn.getKey());
+        RebootManager.handleNotification(this, packageName, payload);
 
         maybeBackup(config, sbn, packageName, payload);
 
@@ -38,7 +38,8 @@ public final class HighPriorityNotificationListener extends NotificationListener
                 return;
             }
 
-            if (NotificationDeduper.wasRecentlyHandled(sbn.getKey(), payload.text, config.highPriorityDedupeSeconds())) {
+            if (NotificationDeduper.wasRecentlyHandled(NotificationDeduper.SCOPE_HIGH_PRIORITY, packageName,
+                    payload.title, payload.text, config.highPriorityDedupeSeconds())) {
                 LogStore.append(this, "notification", "Duplicate package-based high-priority update suppressed title="
                         + payload.shortTitle());
                 return;
