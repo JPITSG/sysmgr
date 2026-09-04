@@ -776,7 +776,7 @@ final class HighPriorityAlertPlayer {
     private static Uri findRemoteAlarmToneUri(Context context, String requestedTitle) {
         String wanted = requestedTitle == null ? "" : requestedTitle.trim();
         if (wanted.isEmpty()) {
-            return findToneUri(context, "");
+            return findToneUri(context, Config.get(context).highPriorityToneTitle());
         }
         Uri exact = findToneUri(context, wanted, true);
         if (exact != null) {
