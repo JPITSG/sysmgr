@@ -1605,7 +1605,7 @@ async function deliverNotification(notification) {
   }
   if (action === 'alarm') {
     payload.tone = notification.tone || '';
-    payload.length = notification.lengthSeconds || 10;
+    payload.length = notification.lengthSeconds || 15;
     payload.vibrate = notification.vibrate !== false;
   }
   if (action === 'vpn') {
@@ -2201,7 +2201,7 @@ function startControlSocket() {
       if (request.action === 'alarm') {
         request.message = request.message || 'Remote alarm requested';
         request.tone = String(request.tone || '').trim();
-        request.length = parseControlSeconds(request.length, 10, 1, 300);
+        request.length = parseControlSeconds(request.length, 15, 1, 300);
         request.vibrate = parseControlBoolean(request.vibrate, true);
       }
       const imageBase64 = request.image_base64 || '';

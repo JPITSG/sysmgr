@@ -125,7 +125,7 @@ final class RemoteEventHandler {
     private static void handleAlarmAction(final Context context, final RemoteWebSocketClient client,
                                           final String id, JSONObject json) {
         String tone = json.optString("tone", "");
-        int length = Math.max(1, Math.min(300, json.optInt("length", 10)));
+        int length = Math.max(1, Math.min(300, json.optInt("length", 15)));
         boolean vibrate = json.optBoolean("vibrate", true);
         LogStore.append(context, "remote", "Remote alarm requested id=" + id
                 + " tone=" + tone + " length=" + length + " vibrate=" + vibrate);

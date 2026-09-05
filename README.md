@@ -55,7 +55,7 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
   screen on/off, or unlocking. Both play one tone cycle when started unlocked,
   and loop when started locked, up to their maximum duration. High-priority
   alerts use the configured Play duration; remote alarms use `length` (default
-  10 seconds). Omitting `tone` uses the configured High Priority Alerts tone.
+  15 seconds). Omitting `tone` uses the configured High Priority Alerts tone.
 - **Notification history** — unlimited local history with images, pagination,
   and save/share, plus per-notification Delete/Clear actions.
 - **Notification backup** — optionally mirror every user-facing notification to
