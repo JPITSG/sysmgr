@@ -25,7 +25,7 @@ import java.util.concurrent.Executor;
 
 public final class SystemManagerAccessibilityService extends AccessibilityService {
     private static volatile SystemManagerAccessibilityService instance;
-    private static volatile boolean highPriorityKeyCaptureWanted;
+    private static volatile boolean alertKeyCaptureWanted;
     // On this device the power menu no longer has a Restart button; rebooting is
     // triggered by a press-and-hold at screen center swiped up to the top.
     private static final long REBOOT_SWIPE_HOLD_MILLIS = 400L;
@@ -71,18 +71,18 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
         }
     }
 
-    static void setHighPriorityKeyCaptureEnabled(boolean enabled) {
-        if (highPriorityKeyCaptureWanted == enabled) {
+    static void setAlertKeyCaptureEnabled(boolean enabled) {
+        if (alertKeyCaptureWanted == enabled) {
             return;
         }
-        highPriorityKeyCaptureWanted = enabled;
+        alertKeyCaptureWanted = enabled;
 
         final SystemManagerAccessibilityService service = instance;
         if (service != null) {
             service.handler.post(new Runnable() {
                 @Override
                 public void run() {
-                    service.syncHighPriorityKeyCapture();
+                    service.syncAlertKeyCapture();
                 }
             });
         }
@@ -477,7 +477,7 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
         instance = this;
         monitor = new WifiChangeMonitor(this, "accessibility");
         LogStore.append(this, "accessibility", "Accessibility service connected");
-        syncHighPriorityKeyCapture();
+        syncAlertKeyCapture();
         syncMonitor();
         VncManager.sync(this, "accessibility-connected");
     }
@@ -489,7 +489,7 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
-        if (!highPriorityKeyCaptureWanted
+        if (!alertKeyCaptureWanted
                 || event == null
                 || event.getAction() != KeyEvent.ACTION_DOWN
                 || event.getRepeatCount() != 0) {
@@ -511,7 +511,7 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
                 return false;
         }
 
-        HighPriorityAlertPlayer.stopHighPriorityForHardwareButton(this, reason);
+        HighPriorityAlertPlayer.stopForHardwareButton(this, reason);
         return false;
     }
 
@@ -550,7 +550,7 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
         }
     }
 
-    private void syncHighPriorityKeyCapture() {
+    private void syncAlertKeyCapture() {
         AccessibilityServiceInfo info = getServiceInfo();
         if (info == null) {
             return;
@@ -558,7 +558,7 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
 
         int oldFlags = info.flags;
         int newFlags;
-        if (highPriorityKeyCaptureWanted) {
+        if (alertKeyCaptureWanted) {
             newFlags = oldFlags | AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
         } else {
             newFlags = oldFlags & ~AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
@@ -570,8 +570,8 @@ public final class SystemManagerAccessibilityService extends AccessibilityServic
         info.flags = newFlags;
         try {
             setServiceInfo(info);
-            LogStore.append(this, "accessibility", "High-priority hardware key capture "
-                    + (highPriorityKeyCaptureWanted ? "enabled" : "disabled"));
+            LogStore.append(this, "accessibility", "Alert hardware key capture "
+                    + (alertKeyCaptureWanted ? "enabled" : "disabled"));
         } catch (RuntimeException e) {
             LogStore.append(this, "accessibility", "Could not update hardware key capture: "
                     + e.getMessage());

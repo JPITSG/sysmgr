@@ -44,10 +44,6 @@ final class HighPriorityAlertPlayer {
     private static int originalAlarmVolume = -1;
     private static BroadcastReceiver unlockReceiver;
     private static boolean unlockReceiverRegistered;
-    private static BroadcastReceiver screenOnReceiver;
-    private static boolean screenOnReceiverRegistered;
-    private static Runnable screenOnPollRunnable;
-    private static boolean screenOnPollSawNonInteractive;
     private static MediaSession hardwareDismissSession;
     private static BroadcastReceiver powerStateReceiver;
     private static boolean powerStateReceiverRegistered;
@@ -94,16 +90,18 @@ final class HighPriorityAlertPlayer {
         });
     }
 
-    static void stopHighPriorityForHardwareButton(final Context context, final String reason) {
+    static void stopForHardwareButton(final Context context, final String reason) {
         final Context app = context.getApplicationContext();
+        final int alertKind;
         final long generation;
         synchronized (LOCK) {
-            if (currentAlertKind != ALERT_KIND_HIGH_PRIORITY || currentRingtone == null) {
+            if (currentAlertKind == ALERT_KIND_NONE || currentRingtone == null) {
                 return;
             }
+            alertKind = currentAlertKind;
             generation = currentPlaybackGeneration;
         }
-        requestPlaybackStop(app, ALERT_KIND_HIGH_PRIORITY, generation, reason);
+        requestPlaybackStop(app, alertKind, generation, reason);
     }
 
     static void playRemoteAlarm(final Context context, final String toneTitle, final int seconds,
@@ -199,14 +197,14 @@ final class HighPriorityAlertPlayer {
                 vibrate(app, reason + ":tone", maxPlayMillis);
             }
             if (stopOnUnlock) {
-                registerUnlockStop(app, generation);
+                registerUnlockStop(app, ALERT_KIND_HIGH_PRIORITY, generation);
             }
             if (mode == MODE_SINGLE_CYCLE) {
-                scheduleSingleCycleStop(app, ringtone, generation, maxPlayMillis);
+                scheduleSingleCycleStop(app, ALERT_KIND_HIGH_PRIORITY, ringtone, generation, maxPlayMillis);
             } else {
                 scheduleTimeoutStop(app, ALERT_KIND_HIGH_PRIORITY, generation, maxPlayMillis);
             }
-            registerHighPriorityHardwareDismiss(app, generation, interactiveAtPlaybackStart);
+            registerHardwareDismiss(app, ALERT_KIND_HIGH_PRIORITY, generation, interactiveAtPlaybackStart);
             LogStore.append(app, "alert", "Playing high-priority alert tone=" + config.highPriorityToneTitle()
                     + " reason=" + reason
                     + " mode=" + (mode == MODE_SINGLE_CYCLE ? "single-cycle" : "looping")
@@ -239,13 +237,15 @@ final class HighPriorityAlertPlayer {
             return new StartResult(false, "tone load failed");
         }
 
+        DeviceState state = DeviceState.read(app);
+        int mode = state.locked ? MODE_LOOPING : MODE_SINGLE_CYCLE;
         try {
             ringtone.setAudioAttributes(new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_ALARM)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .build());
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                ringtone.setLooping(true);
+                ringtone.setLooping(mode == MODE_LOOPING);
                 ringtone.setVolume(1.0f);
             }
             ringtone.play();
@@ -262,13 +262,22 @@ final class HighPriorityAlertPlayer {
         if (vibrateWithTone) {
             vibrate(app, reason + ":remote-alarm", maxPlayMillis);
         }
-        scheduleTimeoutStop(app, ALERT_KIND_REMOTE_ALARM, generation, maxPlayMillis);
-        registerScreenOnStop(app, generation);
+        if (state.locked) {
+            registerUnlockStop(app, ALERT_KIND_REMOTE_ALARM, generation);
+        }
+        if (mode == MODE_SINGLE_CYCLE) {
+            scheduleSingleCycleStop(app, ALERT_KIND_REMOTE_ALARM, ringtone, generation, maxPlayMillis);
+        } else {
+            scheduleTimeoutStop(app, ALERT_KIND_REMOTE_ALARM, generation, maxPlayMillis);
+        }
+        registerHardwareDismiss(app, ALERT_KIND_REMOTE_ALARM, generation, state.interactive);
         LogStore.append(app, "alert", "Playing remote alarm tone=" + safeText(toneTitle)
                 + " reason=" + reason
                 + " vibrateWithTone=" + vibrateWithTone
-                + " stopOnScreenOn=true"
-                + " duration=" + safeSeconds + "s");
+                + " mode=" + (mode == MODE_SINGLE_CYCLE ? "single-cycle" : "looping")
+                + " stopOnUnlock=" + state.locked
+                + " stopOnScreenChange=true"
+                + " maxDuration=" + safeSeconds + "s");
         return new StartResult(true, "started");
     }
 
@@ -319,7 +328,8 @@ final class HighPriorityAlertPlayer {
         MAIN.postDelayed(stopRunnable, playMillis);
     }
 
-    private static void scheduleSingleCycleStop(final Context app, final Ringtone ringtone,
+    private static void scheduleSingleCycleStop(final Context app, final int alertKind,
+                                                final Ringtone ringtone,
                                                 final long generation, final long maxMillis) {
         final long startedAt = System.currentTimeMillis();
         stopRunnable = new Runnable() {
@@ -328,7 +338,7 @@ final class HighPriorityAlertPlayer {
                 synchronized (LOCK) {
                     if (stopRunnable != this
                             || currentRingtone != ringtone
-                            || !isCurrentPlayback(ALERT_KIND_HIGH_PRIORITY, generation)) {
+                            || !isCurrentPlayback(alertKind, generation)) {
                         return;
                     }
                     boolean stillPlaying = false;
@@ -387,9 +397,8 @@ final class HighPriorityAlertPlayer {
         currentPlaybackGeneration = 0L;
 
         unregisterUnlockStop(app);
-        unregisterScreenOnStop(app);
-        unregisterHighPriorityPowerStop(app);
-        SystemManagerAccessibilityService.setHighPriorityKeyCaptureEnabled(false);
+        unregisterPowerStop(app);
+        SystemManagerAccessibilityService.setAlertKeyCaptureEnabled(false);
         releaseHardwareDismissSession(app);
         cancelVibration(app);
 
@@ -410,20 +419,21 @@ final class HighPriorityAlertPlayer {
         restoreAlarmVolume(app, audio);
     }
 
-    private static void registerHighPriorityHardwareDismiss(final Context app,
-                                                            final long generation,
-                                                            boolean interactiveAtPlaybackStart) {
-        registerHardwareVolumeStop(app, generation);
-        registerHighPriorityPowerStop(app, generation, interactiveAtPlaybackStart);
-        SystemManagerAccessibilityService.setHighPriorityKeyCaptureEnabled(true);
+    private static void registerHardwareDismiss(final Context app, final int alertKind,
+                                                 final long generation,
+                                                 boolean interactiveAtPlaybackStart) {
+        registerHardwareVolumeStop(app, alertKind, generation);
+        registerPowerStop(app, alertKind, generation, interactiveAtPlaybackStart);
+        SystemManagerAccessibilityService.setAlertKeyCaptureEnabled(true);
     }
 
-    private static void registerHardwareVolumeStop(final Context app, final long generation) {
+    private static void registerHardwareVolumeStop(final Context app, final int alertKind,
+                                                   final long generation) {
         releaseHardwareDismissSession(app);
 
         MediaSession session = null;
         try {
-            session = new MediaSession(app, "SystemManagerHighPriorityAlert");
+            session = new MediaSession(app, "SystemManagerAlert");
             session.setPlaybackToRemote(new VolumeProvider(
                     VolumeProvider.VOLUME_CONTROL_RELATIVE,
                     DISMISS_VOLUME_MAX,
@@ -431,10 +441,10 @@ final class HighPriorityAlertPlayer {
                 @Override
                 public void onAdjustVolume(int direction) {
                     if (direction == AudioManager.ADJUST_RAISE) {
-                        requestPlaybackStop(app, ALERT_KIND_HIGH_PRIORITY, generation,
+                        requestPlaybackStop(app, alertKind, generation,
                                 "hardware-volume-up");
                     } else if (direction == AudioManager.ADJUST_LOWER) {
-                        requestPlaybackStop(app, ALERT_KIND_HIGH_PRIORITY, generation,
+                        requestPlaybackStop(app, alertKind, generation,
                                 "hardware-volume-down");
                     }
                 }
@@ -481,9 +491,10 @@ final class HighPriorityAlertPlayer {
         }
     }
 
-    private static void registerHighPriorityPowerStop(final Context app, final long generation,
-                                                      boolean interactiveAtPlaybackStart) {
-        unregisterHighPriorityPowerStop(app);
+    private static void registerPowerStop(final Context app, final int alertKind,
+                                          final long generation,
+                                          boolean interactiveAtPlaybackStart) {
+        unregisterPowerStop(app);
         powerStateAtPlaybackStart = interactiveAtPlaybackStart;
 
         // Android does not reliably expose the power key itself to applications. A short
@@ -497,10 +508,10 @@ final class HighPriorityAlertPlayer {
                 }
                 String action = intent.getAction();
                 if (Intent.ACTION_SCREEN_ON.equals(action)) {
-                    requestPlaybackStop(app, ALERT_KIND_HIGH_PRIORITY, generation,
+                    requestPlaybackStop(app, alertKind, generation,
                             "hardware-power-screen-on");
                 } else if (Intent.ACTION_SCREEN_OFF.equals(action)) {
-                    requestPlaybackStop(app, ALERT_KIND_HIGH_PRIORITY, generation,
+                    requestPlaybackStop(app, alertKind, generation,
                             "hardware-power-screen-off");
                 }
             }
@@ -523,7 +534,7 @@ final class HighPriorityAlertPlayer {
                     + e.getMessage());
         }
         if (powerStateReceiverRegistered) {
-            LogStore.append(app, "alert", "Registered high-priority power-state receiver");
+            LogStore.append(app, "alert", "Registered alert power-state receiver");
         }
 
         powerStatePollRunnable = new Runnable() {
@@ -533,7 +544,7 @@ final class HighPriorityAlertPlayer {
                     if (powerStatePollRunnable != this) {
                         return;
                     }
-                    if (!isCurrentPlayback(ALERT_KIND_HIGH_PRIORITY, generation)) {
+                    if (!isCurrentPlayback(alertKind, generation)) {
                         powerStatePollRunnable = null;
                         return;
                     }
@@ -547,13 +558,13 @@ final class HighPriorityAlertPlayer {
         };
 
         if (DeviceState.read(app).interactive != powerStateAtPlaybackStart) {
-            requestPlaybackStop(app, ALERT_KIND_HIGH_PRIORITY, generation,
+            requestPlaybackStop(app, alertKind, generation,
                     "hardware-power-state-change");
         }
         MAIN.postDelayed(powerStatePollRunnable, POWER_STATE_POLL_MILLIS);
     }
 
-    private static void unregisterHighPriorityPowerStop(Context app) {
+    private static void unregisterPowerStop(Context app) {
         if (powerStatePollRunnable != null) {
             MAIN.removeCallbacks(powerStatePollRunnable);
             powerStatePollRunnable = null;
@@ -574,13 +585,14 @@ final class HighPriorityAlertPlayer {
         }
     }
 
-    private static void registerUnlockStop(final Context app, final long generation) {
+    private static void registerUnlockStop(final Context app, final int alertKind,
+                                           final long generation) {
         if (!unlockReceiverRegistered) {
             unlockReceiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     if (intent != null && Intent.ACTION_USER_PRESENT.equals(intent.getAction())) {
-                        requestPlaybackStop(app, ALERT_KIND_HIGH_PRIORITY, generation, "unlocked");
+                        requestPlaybackStop(app, alertKind, generation, "unlocked");
                     }
                 }
             };
@@ -600,10 +612,11 @@ final class HighPriorityAlertPlayer {
                 LogStore.append(app, "alert", "Could not register unlock receiver: " + e.getMessage());
             }
         }
-        scheduleUnlockPoll(app, generation);
+        scheduleUnlockPoll(app, alertKind, generation);
     }
 
-    private static void scheduleUnlockPoll(final Context app, final long generation) {
+    private static void scheduleUnlockPoll(final Context app, final int alertKind,
+                                           final long generation) {
         if (unlockPollRunnable != null) {
             return;
         }
@@ -614,12 +627,12 @@ final class HighPriorityAlertPlayer {
                     if (unlockPollRunnable != this) {
                         return;
                     }
-                    if (!isCurrentPlayback(ALERT_KIND_HIGH_PRIORITY, generation)) {
+                    if (!isCurrentPlayback(alertKind, generation)) {
                         unlockPollRunnable = null;
                         return;
                     }
                     if (!DeviceState.read(app).locked) {
-                        LogStore.append(app, "alert", "Device unlock detected by poll; stopping high-priority alert");
+                        LogStore.append(app, "alert", "Device unlock detected by poll; stopping alert");
                         stopLocked(app, "unlocked");
                         return;
                     }
@@ -628,88 +641,6 @@ final class HighPriorityAlertPlayer {
             }
         };
         MAIN.postDelayed(unlockPollRunnable, 500L);
-    }
-
-    private static void registerScreenOnStop(final Context app, final long generation) {
-        if (!screenOnReceiverRegistered) {
-            screenOnReceiver = new BroadcastReceiver() {
-                @Override
-                public void onReceive(Context context, Intent intent) {
-                    if (intent != null && Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
-                        requestPlaybackStop(app, ALERT_KIND_REMOTE_ALARM, generation, "screen-on");
-                    }
-                }
-            };
-
-            IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_ON);
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    app.registerReceiver(screenOnReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-                } else {
-                    app.registerReceiver(screenOnReceiver, filter);
-                }
-                screenOnReceiverRegistered = true;
-                LogStore.append(app, "alert", "Registered screen-on stop receiver");
-            } catch (RuntimeException e) {
-                screenOnReceiver = null;
-                screenOnReceiverRegistered = false;
-                LogStore.append(app, "alert", "Could not register screen-on receiver: " + e.getMessage());
-            }
-        }
-        scheduleScreenOnPoll(app, generation);
-    }
-
-    private static void scheduleScreenOnPoll(final Context app, final long generation) {
-        if (screenOnPollRunnable != null) {
-            return;
-        }
-        // Only a transition to interactive should stop the alarm; if the display
-        // is already on when the alarm starts, keep playing until it goes off and
-        // back on (or the timeout fires).
-        screenOnPollSawNonInteractive = !DeviceState.read(app).interactive;
-        screenOnPollRunnable = new Runnable() {
-            @Override
-            public void run() {
-                synchronized (LOCK) {
-                    if (screenOnPollRunnable != this) {
-                        return;
-                    }
-                    if (!isCurrentPlayback(ALERT_KIND_REMOTE_ALARM, generation)) {
-                        screenOnPollRunnable = null;
-                        return;
-                    }
-                    if (!DeviceState.read(app).interactive) {
-                        screenOnPollSawNonInteractive = true;
-                    } else if (screenOnPollSawNonInteractive) {
-                        LogStore.append(app, "alert", "Display turn-on detected by poll; stopping remote alarm");
-                        stopLocked(app, "screen-on");
-                        return;
-                    }
-                    MAIN.postDelayed(this, 500L);
-                }
-            }
-        };
-        MAIN.postDelayed(screenOnPollRunnable, 500L);
-    }
-
-    private static void unregisterScreenOnStop(Context app) {
-        if (screenOnPollRunnable != null) {
-            MAIN.removeCallbacks(screenOnPollRunnable);
-            screenOnPollRunnable = null;
-        }
-        if (!screenOnReceiverRegistered || screenOnReceiver == null) {
-            screenOnReceiver = null;
-            screenOnReceiverRegistered = false;
-            return;
-        }
-        try {
-            app.unregisterReceiver(screenOnReceiver);
-        } catch (RuntimeException e) {
-            LogStore.append(app, "alert", "Could not unregister screen-on receiver: " + e.getMessage());
-        } finally {
-            screenOnReceiver = null;
-            screenOnReceiverRegistered = false;
-        }
     }
 
     private static void unregisterUnlockStop(Context app) {
