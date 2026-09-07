@@ -73,7 +73,12 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
   rules** you define ("at or above 66%, broadcast every 10s; at or above 33%,
   every 30s; otherwise stay silent"); the highest matching threshold wins, and
   the rate re-evaluates as the battery moves. Timing is handled by the
-  Bluetooth controller, so it survives Doze without a wake lock. The panel
+  Bluetooth controller. Reported advertising interruptions and failed starts
+  recover automatically, with retries from 1s up to 60s and a 10s timeout per
+  start attempt. Each retry checks the current battery rule and permissions.
+  Enable logging to capture beacon restarts, screen/idle transitions, and
+  recovery events. No wake lock is held; recovery may wait while the CPU sleeps,
+  and the reported state does not prove packets are reaching a receiver. The panel
   shows live state, frequency, active rule, battery, transmit power and
   identity. Note that Android randomises the on-air Bluetooth address — match
   your receivers on the **proximity UUID**, not on a MAC.
@@ -148,6 +153,10 @@ Prerequisites:
 The exact wrapper script that wires these tools together is environment-specific
 (it hard-codes local SDK paths and a debug keystore) and is intentionally not
 committed. Point the tools at your SDK/NDK and keystore to produce a signed APK.
+
+Run `python3 tests/test_beacon_recovery.py` with a JDK 9+ to check beacon
+recovery against simulated Android callbacks and time. This does not test
+Bluetooth reception or device-specific sleep behavior.
 
 ### Embedded OpenVPN binary
 

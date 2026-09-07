@@ -7,14 +7,16 @@ import android.content.SharedPreferences;
 /**
  * Persisted beacon engine state plus a package-local broadcast on every change.
  * Mirrors {@link OpenVpnStateStore}: the panel reads it to render the status
- * card, and {@link BeaconService} is the only writer.
+ * card; the service and advertiser report lifecycle and platform callback state.
  */
 final class BeaconStateStore {
     static final String ACTION_STATE_CHANGED = "com.jpitsg.sysman.action.BEACON_STATE_CHANGED";
 
     /** Feature switched off. */
     static final String STATE_OFF = "OFF";
-    /** Radio is transmitting. */
+    static final String STATE_STARTING = "STARTING";
+    static final String STATE_RETRYING = "RETRYING";
+    /** The platform accepted advertising; this is not a receiver-side measurement. */
     static final String STATE_ADVERTISING = "ADVERTISING";
     /** A rule matched and asked for silence (interval 0). */
     static final String STATE_PAUSED = "PAUSED";
@@ -159,6 +161,8 @@ final class BeaconStateStore {
         }
         switch (state) {
             case STATE_OFF: return "Off";
+            case STATE_STARTING: return "Starting";
+            case STATE_RETRYING: return "Retrying";
             case STATE_ADVERTISING: return "Advertising";
             case STATE_PAUSED: return "Paused by rule";
             case STATE_NO_RULE: return "No matching rule";

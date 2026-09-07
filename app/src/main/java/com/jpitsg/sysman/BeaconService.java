@@ -11,7 +11,11 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.PowerManager;
+import android.os.SystemClock;
 
 /**
  * Keeps the iBeacon advertisement alive and picks its interval from the
@@ -24,23 +28,34 @@ import android.os.IBinder;
  * after six hours a day, which a beacon meant to run continuously cannot live
  * with.
  *
- * <p>No polling loop and no wake lock: the Bluetooth controller keeps its own
- * transmit schedule, and the service only wakes to re-evaluate when the battery
- * level moves, Bluetooth is toggled, or settings change.
+ * <p>The Bluetooth controller keeps its own transmit schedule. Reported failures
+ * are retried with backoff after re-evaluating the current rules. No wake lock
+ * is held: callbacks and retries can be delayed while the CPU is asleep.
  */
 public final class BeaconService extends Service {
     private static final String CHANNEL_ID = "system_manager_beacon";
     private static final int NOTIFICATION_ID = 0x5305;
+    private static final long RETRY_INITIAL_MILLIS = 1_000L;
+    private static final long RETRY_MAX_MILLIS = 60_000L;
+    private static final long STABLE_ADVERTISING_MILLIS = 60_000L;
 
     private static volatile boolean active;
 
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private Runnable recoveryRunnable;
+    private int recoveryFailures;
+    private long advertisingSinceElapsed = -1L;
+    private boolean foregroundStarted;
+    private boolean destroyed;
     private BeaconAdvertiser advertiser;
     private BroadcastReceiver batteryReceiver;
     private BroadcastReceiver bluetoothReceiver;
     private BroadcastReceiver stateReceiver;
+    private BroadcastReceiver powerReceiver;
 
     private int lastBatteryPercent = Integer.MIN_VALUE;
     private String activeIdentity = "";
+    private int activeIntervalSeconds;
 
     static boolean isActive() {
         return active;
@@ -50,7 +65,22 @@ public final class BeaconService extends Service {
     public void onCreate() {
         super.onCreate();
         active = true;
-        advertiser = new BeaconAdvertiser(this);
+        LogStore.append(this, "beacon", "Beacon service created pid=" + android.os.Process.myPid()
+                + " previousState=" + BeaconStateStore.state(this));
+        advertiser = new BeaconAdvertiser(this, new BeaconAdvertiser.Listener() {
+            @Override
+            public void onStarted() {
+                advertisingSinceElapsed = SystemClock.elapsedRealtime();
+                logDeviceState("advertising-started");
+            }
+
+            @Override
+            public void onFailure(String reason) {
+                scheduleRecovery(reason);
+            }
+        });
+        BeaconStateStore.setState(this, Config.get(this).beaconEnabled()
+                ? BeaconStateStore.STATE_STARTING : BeaconStateStore.STATE_OFF, "");
         resolveChannel();
         registerReceivers();
     }
@@ -65,6 +95,7 @@ public final class BeaconService extends Service {
 
         try {
             startForegroundBeacon();
+            foregroundStarted = true;
         } catch (RuntimeException e) {
             LogStore.append(this, "beacon", "Beacon foreground start failed: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());
@@ -73,6 +104,8 @@ public final class BeaconService extends Service {
             return START_NOT_STICKY;
         }
 
+        logDeviceState("service-start reason=" + reason + " systemRestart=" + (intent == null)
+                + " startId=" + startId + " flags=" + flags);
         if (BeaconManager.ACTION_REFRESH.equals(action)) {
             // A settings change may have altered the payload, so drop the cached
             // identity and let evaluate() rebuild the advertisement.
@@ -89,16 +122,18 @@ public final class BeaconService extends Service {
 
     @Override
     public void onDestroy() {
+        logDeviceState("service-destroy");
         active = false;
+        destroyed = true;
+        foregroundStarted = false;
         unregisterReceivers();
-        if (advertiser != null) {
-            advertiser.stop();
-        }
-        activeIdentity = "";
+        stopAdvertising();
         if (Config.get(this).beaconEnabled()) {
-            // Stopped while still enabled (task killed, low memory): leave a
-            // truthful state behind rather than a stale "advertising".
-            BeaconStateStore.setState(this, BeaconStateStore.STATE_ERROR, "Beacon service stopped");
+            // onDestroy is not guaranteed on process death; onCreate also clears
+            // any persisted advertising claim when the service is recreated.
+            if (!BeaconStateStore.STATE_ERROR.equals(BeaconStateStore.state(this))) {
+                BeaconStateStore.setError(this, "Beacon service stopped");
+            }
         } else {
             BeaconStateStore.setState(this, BeaconStateStore.STATE_OFF, "");
         }
@@ -106,9 +141,18 @@ public final class BeaconService extends Service {
         super.onDestroy();
     }
 
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        logDeviceState("task-removed");
+        super.onTaskRemoved(rootIntent);
+    }
+
     // ---- Rule evaluation ----------------------------------------------------
 
     private void evaluate(String reason) {
+        if (destroyed || !foregroundStarted) {
+            return;
+        }
         Config config = Config.get(this);
         if (!config.beaconEnabled()) {
             LogStore.append(this, "beacon", "Beacon disabled; stopping reason=" + reason);
@@ -150,21 +194,87 @@ public final class BeaconService extends Service {
         }
 
         String identity = identitySignature(config);
-        if (advertiser.isRunningAt(requestedInterval) && identity.equals(activeIdentity)) {
+        boolean sameRequest = identity.equals(activeIdentity) && activeIntervalSeconds == requestedInterval;
+        if (sameRequest && (advertiser.isRunningAt(requestedInterval) || recoveryRunnable != null)) {
             return;
+        }
+        if (!sameRequest) {
+            cancelRecovery();
+            recoveryFailures = 0;
         }
 
         LogStore.append(this, "beacon", "Applying rule " + rule.displayThreshold() + " → "
                 + rule.displayInterval() + " battery=" + battery + "% reason=" + reason);
         activeIdentity = identity;
+        activeIntervalSeconds = requestedInterval;
+        advertisingSinceElapsed = -1L;
         advertiser.start(requestedInterval);
     }
 
     private void stopAdvertising() {
+        cancelRecovery();
+        recoveryFailures = 0;
+        advertisingSinceElapsed = -1L;
         if (advertiser != null) {
             advertiser.stop();
         }
         activeIdentity = "";
+        activeIntervalSeconds = 0;
+    }
+
+    private void cancelRecovery() {
+        if (recoveryRunnable != null) {
+            handler.removeCallbacks(recoveryRunnable);
+            recoveryRunnable = null;
+        }
+    }
+
+    private void scheduleRecovery(final String reason) {
+        if (destroyed || !foregroundStarted || recoveryRunnable != null) {
+            return;
+        }
+        if (advertisingSinceElapsed >= 0L
+                && SystemClock.elapsedRealtime() - advertisingSinceElapsed >= STABLE_ADVERTISING_MILLIS) {
+            recoveryFailures = 0;
+        }
+        advertisingSinceElapsed = -1L;
+        long delayMillis = Math.min(RETRY_MAX_MILLIS,
+                RETRY_INITIAL_MILLIS << Math.min(recoveryFailures, 6));
+        recoveryFailures = Math.min(recoveryFailures + 1, 7);
+        BeaconStateStore.setState(this, BeaconStateStore.STATE_RETRYING,
+                reason + "; retry in " + delayMillis / 1000L + "s");
+        logDeviceState("recovery-scheduled delayMs=" + delayMillis + " reason=" + reason);
+        recoveryRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (destroyed || recoveryRunnable != this) {
+                    return;
+                }
+                recoveryRunnable = null;
+                // Never restart on stale battery rules or revoked permissions.
+                evaluate("recovery:" + reason);
+            }
+        };
+        handler.postDelayed(recoveryRunnable, delayMillis);
+    }
+
+    private void logDeviceState(String event) {
+        try {
+            PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            LogStore.append(this, "beacon", event
+                    + " pid=" + android.os.Process.myPid()
+                    + " elapsedMs=" + SystemClock.elapsedRealtime()
+                    + " interactive=" + (power == null ? "unknown" : power.isInteractive())
+                    + " idle=" + (power == null ? "unknown" : power.isDeviceIdleMode())
+                    + " lightIdle=" + (power == null || Build.VERSION.SDK_INT < 33
+                            ? "unknown" : power.isDeviceLightIdleMode())
+                    + " powerSave=" + (power == null ? "unknown" : power.isPowerSaveMode())
+                    + " batteryExempt=" + PermissionState.ignoringBatteryOptimizations(this)
+                    + " advertising=" + (advertiser != null && advertiser.isAdvertising())
+                    + " state=" + BeaconStateStore.state(this));
+        } catch (RuntimeException e) {
+            LogStore.append(this, "beacon", event + " device state unavailable: " + e.getMessage());
+        }
     }
 
     /** Everything that, when changed, requires the advertisement to be rebuilt. */
@@ -227,6 +337,27 @@ public final class BeaconService extends Service {
                 updateNotification();
             }
         };
+        powerReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent != null) {
+                    logDeviceState("device-event:" + intent.getAction());
+                    // Re-evaluate failures on a power transition, without restarting
+                    // healthy advertising or bypassing an outstanding retry delay.
+                    evaluate("device-event:" + intent.getAction());
+                }
+            }
+        };
+        IntentFilter powerFilter = new IntentFilter();
+        powerFilter.addAction(Intent.ACTION_SCREEN_ON);
+        powerFilter.addAction(Intent.ACTION_SCREEN_OFF);
+        powerFilter.addAction(Intent.ACTION_USER_PRESENT);
+        powerFilter.addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED);
+        powerFilter.addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
+        if (Build.VERSION.SDK_INT >= 33) {
+            powerFilter.addAction(PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED);
+        }
+        registerInternal(powerReceiver, powerFilter);
         registerFramework(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
         registerFramework(bluetoothReceiver, new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED));
         registerInternal(stateReceiver, new IntentFilter(BeaconStateStore.ACTION_STATE_CHANGED));
@@ -254,6 +385,7 @@ public final class BeaconService extends Service {
         batteryReceiver = unregister(batteryReceiver);
         bluetoothReceiver = unregister(bluetoothReceiver);
         stateReceiver = unregister(stateReceiver);
+        powerReceiver = unregister(powerReceiver);
     }
 
     private BroadcastReceiver unregister(BroadcastReceiver receiver) {

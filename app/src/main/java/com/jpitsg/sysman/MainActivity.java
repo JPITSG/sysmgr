@@ -3090,6 +3090,11 @@ public final class MainActivity extends Activity {
             setPillState(beaconPill, "PAUSED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
             return;
         }
+        if (BeaconStateStore.STATE_STARTING.equals(state) || BeaconStateStore.STATE_RETRYING.equals(state)) {
+            setPillState(beaconPill, BeaconStateStore.label(state).toUpperCase(java.util.Locale.US),
+                    COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+            return;
+        }
         setPillState(beaconPill, "ATTENTION", COLOR_DANGER_CONTAINER, COLOR_DANGER_ON_CONTAINER);
     }
 

@@ -25,9 +25,9 @@ import java.util.UUID;
  *
  * <p>Timing is delegated to the Bluetooth controller rather than duty-cycled
  * from the CPU. Once an advertising set is started the controller keeps
- * transmitting on its own clock, so the interval survives Doze and needs no
- * wake lock — the app process only has to stay alive (hence {@link
- * BeaconService} being a foreground service).
+ * transmitting on its own clock. No wake lock is held here; platform callbacks
+ * report interruptions to {@link BeaconService} for recovery. A successful
+ * callback is not proof that packets are still reaching a receiver.
  *
  * <p>Interval control needs {@code startAdvertisingSet} (API 26, our
  * minSdkVersion); the legacy {@code startAdvertising} entry point only offers
@@ -52,10 +52,20 @@ final class BeaconAdvertiser {
     private static final int ATTEMPT_REQUESTED = 0;
     private static final int ATTEMPT_CLAMPED = 1;
     private static final int ATTEMPT_LEGACY = 2;
+    private static final long START_TIMEOUT_MILLIS = 10_000L;
+
+    interface Listener {
+        void onStarted();
+        void onFailure(String reason);
+    }
 
     private final Context context;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
+    private final Listener listener;
+    private long generation;
+    private Runnable startTimeout;
+    private BluetoothLeAdvertiser activeAdvertiser;
     private AdvertisingSetCallback setCallback;
     private AdvertiseCallback legacyCallback;
     private AdvertisingSet activeSet;
@@ -66,8 +76,9 @@ final class BeaconAdvertiser {
     private int intervalUnitsInUse;
     private boolean legacyFallbackInUse;
 
-    BeaconAdvertiser(Context context) {
+    BeaconAdvertiser(Context context, Listener listener) {
         this.context = context.getApplicationContext();
+        this.listener = listener;
     }
 
     // ---- Capability probing -------------------------------------------------
@@ -202,49 +213,87 @@ final class BeaconAdvertiser {
         stop();
         requestedSeconds = Math.max(1, intervalSeconds);
         attempt = ATTEMPT_REQUESTED;
-        startPending = true;
         attemptStart();
     }
 
     void stop() {
-        BluetoothLeAdvertiser advertiser = advertiserOrNull();
-        if (advertiser != null) {
-            try {
-                if (setCallback != null) {
-                    advertiser.stopAdvertisingSet(setCallback);
-                }
-                if (legacyCallback != null) {
-                    advertiser.stopAdvertising(legacyCallback);
-                }
-            } catch (RuntimeException e) {
-                LogStore.append(context, "beacon", "Stop failed: "
-                        + e.getClass().getSimpleName() + ": " + e.getMessage());
-            }
-        }
+        clearAttempt();
+        requestedSeconds = 0;
+    }
+
+    /** Invalidate callbacks before asking the stack to stop the old advertisement. */
+    private void clearAttempt() {
+        generation++;
+        handler.removeCallbacksAndMessages(null);
+        startTimeout = null;
+        BluetoothLeAdvertiser oldAdvertiser = activeAdvertiser;
+        AdvertisingSetCallback oldSetCallback = setCallback;
+        AdvertiseCallback oldLegacyCallback = legacyCallback;
+        activeAdvertiser = null;
         setCallback = null;
         legacyCallback = null;
         activeSet = null;
         advertising = false;
         startPending = false;
-        requestedSeconds = 0;
         intervalUnitsInUse = 0;
         legacyFallbackInUse = false;
+        if (oldAdvertiser != null) {
+            stopSet(oldAdvertiser, oldSetCallback);
+            stopLegacy(oldAdvertiser, oldLegacyCallback);
+        }
+    }
+
+    private void stopSet(BluetoothLeAdvertiser advertiser, AdvertisingSetCallback callback) {
+        if (callback == null) {
+            return;
+        }
+        try {
+            advertiser.stopAdvertisingSet(callback);
+        } catch (RuntimeException e) {
+            LogStore.append(context, "beacon", "Stop advertising set failed: " + e.getMessage());
+        }
+    }
+
+    private void stopLegacy(BluetoothLeAdvertiser advertiser, AdvertiseCallback callback) {
+        if (callback == null) {
+            return;
+        }
+        try {
+            advertiser.stopAdvertising(callback);
+        } catch (RuntimeException e) {
+            LogStore.append(context, "beacon", "Stop legacy advertisement failed: " + e.getMessage());
+        }
     }
 
     private BluetoothLeAdvertiser advertiserOrNull() {
-        BluetoothAdapter adapter = adapter(context);
-        if (adapter == null || !adapter.isEnabled()) {
-            return null;
-        }
         try {
-            return adapter.getBluetoothLeAdvertiser();
+            BluetoothAdapter adapter = adapter(context);
+            return adapter == null || !adapter.isEnabled() ? null : adapter.getBluetoothLeAdvertiser();
         } catch (RuntimeException e) {
             return null;
         }
     }
 
+    private void scheduleStartTimeout(final long attemptGeneration) {
+        startTimeout = new Runnable() {
+            @Override
+            public void run() {
+                if (generation != attemptGeneration || startTimeout != this || !startPending) {
+                    return;
+                }
+                retryOrFail("Advertising start timed out after 10s");
+            }
+        };
+        handler.postDelayed(startTimeout, START_TIMEOUT_MILLIS);
+    }
+
     private void attemptStart() {
-        BluetoothLeAdvertiser advertiser = advertiserOrNull();
+        clearAttempt();
+        startPending = true;
+        final long attemptGeneration = generation;
+        final BluetoothLeAdvertiser advertiser = advertiserOrNull();
+        activeAdvertiser = advertiser;
+        BeaconStateStore.setState(context, BeaconStateStore.STATE_STARTING, "");
         if (advertiser == null) {
             fail("Bluetooth advertiser unavailable");
             return;
@@ -270,7 +319,7 @@ final class BeaconAdvertiser {
         }
 
         if (attempt == ATTEMPT_LEGACY) {
-            startLegacy(advertiser, config, data);
+            startLegacy(advertiser, config, data, attemptGeneration);
             return;
         }
 
@@ -293,8 +342,19 @@ final class BeaconAdvertiser {
             setCallback = new AdvertisingSetCallback() {
                 @Override
                 public void onAdvertisingSetStarted(AdvertisingSet set, int txPower, int status) {
+                    if (generation != attemptGeneration || setCallback != this) {
+                        // A timed-out start can still succeed after its replacement has begun.
+                        if (status == AdvertisingSetCallback.ADVERTISE_SUCCESS) {
+                            stopSet(advertiser, this);
+                        }
+                        return;
+                    }
                     if (status != AdvertisingSetCallback.ADVERTISE_SUCCESS) {
                         retryOrFail("advertising set status " + setStatusText(status));
+                        return;
+                    }
+                    if (set == null) {
+                        retryOrFail("Advertising start returned no set");
                         return;
                     }
                     activeSet = set;
@@ -306,10 +366,31 @@ final class BeaconAdvertiser {
 
                 @Override
                 public void onAdvertisingSetStopped(AdvertisingSet set) {
-                    activeSet = null;
-                    advertising = false;
+                    if (generation != attemptGeneration || setCallback != this) {
+                        return;
+                    }
+                    fail("Advertising set stopped unexpectedly");
+                }
+
+                @Override
+                public void onAdvertisingEnabled(AdvertisingSet set, boolean enable, int status) {
+                    if (generation != attemptGeneration || setCallback != this) {
+                        return;
+                    }
+                    LogStore.append(context, "beacon", "Advertising enabled=" + enable + " status=" + status);
+                    if (!enable || status != AdvertisingSetCallback.ADVERTISE_SUCCESS) {
+                        String reason = status == AdvertisingSetCallback.ADVERTISE_SUCCESS
+                                ? "Bluetooth disabled advertising"
+                                : "Advertising update failed: " + setStatusText(status);
+                        if (startPending) {
+                            retryOrFail(reason);
+                        } else {
+                            fail(reason);
+                        }
+                    }
                 }
             };
+            scheduleStartTimeout(attemptGeneration);
             advertiser.startAdvertisingSet(parameters, data, null, null, null, setCallback);
         } catch (SecurityException e) {
             fail("Bluetooth advertise permission denied");
@@ -318,7 +399,8 @@ final class BeaconAdvertiser {
         }
     }
 
-    private void startLegacy(BluetoothLeAdvertiser advertiser, Config config, AdvertiseData data) {
+    private void startLegacy(final BluetoothLeAdvertiser advertiser, Config config, AdvertiseData data,
+                             final long attemptGeneration) {
         try {
             AdvertiseSettings settings = new AdvertiseSettings.Builder()
                     .setAdvertiseMode(legacyModeFor(requestedSeconds))
@@ -329,6 +411,10 @@ final class BeaconAdvertiser {
             legacyCallback = new AdvertiseCallback() {
                 @Override
                 public void onStartSuccess(AdvertiseSettings settingsInEffect) {
+                    if (generation != attemptGeneration || legacyCallback != this) {
+                        stopLegacy(advertiser, this);
+                        return;
+                    }
                     advertising = true;
                     legacyFallbackInUse = true;
                     intervalUnitsInUse = legacyIntervalUnitsFor(requestedSeconds);
@@ -337,9 +423,13 @@ final class BeaconAdvertiser {
 
                 @Override
                 public void onStartFailure(int errorCode) {
+                    if (generation != attemptGeneration || legacyCallback != this) {
+                        return;
+                    }
                     fail("legacy advertising " + legacyErrorText(errorCode));
                 }
             };
+            scheduleStartTimeout(attemptGeneration);
             advertiser.startAdvertising(settings, data, legacyCallback);
         } catch (SecurityException e) {
             fail("Bluetooth advertise permission denied");
@@ -356,9 +446,15 @@ final class BeaconAdvertiser {
         final int nextAttempt = attempt + 1;
         LogStore.append(context, "beacon", "Advertise attempt " + attempt + " failed (" + reason
                 + "); retrying with " + (nextAttempt == ATTEMPT_CLAMPED ? "clamped interval" : "legacy API"));
+        clearAttempt();
+        startPending = true;
+        final long retryGeneration = generation;
         handler.post(new Runnable() {
             @Override
             public void run() {
+                if (generation != retryGeneration || requestedSeconds <= 0) {
+                    return;
+                }
                 attempt = nextAttempt;
                 attemptStart();
             }
@@ -367,22 +463,24 @@ final class BeaconAdvertiser {
 
     private void succeed(int reportedTxPower) {
         startPending = false;
+        if (startTimeout != null) {
+            handler.removeCallbacks(startTimeout);
+            startTimeout = null;
+        }
         int seconds = intervalSecondsInUse();
         BeaconStateStore.setAdvertising(context, seconds, legacyFallbackInUse,
                 reportedTxPower == Integer.MIN_VALUE ? Config.get(context).beaconTxPowerDbm() : reportedTxPower);
         LogStore.append(context, "beacon", "Advertising every " + seconds + "s"
                 + (legacyFallbackInUse ? " (legacy API)" : "")
                 + (seconds != requestedSeconds ? " (requested " + requestedSeconds + "s)" : ""));
+        listener.onStarted();
     }
 
     private void fail(String reason) {
-        advertising = false;
-        // Cleared so a later trigger (battery tick, Bluetooth toggle) is free
-        // to retry rather than believing a start is still in flight.
-        startPending = false;
-        intervalUnitsInUse = 0;
+        clearAttempt();
         BeaconStateStore.setError(context, reason);
         LogStore.append(context, "beacon", "Advertising failed: " + reason);
+        listener.onFailure(reason);
     }
 
     // ---- Legacy-API mapping -------------------------------------------------
