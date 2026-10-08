@@ -1,24 +1,43 @@
 #!/usr/bin/env python3
-"""Launcher icon candidates for System Manager, from a single source.
+"""The System Manager launcher icon ("Hub"), from a single source.
 
-Every candidate is an Android adaptive icon: a 108x108 background layer, a
-108x108 foreground layer and a one-colour monochrome layer (Android 13+ themed
-icons). The live content stays inside the central 66x66 "safe zone" so any
-launcher mask (circle, squircle, rounded square) leaves it intact.
+An Android adaptive icon: a 108x108 background layer, a 108x108 foreground layer
+and a one-colour monochrome layer (Android 13+ themed icons), plus the white
+status-bar glyph derived from that monochrome layer.
 
-    python3 design/icons/launcher_icons.py --preview /tmp/icons.html
-    python3 design/icons/launcher_icons.py --apply 3      # write res/ for candidate 3
+Launchers mask the 108-unit canvas down to a 72-unit window (circle, squircle,
+rounded square) and only promise that a 66-unit circle in the middle survives
+every mask. The artwork is kept well inside that circle: --check measures how
+close it really comes (by rendering it, not by trusting the numbers below) and
+fails if it gets within MIN_SAFE_MARGIN units, so the icon cannot drift into
+hugging the edge. The status-bar glyph is checked for at least 2.4dp of padding
+in its 24dp box (the platform convention is 2dp).
 
-Each shape is described once and emitted both as SVG (for the preview sheet)
-and as an Android vector drawable (for the app), so what you preview is what
-ships. Requires only Python 3.
+    python3 design/icons/launcher_icons.py --check
+    python3 design/icons/launcher_icons.py --apply             # write app/src/main/res
+    python3 design/icons/launcher_icons.py --preview sheet.html
+
+Every shape is described once and emitted both as SVG (the preview) and as an
+Android vector drawable (the app), so what you preview is what ships. Only
+Python 3 is needed to --apply; --check also needs Pillow and Inkscape.
 """
 import math
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RES = os.path.join(ROOT, "app", "src", "main", "res")
+
+CANVAS = 108.0
+CENTRE = CANVAS / 2
+SAFE_RADIUS = 33.0         # the circle every launcher mask preserves
+MASK_RADIUS = 36.0         # the visible window of a circular mask
+MIN_SAFE_MARGIN = 6.0      # artwork must stay at least this far inside the safe circle
+LIVE_AREA = 19.0 / 24.0    # the glyph fills 19dp of its 24dp box: 2.5dp of padding all round
+MIN_STATUS_PADDING_DP = 2.4
 
 
 def f(n):
@@ -26,35 +45,32 @@ def f(n):
     return "0" if s in ("-0", "") else s
 
 
-# ---- shape primitives: each is a dict -> SVG + VectorDrawable ---------------------------
-def path(d, fill=None, stroke=None, sw=0, cap="round", join="round", opacity=1.0):
-    return dict(kind="path", d=d, fill=fill, stroke=stroke, sw=sw, cap=cap, join=join, opacity=opacity)
+# ---- shape primitives: each is a dict -> SVG + VectorDrawable -----------------------------
+def path(d, fill=None, stroke=None, sw=0, cap="round", join="round", opacity=1.0, even_odd=False):
+    return dict(d=d, fill=fill, stroke=stroke, sw=sw, cap=cap, join=join, opacity=opacity, even_odd=even_odd)
+
+
+def circle_d(cx, cy, r):
+    return "M%s,%s a%s,%s 0 1,0 %s,0 a%s,%s 0 1,0 %s,0" % (
+        f(cx - r), f(cy), f(r), f(r), f(2 * r), f(r), f(r), f(-2 * r))
 
 
 def circle(cx, cy, r, **kw):
-    d = "M%s,%s a%s,%s 0 1,0 %s,0 a%s,%s 0 1,0 %s,0" % (f(cx - r), f(cy), f(r), f(r), f(2 * r), f(r), f(r), f(-2 * r))
-    return path(d, **kw)
+    return path(circle_d(cx, cy, r), **kw)
 
 
-def rrect(x, y, w, h, r, **kw):
-    d = ("M%s,%s h%s a%s,%s 0 0,1 %s,%s v%s a%s,%s 0 0,1 %s,%s h%s a%s,%s 0 0,1 %s,%s v%s a%s,%s 0 0,1 %s,%s z" % (
-        f(x + r), f(y), f(w - 2 * r), f(r), f(r), f(r), f(r), f(h - 2 * r), f(r), f(r), f(-r), f(r),
-        f(-(w - 2 * r)), f(r), f(r), f(-r), f(-r), f(-(h - 2 * r)), f(r), f(r), f(r), f(-r)))
-    return path(d, **kw)
+def ring_disc(cx, cy, r, hole, **kw):
+    """A disc with a hole punched through it (even-odd fill)."""
+    return path(circle_d(cx, cy, r) + " " + circle_d(cx, cy, hole), even_odd=True, **kw)
 
 
-def arc(cx, cy, r, a0, a1, **kw):
-    """Open arc from angle a0 to a1 degrees (0 = east, clockwise on screen)."""
-    x0, y0 = cx + r * math.cos(math.radians(a0)), cy + r * math.sin(math.radians(a0))
-    x1, y1 = cx + r * math.cos(math.radians(a1)), cy + r * math.sin(math.radians(a1))
-    large = 1 if (a1 - a0) % 360 > 180 else 0
-    d = "M%s,%s A%s,%s 0 %d,1 %s,%s" % (f(x0), f(y0), f(r), f(r), large, f(x1), f(y1))
-    return path(d, fill=None, **kw)
+def line(x0, y0, x1, y1, **kw):
+    return path("M%s,%s L%s,%s" % (f(x0), f(y0), f(x1), f(y1)), **kw)
 
 
 class Grad:
     def __init__(self, x0, y0, x1, y1, stops):
-        self.x0, self.y0, self.x1, self.y1, self.stops = x0, y0, x1, y1, stops  # stops: [(offset, "#AARRGGBB"|"#RRGGBB")]
+        self.x0, self.y0, self.x1, self.y1, self.stops = x0, y0, x1, y1, stops
 
 
 class Radial:
@@ -62,173 +78,87 @@ class Radial:
         self.cx, self.cy, self.r, self.stops = cx, cy, r, stops
 
 
-# ---- the six candidates ---------------------------------------------------------------------------------
-def bg_full(grad_stops, angle=(0, 0, 108, 108), glow=None):
-    shapes = [path("M0,0h108v108h-108z", fill=Grad(*angle, grad_stops))]
-    if glow:
-        shapes.append(path("M0,0h108v108h-108z", fill=glow))
-    return shapes
+# ---- the icon ----------------------------------------------------------------------------------
+RING_R = 19.5          # the orbit the devices sit on
+NODE_R = 6.2           # a device
+CORE_R = 10.0          # the manager at the centre
+RING_SW = 3.0
+SPOKE_SW = 3.4
+MONO_RING_SW = 2.4     # the single-colour layers lighten the orbit so the devices lead
+MONO_SPOKE_SW = 3.0
+NODE_ANGLES = (-90, 30, 150)
 
 
-def candidate_1():
-    """Pulse Shield: a shield that carries a heartbeat line."""
-    bg = bg_full([(0, "#14BE90"), (1, "#0A5A72")], glow=Radial(30, 18, 84, [(0, "#66FFFFFF"), (1, "#00FFFFFF")]))
-    shield = "M54,23 L78,31.5 V54 C78,69 67,78 54,85 C41,78 30,69 30,54 V31.5 Z"
-    beat = "M37,54 H47.5 L52,43 L58.5,66 L63,54 H71"
-    fg = [
-        path(shield, fill=Grad(30, 23, 78, 85, [(0, "#66FFFFFF"), (1, "#1AFFFFFF")])),
-        path(shield, stroke="#FFFFFF", sw=4.8),
-        path(beat, stroke="#FFFFFF", sw=4.8),
-    ]
-    mono = [path(shield, stroke="#000000", sw=4.8), path(beat, stroke="#000000", sw=4.8)]
-    return dict(name="Pulse Shield", bg=bg, fg=fg, mono=mono,
-                note="Protection plus live monitoring: a shield carrying a heartbeat.")
+def hub():
+    """One manager at the centre, three devices around it: the network you look after.
+
+    The hub is centred on the canvas, so the three devices are equally far from the
+    middle and no mask can favour one of them. The farthest point of the artwork is
+    RING_R + NODE_R from the centre.
+    """
+    bg = [path("M0,0h108v108h-108z", fill=Grad(0, 0, 108, 108, [(0, "#13242E"), (1, "#070C11")])),
+          path("M0,0h108v108h-108z", fill=Radial(28, 26, 86, [(0, "#3A3FD6A0"), (1, "#003FD6A0")]))]
+    directions = [(math.cos(math.radians(a)), math.sin(math.radians(a))) for a in NODE_ANGLES]
+    nodes = [(CENTRE + RING_R * dx, CENTRE + RING_R * dy) for dx, dy in directions]
+
+    def spoke(sw, colour, opacity=1.0):
+        # Rim to rim, so a spoke never crosses the hole of the hub or fills a device.
+        return [line(CENTRE + (CORE_R - 1.0) * dx, CENTRE + (CORE_R - 1.0) * dy,
+                     CENTRE + (RING_R - NODE_R + 1.0) * dx, CENTRE + (RING_R - NODE_R + 1.0) * dy,
+                     stroke=colour, sw=sw, opacity=opacity) for dx, dy in directions]
+
+    fg = [circle(CENTRE, CENTRE, RING_R, stroke="#FFFFFF", sw=RING_SW, opacity=0.24)]
+    fg += spoke(SPOKE_SW, "#FFFFFF", 0.5)
+    fg.append(circle(CENTRE, CENTRE, CORE_R, fill=Grad(CENTRE - CORE_R, CENTRE - CORE_R, CENTRE + CORE_R,
+                                                       CENTRE + CORE_R, [(0, "#8CF7D4"), (1, "#2FCB9A")])))
+    fg.append(circle(CENTRE, CENTRE, 3.6, fill="#0A3A31"))
+    for x, y in nodes:
+        fg.append(circle(x, y, NODE_R, fill="#FFFFFF"))
+        fg.append(circle(x, y, 2.5, fill="#13242E"))
+
+    # Single colour (themed icons and the status bar): an orbit, three solid devices, a donut core.
+    mono = [circle(CENTRE, CENTRE, RING_R, stroke="#000000", sw=MONO_RING_SW)]
+    mono += spoke(MONO_SPOKE_SW, "#000000")
+    mono.append(ring_disc(CENTRE, CENTRE, CORE_R, 4.0, fill="#000000"))
+    for x, y in nodes:
+        mono.append(circle(x, y, NODE_R, fill="#000000"))
+
+    # Bounding box of the monochrome artwork, for sizing the status-bar glyph.
+    half = max(RING_R * math.cos(math.radians(30)) + NODE_R, RING_R + MONO_RING_SW / 2)
+    top = CENTRE - (RING_R + NODE_R)
+    bottom = CENTRE + max(RING_R + MONO_RING_SW / 2, RING_R * math.sin(math.radians(30)) + NODE_R)
+    return dict(name="Hub", bg=bg, fg=fg, mono=mono, bbox=(CENTRE - half, top, CENTRE + half, bottom))
 
 
-def candidate_2():
-    """Control Ring: the segmented status dial from the dashboard."""
-    bg = bg_full([(0, "#0D3640"), (1, "#06191E")], glow=Radial(54, 54, 62, [(0, "#4014E0A4"), (1, "#0014E0A4")]))
-    segs = 10
-    lit = [0, 1, 2, 3, 4, 5, 6]
-    fg = []
-    mono = []
-    for i in range(segs):
-        a0 = -90 + i * (360 / segs) + 5.5
-        a1 = -90 + (i + 1) * (360 / segs) - 5.5
-        if i in lit:
-            t = lit.index(i) / float(len(lit) - 1)
-            r = int(0x3F + (0x35 - 0x3F) * t)
-            g = int(0xE8 + (0xC4 - 0xE8) * t)
-            b = int(0xA8 + (0xF0 - 0xA8) * t)
-            col = "#%02X%02X%02X" % (r, g, b)
-            mono.append(arc(54, 54, 25.5, a0, a1, stroke="#000000", sw=7.6))
-        else:
-            col = "#2B6B66"
-        fg.append(arc(54, 54, 25.5, a0, a1, stroke=col, sw=7.6))
-    fg.append(circle(54, 54, 8.2, fill="#FFFFFF"))
-    fg.append(circle(54, 54, 3.6, fill="#0D3640"))
-    mono.append(circle(54, 54, 8.2, fill="#000000"))
-    return dict(name="Control Ring", bg=bg, fg=fg, mono=mono,
-                note="The segmented status dial from the app's overview, lit segment by segment.")
+# ---- SVG emission ----------------------------------------------------------------------------------
+def svg_color(c):
+    c = c.lstrip("#")
+    if len(c) == 8:
+        return "#" + c[2:], "%.3f" % (int(c[0:2], 16) / 255.0)
+    return "#" + c, "1"
 
 
-def candidate_3():
-    """Beacon Phone: a phone with a signal radiating from its corner."""
-    bg = bg_full([(0, "#7A66FF"), (1, "#2C2FA6")], glow=Radial(82, 22, 84, [(0, "#66FFFFFF"), (1, "#00FFFFFF")]))
-    x, y, w, h, r = 38, 36, 28, 50, 7.5
-    body = ("M%s,%s h%s a%s,%s 0 0,1 %s,%s v%s a%s,%s 0 0,1 %s,%s h%s a%s,%s 0 0,1 %s,%s v%s a%s,%s 0 0,1 %s,%s z" % (
-        f(x + r), f(y), f(w - 2 * r), f(r), f(r), f(r), f(r), f(h - 2 * r), f(r), f(r), f(-r), f(r),
-        f(-(w - 2 * r)), f(r), f(r), f(-r), f(-r), f(-(h - 2 * r)), f(r), f(r), f(r), f(-r)))
-    fg = [
-        path(body, fill=Grad(x, y, x + w, y + h, [(0, "#55FFFFFF"), (1, "#14FFFFFF")])),
-        path(body, stroke="#FFFFFF", sw=4.6),
-        circle(52, 59, 4.6, fill="#9CFFE0"),
-        path("M46,78 H58", stroke="#FFFFFF", sw=3.4, opacity=0.9),
-        arc(66, 44, 10, -86, -4, stroke="#FFFFFF", sw=4.4),
-        arc(66, 44, 18, -86, -4, stroke="#FFFFFF", sw=4.4, opacity=0.72),
-        arc(66, 44, 26, -86, -4, stroke="#FFFFFF", sw=4.4, opacity=0.42),
-    ]
-    mono = [path(body, stroke="#000000", sw=4.6), circle(52, 59, 4.6, fill="#000000"),
-            arc(66, 44, 10, -86, -4, stroke="#000000", sw=4.4), arc(66, 44, 18, -86, -4, stroke="#000000", sw=4.4),
-            arc(66, 44, 26, -86, -4, stroke="#000000", sw=4.4)]
-    return dict(name="Beacon Phone", bg=bg, fg=fg, mono=mono,
-                note="A phone with a signal radiating from its corner: the device you manage, reporting in.")
-
-
-def candidate_4():
-    """Radar Pin: a radar scope with a location pin at the centre."""
-    bg = bg_full([(0, "#FFA23F"), (1, "#E23D33")], glow=Radial(26, 24, 74, [(0, "#66FFFFFF"), (1, "#00FFFFFF")]))
-    pin = "M54,31 C44.6,31 37.5,38.3 37.5,47.4 C37.5,59.8 54,76 54,76 C54,76 70.5,59.8 70.5,47.4 C70.5,38.3 63.4,31 54,31 Z"
-    fg = [
-        circle(54, 54, 33, stroke="#FFFFFF", sw=2.8, opacity=0.32),
-        circle(54, 54, 22, stroke="#FFFFFF", sw=2.8, opacity=0.5),
-        path("M54,54 L82,38 A33,33 0 0,0 72,26 Z", fill="#FFFFFF", opacity=0.24),
-        path("M54,81 m-11,0 a11,3.6 0 1,0 22,0 a11,3.6 0 1,0 -22,0", fill="#000000", opacity=0.16),
-        path(pin, fill="#FFFFFF"),
-        circle(54, 47.4, 6.6, fill="#E23D33"),
-    ]
-    mono = [circle(54, 54, 33, stroke="#000000", sw=2.8), circle(54, 54, 22, stroke="#000000", sw=2.8), path(pin, fill="#000000")]
-    return dict(name="Radar Pin", bg=bg, fg=fg, mono=mono,
-                note="Find-my-phone energy: a radar sweep around a location pin.")
-
-
-def candidate_5():
-    """Hub: a central node with three satellites, a manager of many devices."""
-    bg = bg_full([(0, "#13242E"), (1, "#070C11")], glow=Radial(28, 26, 86, [(0, "#3A3FD6A0"), (1, "#003FD6A0")]))
-    cx, cy, ring = 54, 55, 25
-    nodes = [(cx + ring * math.cos(math.radians(a)), cy + ring * math.sin(math.radians(a))) for a in (-90, 30, 150)]
-    fg = [circle(cx, cy, ring, stroke="#FFFFFF", sw=3.0, opacity=0.24)]
-    mono = [circle(cx, cy, ring, stroke="#000000", sw=3.0)]
-    for (x, y) in nodes:
-        fg.append(path("M%s,%s L%s,%s" % (f(cx), f(cy), f(x), f(y)), stroke="#FFFFFF", sw=3.4, opacity=0.5))
-        mono.append(path("M%s,%s L%s,%s" % (f(cx), f(cy), f(x), f(y)), stroke="#000000", sw=3.4))
-    fg.append(circle(cx, cy, 11.5, fill=Grad(cx - 11, cy - 11, cx + 11, cy + 11, [(0, "#8CF7D4"), (1, "#2FCB9A")])))
-    fg.append(circle(cx, cy, 4.2, fill="#0A3A31"))
-    mono.append(circle(cx, cy, 11.5, fill="#000000"))
-    for (x, y) in nodes:
-        fg.append(circle(x, y, 7.2, fill="#FFFFFF"))
-        fg.append(circle(x, y, 2.9, fill="#13242E"))
-        mono.append(circle(x, y, 7.2, fill="#000000"))
-    return dict(name="Hub", bg=bg, fg=fg, mono=mono,
-                note="One manager at the centre, three devices around it: the network you look after.")
-
-
-def candidate_6():
-    """Command Tile: the tile grid with one lit tile and a prompt."""
-    bg = bg_full([(0, "#22386A"), (1, "#0C1633")], glow=Radial(80, 24, 84, [(0, "#445B8CFF"), (1, "#005B8CFF")]))
-    t = 21
-    gap = 6
-    x0 = 54 - t - gap / 2
-    y0 = 54 - t - gap / 2
-    tiles = [(x0, y0), (x0 + t + gap, y0), (x0, y0 + t + gap), (x0 + t + gap, y0 + t + gap)]
-    fg = []
-    mono = []
-    for i, (x, y) in enumerate(tiles):
-        lit = i == 0
-        if lit:
-            fg.append(rrect(x, y, t, t, 6.5, fill=Grad(x, y, x + t, y + t, [(0, "#7CF5CD"), (1, "#2FCB9A")])))
-        else:
-            fg.append(rrect(x, y, t, t, 6.5, fill="#FFFFFF", opacity=0.22))
-        mono.append(rrect(x, y, t, t, 6.5, fill="#000000"))
-    px, py = x0 + t + gap + 5.2, y0 + t + gap + 5.6
-    fg.append(path("M%s,%s l6.2,4.6 l-6.2,4.6" % (f(px), f(py)), stroke="#FFFFFF", sw=3.6))
-    fg.append(path("M%s,%s h5.6" % (f(px + 8.2), f(py + 10.6)), stroke="#FFFFFF", sw=3.6))
-    return dict(name="Command Tile", bg=bg, fg=fg, mono=mono,
-                note="The overview's tile grid with one tile live, plus a command prompt.")
-
-
-CANDIDATES = [candidate_1, candidate_2, candidate_3, candidate_4, candidate_5, candidate_6]
-
-
-# ---- SVG emission --------------------------------------------------------------------------------------------------
 def svg_defs(shapes, prefix):
-    defs = []
-    n = 0
+    defs, n = [], 0
     for s in shapes:
         fill = s.get("fill")
         if isinstance(fill, Grad):
             n += 1
             gid = "%s%d" % (prefix, n)
-            stops = "".join('<stop offset="%s" stop-color="%s" stop-opacity="%s"/>' % ((o,) + svg_color(c)) for o, c in fill.stops)
-            defs.append('<linearGradient id="%s" gradientUnits="userSpaceOnUse" x1="%s" y1="%s" x2="%s" y2="%s">%s</linearGradient>'
-                        % (gid, f(fill.x0), f(fill.y0), f(fill.x1), f(fill.y1), stops))
+            stops = "".join('<stop offset="%s" stop-color="%s" stop-opacity="%s"/>' % ((o,) + svg_color(c))
+                            for o, c in fill.stops)
+            defs.append('<linearGradient id="%s" gradientUnits="userSpaceOnUse" x1="%s" y1="%s" x2="%s" y2="%s">%s'
+                        '</linearGradient>' % (gid, f(fill.x0), f(fill.y0), f(fill.x1), f(fill.y1), stops))
             s["_gid"] = gid
         elif isinstance(fill, Radial):
             n += 1
             gid = "%s%d" % (prefix, n)
-            stops = "".join('<stop offset="%s" stop-color="%s" stop-opacity="%s"/>' % ((o,) + svg_color(c)) for o, c in fill.stops)
-            defs.append('<radialGradient id="%s" gradientUnits="userSpaceOnUse" cx="%s" cy="%s" r="%s">%s</radialGradient>'
-                        % (gid, f(fill.cx), f(fill.cy), f(fill.r), stops))
+            stops = "".join('<stop offset="%s" stop-color="%s" stop-opacity="%s"/>' % ((o,) + svg_color(c))
+                            for o, c in fill.stops)
+            defs.append('<radialGradient id="%s" gradientUnits="userSpaceOnUse" cx="%s" cy="%s" r="%s">%s'
+                        '</radialGradient>' % (gid, f(fill.cx), f(fill.cy), f(fill.r), stops))
             s["_gid"] = gid
     return "".join(defs)
-
-
-def svg_color(c):
-    c = c.lstrip("#")
-    if len(c) == 8:
-        a = int(c[0:2], 16) / 255.0
-        return "#" + c[2:], "%.3f" % a
-    return "#" + c, "1"
 
 
 def svg_shapes(shapes):
@@ -242,33 +172,41 @@ def svg_shapes(shapes):
             fa = 'fill="%s" fill-opacity="%s"' % (col, op)
         else:
             fa = 'fill="none"'
+        if s.get("even_odd"):
+            fa += ' fill-rule="evenodd"'
+        sa = ""
         if s.get("stroke"):
             col, op = svg_color(s["stroke"])
             sa = ' stroke="%s" stroke-opacity="%s" stroke-width="%s" stroke-linecap="%s" stroke-linejoin="%s"' % (
                 col, op, f(s["sw"]), s["cap"], s["join"])
-        else:
-            sa = ""
         oa = ' opacity="%s"' % f(s["opacity"]) if s.get("opacity", 1.0) != 1.0 else ""
         out.append('<path d="%s" %s%s%s/>' % (s["d"], fa, sa, oa))
     return "".join(out)
 
 
-def svg_icon(c, prefix, size=108, mask="circle"):
+MASKS = {
+    "circle": '<circle cx="54" cy="54" r="36"/>',
+    "squircle": '<path d="M54,18 C82,18 90,26 90,54 C90,82 82,90 54,90 C26,90 18,82 18,54 C18,26 26,18 54,18 Z"/>',
+    "round": '<rect x="18" y="18" width="72" height="72" rx="20"/>',
+}
+
+
+def svg_icon(c, prefix, size, mask, guides=False):
+    """The icon as a launcher shows it: the 72-unit window of the canvas through a mask."""
     shapes = c["bg"] + c["fg"]
-    defs = svg_defs(c["bg"] + c["fg"], prefix + "g")
-    body = svg_shapes(c["bg"]) + svg_shapes(c["fg"])
-    masks = {
-        "circle": '<circle cx="54" cy="54" r="54"/>',
-        "squircle": '<path d="M54,0 C94,0 108,14 108,54 C108,94 94,108 54,108 C14,108 0,94 0,54 C0,14 14,0 54,0 Z"/>',
-        "round": '<rect width="108" height="108" rx="28"/>',
-        "none": '<rect width="108" height="108"/>',
-    }
-    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="%d" height="%d">'
-            '<defs>%s<clipPath id="%sm">%s</clipPath></defs><g clip-path="url(#%sm)">%s</g></svg>'
-            % (size, size, defs, prefix, masks[mask], prefix, body))
+    defs = svg_defs(shapes, prefix + "g")
+    guide = ""
+    if guides:
+        guide = ('<circle cx="54" cy="54" r="%s" fill="none" stroke="#FFFFFF" stroke-opacity="0.55" '
+                 'stroke-width="0.35" stroke-dasharray="1.6 1.2"/>'
+                 '<circle cx="54" cy="54" r="%s" fill="none" stroke="#FFD166" stroke-opacity="0.9" stroke-width="0.35" '
+                 'stroke-dasharray="0.8 1.2"/>' % (f(SAFE_RADIUS), f(SAFE_RADIUS - MIN_SAFE_MARGIN)))
+    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 18 72 72" width="%d" height="%d">'
+            '<defs>%s<clipPath id="%sm">%s</clipPath></defs><g clip-path="url(#%sm)">%s</g>%s</svg>'
+            % (size, size, defs, prefix, MASKS[mask], prefix, svg_shapes(c["bg"]) + svg_shapes(c["fg"]), guide))
 
 
-# ---- Android emission ----------------------------------------------------------------------------------------------
+# ---- Android emission -------------------------------------------------------------------------------
 def a_color(c):
     c = c.lstrip("#")
     return "#" + (c.upper() if len(c) == 8 else "FF" + c.upper())
@@ -276,12 +214,14 @@ def a_color(c):
 
 def a_fill(fill, indent):
     if isinstance(fill, Grad):
-        stops = "".join('\n%s    <item android:color="%s" android:offset="%s" />' % (indent, a_color(c), o) for o, c in fill.stops)
+        stops = "".join('\n%s    <item android:color="%s" android:offset="%s" />' % (indent, a_color(c), o)
+                        for o, c in fill.stops)
         return ('\n%s<aapt:attr name="android:fillColor">\n%s    <gradient android:startX="%s" android:startY="%s" '
                 'android:endX="%s" android:endY="%s" android:type="linear">%s\n%s    </gradient>\n%s</aapt:attr>'
                 % (indent, indent, f(fill.x0), f(fill.y0), f(fill.x1), f(fill.y1), stops, indent, indent)), True
     if isinstance(fill, Radial):
-        stops = "".join('\n%s    <item android:color="%s" android:offset="%s" />' % (indent, a_color(c), o) for o, c in fill.stops)
+        stops = "".join('\n%s    <item android:color="%s" android:offset="%s" />' % (indent, a_color(c), o)
+                        for o, c in fill.stops)
         return ('\n%s<aapt:attr name="android:fillColor">\n%s    <gradient android:centerX="%s" android:centerY="%s" '
                 'android:gradientRadius="%s" android:type="radial">%s\n%s    </gradient>\n%s</aapt:attr>'
                 % (indent, indent, f(fill.cx), f(fill.cy), f(fill.r), stops, indent, indent)), True
@@ -301,6 +241,8 @@ def a_shapes(shapes):
             attrs.append('android:fillColor="%s"' % a_color(fill))
             if s.get("opacity", 1.0) != 1.0:
                 attrs.append('android:fillAlpha="%s"' % f(s["opacity"]))
+        if s.get("even_odd"):
+            attrs.append('android:fillType="evenOdd"')
         if s.get("stroke"):
             attrs.append('android:strokeColor="%s"' % a_color(s["stroke"]))
             attrs.append('android:strokeWidth="%s"' % f(s["sw"]))
@@ -321,25 +263,37 @@ def vector_xml(shapes):
             '    android:viewportWidth="108"\n    android:viewportHeight="108">\n%s\n</vector>\n' % a_shapes(shapes))
 
 
-def stat_icon_xml(shapes):
-    """The status-bar glyph: the monochrome layer cropped to the safe zone, in white."""
-    white = []
+def status_geometry(c):
+    """Viewport size and translation that centre the glyph in 24dp with 2dp of padding all round."""
+    x0, y0, x1, y1 = c["bbox"]
+    size = max(x1 - x0, y1 - y0) / LIVE_AREA
+    return size, size / 2 - (x0 + x1) / 2, size / 2 - (y0 + y1) / 2
+
+
+def white(shapes):
+    out = []
     for shape in shapes:
         d = dict(shape)
         if d.get("stroke"):
             d["stroke"] = "#FFFFFF"
         if d.get("fill"):
             d["fill"] = "#FFFFFF"
-        white.append(d)
+        out.append(d)
+    return out
+
+
+def stat_icon_xml(c):
+    size, tx, ty = status_geometry(c)
+    body = "\n".join("    " + line for line in a_shapes(white(c["mono"])).split("\n"))
     return ('<vector xmlns:android="http://schemas.android.com/apk/res/android"\n'
             '    android:width="24dp"\n    android:height="24dp"\n'
-            '    android:viewportWidth="66"\n    android:viewportHeight="66">\n'
-            '    <group\n        android:translateX="-21"\n        android:translateY="-21">\n%s\n    </group>\n</vector>\n'
-            % "\n".join("    " + line for line in a_shapes(white).split("\n")))
+            '    android:viewportWidth="%s"\n    android:viewportHeight="%s">\n'
+            '    <group\n        android:translateX="%s"\n        android:translateY="%s">\n%s\n    </group>\n</vector>\n'
+            % (f(size), f(size), f(tx), f(ty), body))
 
 
-def apply(index):
-    c = CANDIDATES[index - 1]()
+def apply():
+    c = hub()
     os.makedirs(os.path.join(RES, "drawable"), exist_ok=True)
     os.makedirs(os.path.join(RES, "mipmap-anydpi-v26"), exist_ok=True)
     for name, shapes in (("ic_launcher_background", c["bg"]), ("ic_launcher_foreground", c["fg"]),
@@ -347,47 +301,135 @@ def apply(index):
         with open(os.path.join(RES, "drawable", name + ".xml"), "w") as fh:
             fh.write(vector_xml(shapes))
     with open(os.path.join(RES, "drawable", "ic_stat_system_manager.xml"), "w") as fh:
-        fh.write(stat_icon_xml(c["mono"]))
+        fh.write(stat_icon_xml(c))
     with open(os.path.join(RES, "mipmap-anydpi-v26", "ic_launcher.xml"), "w") as fh:
         fh.write('<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
                  '    <background android:drawable="@drawable/ic_launcher_background" />\n'
                  '    <foreground android:drawable="@drawable/ic_launcher_foreground" />\n'
                  '    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />\n'
                  '</adaptive-icon>\n')
-    print("applied candidate %d: %s" % (index, c["name"]))
+    print("wrote the %s icon to %s" % (c["name"], RES))
 
 
+# ---- measuring --------------------------------------------------------------------------------------------
+def render_alpha(svg_body, view_box, pixels):
+    """Rasterises shapes on a transparent background and returns the alpha channel, or None."""
+    if not shutil.which("inkscape"):
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    folder = tempfile.mkdtemp()
+    src, out = os.path.join(folder, "a.svg"), os.path.join(folder, "a.png")
+    with open(src, "w") as fh:
+        fh.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="%s" width="%d" height="%d">%s</svg>'
+                 % (view_box, pixels, pixels, svg_body))
+    subprocess.run(["inkscape", src, "-e", out, "-w", str(pixels), "-h", str(pixels)], capture_output=True)
+    try:
+        return Image.open(out).convert("RGBA").split()[3]
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def measure(c):
+    """Returns (artwork radius in units, status padding in dp), or None without Inkscape and Pillow."""
+    shapes = c["fg"]
+    alpha = render_alpha("<defs>%s</defs>%s" % (svg_defs(shapes, "m"), svg_shapes(shapes)), "0 0 108 108", 1080)
+    if alpha is None:
+        return None
+    px, far = alpha.load(), 0.0
+    for y in range(0, 1080, 2):
+        for x in range(0, 1080, 2):
+            if px[x, y] > 12:
+                far = max(far, math.hypot(x - 540, y - 540))
+    size, tx, ty = status_geometry(c)
+    glyph = white(c["mono"])
+    body = '<g transform="translate(%s %s)">%s</g>' % (f(tx), f(ty), svg_shapes(glyph))
+    alpha = render_alpha(body, "0 0 %s %s" % (f(size), f(size)), 960)
+    px, lo, hi = alpha.load(), 960, 0
+    for y in range(0, 960, 2):
+        for x in range(0, 960, 2):
+            if px[x, y] > 12:
+                lo, hi = min(lo, x, y), max(hi, x, y)
+    padding = min(lo, 960 - hi) / 960.0 * 24.0
+    return far / 10.0, padding
+
+
+def check():
+    result = measure(hub())
+    if result is None:
+        print("skipped: --check needs Pillow and Inkscape")
+        return 0
+    radius, padding = result
+    safe_margin = SAFE_RADIUS - radius
+    print("launcher foreground: farthest artwork %.1f units from the centre" % radius)
+    print("  margin to the %.0f-unit safe circle: %.1f (minimum %.1f)" % (SAFE_RADIUS, safe_margin, MIN_SAFE_MARGIN))
+    print("  margin to the edge of a circular mask: %.1f" % (MASK_RADIUS - radius))
+    print("status-bar glyph: %.1f dp of padding on its tightest side (minimum %.1f)" % (padding, MIN_STATUS_PADDING_DP))
+    ok = safe_margin >= MIN_SAFE_MARGIN and padding >= MIN_STATUS_PADDING_DP
+    print("OK" if ok else "FAIL: the artwork is hugging its margins")
+    return 0 if ok else 1
+
+
+# ---- preview ---------------------------------------------------------------------------------------------------
 def preview(path_out):
-    cells = []
-    for i, fn in enumerate(CANDIDATES, 1):
-        c = fn()
-        big = svg_icon(c, "p%d" % i, 200, "squircle")
-        sizes = "".join(svg_icon(c, "s%d_%d" % (i, k), k, "circle") for k in (96, 64, 48, 36))
-        shapes = "".join('<span class="m">%s</span>' % svg_icon(c, "m%d_%s" % (i, m), 56, m) for m in ("circle", "squircle", "round"))
-        mono_defs = ""
-        mono = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="56" height="56"><rect width="108" height="108" rx="54" fill="#d7e3df"/>'
-                '<g style="filter:invert(0)" fill="none">%s</g></svg>' % svg_shapes([dict(s, stroke="#233" if s.get("stroke") else None, fill="#233" if s.get("fill") else None) for s in c["mono"]]))
-        cells.append('<div class="card"><div class="n">%d</div><div class="big">%s</div><h3>%s</h3><p>%s</p>'
-                     '<div class="row">%s</div><div class="row">%s<span class="m">%s</span></div></div>'
-                     % (i, big, c["name"], c["note"], sizes, shapes, mono))
-    html = """<!doctype html><meta charset=utf-8><title>System Manager icons</title><style>
-body{margin:0;background:#101614;color:#e8f1ee;font:14px/1.4 Roboto,Helvetica,Arial,sans-serif;padding:28px}
-h1{font-size:22px;margin:0 0 4px}.sub{color:#8fa59e;margin:0 0 22px}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;max-width:1280px}
-.card{background:#172120;border:1px solid #243430;border-radius:22px;padding:22px 18px;position:relative;text-align:center}
-.n{position:absolute;left:16px;top:14px;width:30px;height:30px;border-radius:15px;background:#3fd6a0;color:#00281b;font-weight:700;line-height:30px}
-.big{display:flex;justify-content:center;margin:6px 0 10px;filter:drop-shadow(0 10px 18px rgba(0,0,0,.45))}
-h3{margin:2px 0 4px;font-size:18px}p{margin:0 auto 14px;color:#9ab0a9;max-width:300px;font-size:13px}
-.row{display:flex;gap:12px;justify-content:center;align-items:center;margin-top:10px}.m{display:inline-flex}
-</style><h1>System Manager - launcher icon candidates</h1><p class=sub>Each shown as a squircle, then at launcher sizes, under three masks, and as the single-colour themed icon.</p>
-<div class=grid>%s</div>""" % "".join(cells)
+    c = hub()
+    big = svg_icon(c, "big", 280, "squircle", guides=True)
+    circle_big = svg_icon(c, "cb", 280, "circle", guides=True)
+    masks = "".join('<span>%s</span>' % svg_icon(c, "m" + m, 88, m) for m in MASKS)
+    sizes = "".join('<span>%s</span>' % svg_icon(c, "s%d" % k, k, "circle") for k in (72, 56, 44, 34))
+    size, tx, ty = status_geometry(c)
+    glyph = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %s %s" width="%%d" height="%%d">'
+             '<g transform="translate(%s %s)" fill="#fff">%s</g></svg>'
+             % (f(size), f(size), f(tx), f(ty), svg_shapes(white(c["mono"]))))
+    bar = ('<div class="bar"><span class="clock">12:30</span><span class="icons">%s%s</span></div>'
+           % (glyph % (24, 24), '<span class="dot"></span><span class="dot"></span>'))
+    zoom = '<div class="zoom">%s<small>status-bar glyph, enlarged; the box is its 24dp frame</small></div>' % (glyph % (120, 120))
+
+    def themed(bg, fg):
+        shapes = "".join('<path d="%s" fill="%s" fill-rule="evenodd" stroke="%s" stroke-width="%s" stroke-linecap="round"/>'
+                         % (s["d"], fg if s.get("fill") else "none", fg if s.get("stroke") else "none", f(s.get("sw", 0)))
+                         for s in c["mono"])
+        return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 18 72 72" width="88" height="88">'
+                '<circle cx="54" cy="54" r="36" fill="%s"/>%s</svg>' % (bg, shapes))
+
+    html = """<!doctype html><meta charset=utf-8><title>System Manager icon</title><style>
+body{margin:0;background:#101614;color:#e8f1ee;font:14px/1.45 Roboto,Helvetica,Arial,sans-serif;padding:32px}
+h1{font-size:22px;margin:0 0 4px}.sub{color:#8fa59e;margin:0 0 26px;max-width:760px}
+.card{background:#172120;border:1px solid #243430;border-radius:22px;padding:26px;display:flex;gap:34px;flex-wrap:wrap;max-width:1060px}
+.col{display:flex;flex-direction:column;gap:12px}.row{display:flex;gap:16px;align-items:center}
+h3{margin:0;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#8fa59e}
+.shadow{filter:drop-shadow(0 10px 18px rgba(0,0,0,.45))}
+.bar{background:#000;border-radius:10px;padding:6px 14px;display:flex;justify-content:space-between;align-items:center;width:260px}
+.bar .icons{display:flex;gap:10px;align-items:center}.dot{width:12px;height:12px;border-radius:6px;background:#fff;opacity:.85}
+.zoom{display:flex;align-items:center;gap:12px}.zoom svg{background:#000;outline:1px dashed #3fd6a0}small{color:#8fa59e;max-width:150px}
+.key{display:flex;gap:18px;color:#9ab0a9;font-size:12px}.key i{display:inline-block;width:18px;border-top:2px dashed;vertical-align:middle;margin-right:6px}
+</style><h1>System Manager launcher icon</h1>
+<p class=sub>The guides on the large icons show the 66-unit safe circle (dashed white) that every launcher mask keeps, and the
+6-unit margin the artwork must stay inside (dotted amber). The hub sits well within both.</p>
+<div class=card>
+<div class=col><h3>Squircle, with guides</h3><div class=shadow>%s</div>
+<div class=key><span><i style="border-color:#fff"></i>safe zone</span><span><i style="border-color:#ffd166"></i>required margin</span></div></div>
+<div class=col><h3>Circle, with guides</h3><div class=shadow>%s</div></div>
+<div class=col><h3>Masks</h3><div class="row shadow">%s</div>
+<h3>Launcher sizes</h3><div class="row shadow">%s</div>
+<h3>Themed icon</h3><div class="row">%s%s</div>
+<h3>Status bar</h3>%s%s</div>
+</div>""" % (big, circle_big, masks, sizes, themed("#D7E3DF", "#1B332B"), themed("#2B3B35", "#C9E8DB"), bar, zoom)
     with open(path_out, "w") as fh:
         fh.write(html)
     print("preview written to", path_out)
 
 
 if __name__ == "__main__":
+    status = 0
+    if "--apply" in sys.argv:
+        apply()
+    if "--check" in sys.argv or "--apply" in sys.argv:
+        status = check()
     if "--preview" in sys.argv:
         preview(sys.argv[sys.argv.index("--preview") + 1])
-    if "--apply" in sys.argv:
-        apply(int(sys.argv[sys.argv.index("--apply") + 1]))
+    if len(sys.argv) == 1:
+        print(__doc__)
+    sys.exit(status)

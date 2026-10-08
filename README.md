@@ -139,7 +139,7 @@ app/                     Android app (plain Java, no Gradle)
 sysmgrd/sysmgrd          Node.js server daemon entry point
 sysmgrd/apk-version.js   Dependency-free APK manifest/version reader
 native/build-openvpn.sh  Reproducible cross-compile of the embedded openvpn binary
-design/                  Source for the launcher icon candidates and the in-app icon set
+design/                  Source for the launcher icon and the in-app icon set
 tests/                   Beacon recovery tests and a UI screenshot tour
 ISSUES.md                Internal audit notes / known issues
 ```
@@ -176,10 +176,14 @@ the theme changes. Two generators keep the artwork reproducible:
 
 - `python3 design/gen_ui_icons.py` writes the line icons in
   `res/drawable/ic_*.xml` from one source, so they share a grid and stroke.
-- `python3 design/icons/launcher_icons.py --preview sheet.html` renders the
-  launcher icon candidates; `--apply N` writes candidate *N* as the app's
-  adaptive icon (background, foreground, themed-icon layer) and derives the
-  status-bar glyph from it.
+- `python3 design/icons/launcher_icons.py --apply` writes the launcher icon (an
+  adaptive icon: background, foreground and themed-icon layers) and derives the
+  status-bar glyph from it. It then measures the rendered artwork and fails if
+  it comes within 6 units of the safe zone launchers guarantee, or leaves its
+  status-bar glyph less than 2.4dp of padding, so the icon cannot drift into
+  hugging its margins (`--check` runs only that test; it needs Pillow and
+  Inkscape). `--preview sheet.html` renders the icon under every mask, with the
+  margin guides drawn on it.
 
 `python3 tests/ui_tour.py --out /tmp/tour --themes light dark` drives an
 already-running emulator or phone over `adb`: it opens every page, scrolls each
