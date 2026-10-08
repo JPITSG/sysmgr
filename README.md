@@ -51,7 +51,9 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
   off) with battery, network and Remote Link vitals beneath it, a banner appears
   when your server has a newer APK, and every feature is a tile showing its live
   state: lit in the feature's colour when running, red when it needs attention,
-  grey when off. Tap a tile to open that feature's settings page. Light, dark
+  grey when off. Tap a tile to open that feature's settings page. Remote Link,
+  OpenVPN, VNC Server, Beacon and GPS Logger also carry a switch right on the
+  tile, so they can be turned on and off without opening anything. Light, dark
   or follow-the-phone themes can be switched from the header or from
   **Appearance**.
 - **GPS logging** — reports location on a schedule, on Wi-Fi change, and/or at

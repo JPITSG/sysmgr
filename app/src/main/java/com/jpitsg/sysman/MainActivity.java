@@ -366,10 +366,10 @@ public final class MainActivity extends Activity {
     private Switch rebootRemoteTriggerEnabledSwitch;
     private Switch rebootScheduleEnabledSwitch;
     private Switch rebootOnlyWhenWifiNotMatchingSwitch;
-    private Switch remoteLinkEnabledSwitch;
+    private ToggleSwitch remoteLinkEnabledSwitch;
     private Switch remoteLinkAcceptAnySslCertSwitch;
-    private Switch beaconEnabledSwitch;
-    private Switch vncEnabledSwitch;
+    private ToggleSwitch beaconEnabledSwitch;
+    private ToggleSwitch vncEnabledSwitch;
     private Switch vncRemoteCommandEnabledSwitch;
     private Switch vncViewOnlySwitch;
     private Switch vncEnabledOnMatchingWifiSwitch;
@@ -1386,6 +1386,12 @@ public final class MainActivity extends Activity {
                 "Reports this phone's location to your server on a schedule.",
                 R.drawable.ic_gps, Ui.ACCENT_EMERALD, true);
         statusPill = panel.pill;
+        panel.tile.enableToggle(new FeatureTile.ToggleListener() {
+            @Override
+            public void onToggled(boolean on) {
+                toggleTracking(on);
+            }
+        });
         buildGpsLoggerControls(panel.content);
         buildEndpointSubsection(panel.content);
         buildWifiSubsection(panel.content);
@@ -1531,6 +1537,12 @@ public final class MainActivity extends Activity {
                 R.drawable.ic_shield_lock, Ui.ACCENT_BLUE, true);
         openVpnPanel = frame;
         openVpnPill = frame.pill;
+        frame.tile.enableToggle(new FeatureTile.ToggleListener() {
+            @Override
+            public void onToggled(boolean on) {
+                toggleVpn(on);
+            }
+        });
 
         LinearLayout profile = section(frame.content, "Profile");
         openVpnProfileSummary = newColumn();
@@ -1594,6 +1606,7 @@ public final class MainActivity extends Activity {
 
         vncEnabledSwitch = addMasterToggle(frame, R.drawable.ic_cast,
                 "Enable VNC server", "Let a VNC client see and drive this screen");
+        mirrorToTile(frame, vncEnabledSwitch);
 
         LinearLayout engine = section(frame.content, "Engine");
         addVncEngineInput(engine);
@@ -1797,6 +1810,7 @@ public final class MainActivity extends Activity {
 
         beaconEnabledSwitch = addMasterToggle(frame, R.drawable.ic_radio,
                 "Enable beacon", "Advertise over Bluetooth at the rate your battery rules allow");
+        mirrorToTile(frame, beaconEnabledSwitch);
 
         LinearLayout identity = section(frame.content, "Identity");
         addFieldLabel(identity, "Proximity UUID — match receivers on this");
@@ -1944,6 +1958,7 @@ public final class MainActivity extends Activity {
 
         remoteLinkEnabledSwitch = addMasterToggle(frame, R.drawable.ic_link,
                 "Enable Remote Link", "Keep a connection open to your server");
+        mirrorToTile(frame, remoteLinkEnabledSwitch);
         // The Remote Link notification is shown or hidden per channel in
         // Android's notification settings.
 
@@ -2470,6 +2485,7 @@ public final class MainActivity extends Activity {
         boolean connectedOrConnecting = OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)
                 || OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState);
         setOpenVpnPill(openVpnHasProfile, simpleState);
+        dashboardTileToggle("vpn", openVpnHasProfile && connectedOrConnecting);
         openVpnStatusText.setText(openVpnStatusLine(simpleState));
         applyButtonState(vpnConnectButton, openVpnProfileReady && !connectedOrConnecting,
                 COLOR_PRIMARY, COLOR_ON_ACCENT);
@@ -2994,30 +3010,31 @@ public final class MainActivity extends Activity {
                 });
     }
 
-    private void vpnConnect() {
+    /** Starts connecting; false when something is missing and nothing was started. */
+    private boolean vpnConnect() {
         if (!OpenVpnProfileStore.hasProfile(this)) {
             Toast.makeText(this, "Import a profile first", Toast.LENGTH_LONG).show();
-            return;
+            return false;
         }
         OpenVpnProfileStore.Meta meta = OpenVpnProfileStore.readMeta(this);
         if (!meta.allSlotsSatisfied()) {
             Toast.makeText(this, "Import the missing certificate files first", Toast.LENGTH_LONG).show();
-            return;
+            return false;
         }
         if (meta.keyEncrypted && Config.get(this).vpnKeyPassphrase().isEmpty()) {
             Toast.makeText(this, "Enter the private key passphrase", Toast.LENGTH_LONG).show();
-            return;
+            return false;
         }
         if (meta.authUserPass && Config.get(this).vpnUsername().isEmpty()) {
             Toast.makeText(this, "Enter the VPN username", Toast.LENGTH_LONG).show();
-            return;
+            return false;
         }
         Intent consent = OpenVpnManager.consentIntentOrNull(this);
         if (consent == null) {
             OpenVpnManager.connect(this, "ui-connect");
             Toast.makeText(this, "VPN connect requested", Toast.LENGTH_SHORT).show();
             refreshStatusAndLog();
-            return;
+            return true;
         }
         pendingVpnConnectAfterConsent = true;
         try {
@@ -3026,7 +3043,9 @@ public final class MainActivity extends Activity {
             pendingVpnConnectAfterConsent = false;
             LogStore.append(this, "vpn", "VPN consent launch failed: " + e.getMessage());
             Toast.makeText(this, "Could not request VPN permission", Toast.LENGTH_LONG).show();
+            return false;
         }
+        return true;
     }
 
     private void vpnDisconnect() {
@@ -4003,7 +4022,7 @@ public final class MainActivity extends Activity {
      * says at a glance whether the feature is running. The returned switch is an ordinary one:
      * the caller binds persistence to it like any other.
      */
-    private Switch addMasterToggle(Panel page, int iconRes, String label, String subtitle) {
+    private ToggleSwitch addMasterToggle(Panel page, int iconRes, String label, String subtitle) {
         final int accent = page.accent;
         final LinearLayout card = newRow();
         card.setPadding(dp(14), dp(14), dp(14), dp(14));
@@ -4056,13 +4075,35 @@ public final class MainActivity extends Activity {
                 card.setBackground(Ui.ripple(Ui.alpha(fg, 0.12f), shape, dp(SECTION_CORNER)));
             }
         };
-        sw.setHook(hook);
+        sw.addHook(hook);
         hook.onChecked(false);
         Ui.elevate(card, 1f);
         LinearLayout.LayoutParams lp = matchWrapParams();
         lp.topMargin = dp(16);
         page.content.addView(card, lp);
         return sw;
+    }
+
+    /**
+     * Shows a page's master switch on its overview tile. The page's switch stays the single
+     * source of truth: a tap on the tile's switch just flips that one, so saving, validation,
+     * permission prompts and revert-on-failure behave exactly as they do on the page, and the
+     * tile follows however the page's switch changes (loading, a remote command, a failed save).
+     */
+    private void mirrorToTile(final Panel page, final ToggleSwitch pageSwitch) {
+        page.tile.enableToggle(new FeatureTile.ToggleListener() {
+            @Override
+            public void onToggled(boolean on) {
+                pageSwitch.setChecked(on);
+            }
+        });
+        pageSwitch.addHook(new ToggleSwitch.Hook() {
+            @Override
+            public void onChecked(boolean checked) {
+                page.tile.setToggleChecked(checked);
+            }
+        });
+        page.tile.setToggleChecked(pageSwitch.isChecked());
     }
 
     /** A line of small explanatory text under a control. */
@@ -4699,6 +4740,7 @@ public final class MainActivity extends Activity {
         setEnabledPill(logPill, switchValue(logEnabledSwitch, config.logEnabled()));
         refreshSystemBackupStatus();
         refreshUpgradeStatus();
+        dashboardTileToggle("gps", tracking);
         applyButtonState(startTrackingButton, !tracking, COLOR_PRIMARY, COLOR_ON_ACCENT);
         applyButtonState(stopTrackingButton, tracking, COLOR_DANGER, COLOR_ON_DANGER);
 
@@ -6693,7 +6735,51 @@ public final class MainActivity extends Activity {
         refreshStatusAndLog();
     }
 
+    /**
+     * The overview switch for tracking. It does what the Start and Stop buttons do, including
+     * saving edits first, then shows whether tracking really is on: it stays off when the
+     * settings are invalid or location access is missing.
+     */
+    private void toggleTracking(boolean on) {
+        if (flushSettingsForAction(on ? "start" : "stop")) {
+            if (on) {
+                startTracking();
+            } else {
+                stopTracking();
+            }
+        }
+        dashboardTileToggle("gps", Config.get(this).isTrackingEnabled());
+    }
+
+    /**
+     * The overview switch for the VPN. On means connected or connecting; it runs the same
+     * checks as the Connect button and stays off if the profile is not ready.
+     */
+    private void toggleVpn(boolean on) {
+        boolean active = false;
+        if (on) {
+            active = flushSettingsForAction("vpn_connect") && vpnConnect();
+        } else {
+            vpnDisconnect();
+        }
+        dashboardTileToggle("vpn", active);
+    }
+
+    private void dashboardTileToggle(String id, boolean on) {
+        FeatureTile tile = dashboard == null ? null : dashboard.tile(id);
+        if (tile != null) {
+            tile.setToggleChecked(on);
+        }
+    }
+
     private void startTracking() {
+        // Starting the location service without any location access would crash it, and
+        // switching tracking on is now a single tap on the overview.
+        if (!PermissionState.hasFineLocation(this) && !PermissionState.hasCoarseLocation(this)) {
+            Toast.makeText(this, "Allow location access to start tracking", Toast.LENGTH_LONG).show();
+            requestCommonPermissions();
+            return;
+        }
         Config config = Config.get(this);
         config.setTrackingEnabled(true);
         seedWifiStateAsync("manual-start");

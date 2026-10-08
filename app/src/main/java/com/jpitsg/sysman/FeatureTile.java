@@ -20,9 +20,15 @@ import android.widget.TextView;
  * One feature on the overview: an icon chip in the feature's own hue, a state
  * dot, the feature name and a live line of status. Colour carries the state —
  * a running tile is lit, an attention tile is red, an idle tile is grey — so
- * the grid reads at a glance.
+ * the grid reads at a glance. A feature that can be switched on and off from
+ * here has a real switch in place of the dot.
  */
 final class FeatureTile extends LinearLayout {
+    /** Called when the user flips the tile's switch; the caller decides what actually happens. */
+    interface ToggleListener {
+        void onToggled(boolean on);
+    }
+
     private final int accent;
     private final int iconRes;
     private final String title;
@@ -33,6 +39,8 @@ final class FeatureTile extends LinearLayout {
     private TextView statusView;
     private LinearLayout top;
     private LinearLayout texts;
+    private CompactSwitch toggle;
+    private boolean mirroring;
     private boolean wide;
     private String status = "";
     private String detail = "";
@@ -110,20 +118,80 @@ final class FeatureTile extends LinearLayout {
             LayoutParams textsLp = new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
             textsLp.leftMargin = Ui.dp(context, 14);
             addView(texts, textsLp);
-            addView(dot, new LayoutParams(Ui.dp(context, 18), Ui.dp(context, 18)));
+            addView(indicator(), indicatorParams());
         } else {
             setOrientation(VERTICAL);
             setGravity(Gravity.NO_GRAVITY);
             setPadding(pad, pad, pad, Ui.dp(context, 15));
-            addView(top, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+            LayoutParams rowLp = new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+            if (toggle != null) {
+                // The switch's touch area spills past the content edge into the tile's padding, and
+                // a touch only reaches a child that lies inside its parent's bounds.
+                rowLp.rightMargin = -Ui.dp(context, CompactSwitch.TOUCH_X);
+            }
+            addView(top, rowLp);
             top.addView(chip);
             top.addView(new View(context), new LayoutParams(0, 1, 1f));
-            LayoutParams dotLp = new LayoutParams(Ui.dp(context, 18), Ui.dp(context, 18));
-            dotLp.topMargin = Ui.dp(context, 1);
-            top.addView(dot, dotLp);
+            top.addView(indicator(), indicatorParams());
             LayoutParams textsLp = new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
             textsLp.topMargin = Ui.dp(context, 14);
             addView(texts, textsLp);
+        }
+    }
+
+    private View indicator() {
+        return toggle != null ? toggle : dot;
+    }
+
+    private LayoutParams indicatorParams() {
+        Context context = getContext();
+        if (toggle == null) {
+            LayoutParams lp = new LayoutParams(Ui.dp(context, 18), Ui.dp(context, 18));
+            lp.topMargin = wide ? 0 : Ui.dp(context, 1);
+            return lp;
+        }
+        // The switch is drawn small, with its touch area around it. Pull the track back to where
+        // the dot sat: its right edge on the content edge, and its centre on the dot's centre line
+        // (10dp down from the top of the row) or, in the wide layout, centred on the tile.
+        LayoutParams lp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        if (wide) {
+            lp.rightMargin = -Ui.dp(context, CompactSwitch.TOUCH_X);
+        } else {
+            lp.topMargin = Ui.dp(context, 10 - CompactSwitch.TRACK_H / 2 - CompactSwitch.TOUCH_Y);
+        }
+        return lp;
+    }
+
+    /**
+     * Puts a switch where the state dot was. Flipping it reports to {@code listener}, which
+     * does the real work and then calls {@link #setToggleChecked} with how things turned out,
+     * so the switch never claims a state the feature is not in.
+     */
+    void enableToggle(final ToggleListener listener) {
+        toggle = new CompactSwitch(getContext());
+        toggle.setContentDescription(title);
+        toggle.setOnCheckedChangeListener(new CompactSwitch.Listener() {
+            @Override
+            public void onCheckedChanged(boolean checked) {
+                if (!mirroring) {
+                    listener.onToggled(checked);
+                }
+            }
+        });
+        arrange();
+        applyStyle();
+    }
+
+    /** Shows the feature's real state on the switch without reporting it as a tap. */
+    void setToggleChecked(boolean checked) {
+        if (toggle == null || toggle.isChecked() == checked) {
+            return;
+        }
+        mirroring = true;
+        try {
+            toggle.setChecked(checked);
+        } finally {
+            mirroring = false;
         }
     }
 
