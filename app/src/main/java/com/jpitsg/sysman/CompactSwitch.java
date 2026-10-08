@@ -35,12 +35,14 @@ final class CompactSwitch extends View implements Checkable {
     private static final float OUTLINE = 1.5f;
     private static final float HALO = 11f;
     private static final int SLIDE_MS = 160;
+    private static final float DIMMED = 0.45f;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
     private final float density;
     private Listener listener;
     private boolean checked;
+    private boolean dimmed;
     /** 0 when off, 1 when on, in between while the thumb slides. */
     private float position;
     private ValueAnimator slide;
@@ -71,6 +73,17 @@ final class CompactSwitch extends View implements Checkable {
         }
         if (listener != null) {
             listener.onCheckedChanged(checked);
+        }
+    }
+
+    /**
+     * A faded switch is one that cannot be turned on yet. It still answers a tap, so the user can be
+     * told why.
+     */
+    void setDimmed(boolean dimmed) {
+        if (this.dimmed != dimmed) {
+            this.dimmed = dimmed;
+            invalidate();
         }
     }
 
@@ -144,25 +157,26 @@ final class CompactSwitch extends View implements Checkable {
         float top = (getHeight() - trackH) / 2f;
         float corner = trackH / 2f;
         float p = position;
+        float fade = dimmed ? DIMMED : 1f;
 
         // The off track's fill and outline give way to the accent as the thumb travels.
         rect.set(left, top, left + trackW, top + trackH);
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(Ui.blend(Ui.COLOR_PRIMARY, Ui.COLOR_SWITCH_OFF_TRACK, p));
+        paint.setColor(Ui.alpha(Ui.blend(Ui.COLOR_PRIMARY, Ui.COLOR_SWITCH_OFF_TRACK, p), fade));
         canvas.drawRoundRect(rect, corner, corner, paint);
         if (p < 1f) {
             float stroke = OUTLINE * density;
             rect.inset(stroke / 2f, stroke / 2f);
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(stroke);
-            paint.setColor(Ui.alpha(Ui.COLOR_SWITCH_OFF_STROKE, 1f - p));
+            paint.setColor(Ui.alpha(Ui.COLOR_SWITCH_OFF_STROKE, (1f - p) * fade));
             canvas.drawRoundRect(rect, corner - stroke / 2f, corner - stroke / 2f, paint);
         }
 
         float diameter = (THUMB_OFF + (THUMB_ON - THUMB_OFF) * p) * density;
         float cx = left + corner + (trackW - 2f * corner) * p;
         float cy = top + corner;
-        int thumb = Ui.blend(Ui.COLOR_ON_ACCENT, Ui.COLOR_SWITCH_OFF_STROKE, p);
+        int thumb = Ui.alpha(Ui.blend(Ui.COLOR_ON_ACCENT, Ui.COLOR_SWITCH_OFF_STROKE, p), fade);
         paint.setStyle(Paint.Style.FILL);
         if (isPressed() || isFocused()) {
             paint.setColor(Ui.alpha(checked ? Ui.COLOR_PRIMARY : Ui.COLOR_SWITCH_OFF_STROKE, 0.22f));

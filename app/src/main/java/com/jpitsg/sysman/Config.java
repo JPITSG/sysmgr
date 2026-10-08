@@ -70,6 +70,7 @@ final class Config {
     private static final String KEY_HIGH_PRIORITY_DEDUPE_SECONDS = "high_priority_dedupe_seconds";
     private static final String KEY_HIGH_PRIORITY_RAISE_ALARM_VOLUME = "high_priority_raise_alarm_volume";
     private static final String KEY_HIGH_PRIORITY_ALARM_VOLUME_PERCENT = "high_priority_alarm_volume_percent";
+    private static final String KEY_HIGH_PRIORITY_RESTORE_SOURCES = "high_priority_restore_sources";
     private static final String KEY_BATTERY_ALERT_ENABLED = "battery_alert_enabled";
     private static final String KEY_BATTERY_ALERT_THRESHOLD_PERCENT = "battery_alert_threshold_percent";
     private static final String KEY_BATTERY_ALERT_CHECK_INTERVAL_MINUTES = "battery_alert_check_interval_minutes";
@@ -145,6 +146,21 @@ final class Config {
     private static final Object BEACON_UUID_LOCK = new Object();
 
     private final SharedPreferences prefs;
+
+    /**
+     * The address a fresh install ships with. It points nowhere, so a server address that is
+     * still this has not been filled in yet.
+     */
+    static final String PLACEHOLDER_ENDPOINT = "https://server:1234";
+
+    /** True for a blank address or the one a fresh install ships with. */
+    static boolean isPlaceholderEndpoint(String endpoint) {
+        String value = endpoint == null ? "" : endpoint.trim();
+        while (value.endsWith("/")) {
+            value = value.substring(0, value.length() - 1);
+        }
+        return value.isEmpty() || PLACEHOLDER_ENDPOINT.equalsIgnoreCase(value);
+    }
 
     static final int VOLUME_UNCHANGED = -1;
     static final int DND_UNCHANGED = 0;
@@ -305,7 +321,7 @@ final class Config {
     }
 
     String serverBaseUrl() {
-        return string(KEY_SERVER_BASE_URL, "https://server:1234");
+        return string(KEY_SERVER_BASE_URL, PLACEHOLDER_ENDPOINT);
     }
 
     String trackPath() {
@@ -458,6 +474,25 @@ final class Config {
 
     boolean highPriorityRemoteEnabled() {
         return prefs.getBoolean(KEY_HIGH_PRIORITY_REMOTE_ENABLED, false);
+    }
+
+    /** The two things that can raise a high-priority alert: a watched app, and the Remote Link. */
+    static final int ALERT_SOURCE_APP = 1;
+    static final int ALERT_SOURCE_REMOTE = 2;
+
+    /**
+     * Which alert sources the overview switch last turned off, so turning it back on restores
+     * the same ones rather than guessing. Both, until it has been used.
+     */
+    int highPriorityRestoreSources() {
+        int all = ALERT_SOURCE_APP | ALERT_SOURCE_REMOTE;
+        return prefs.getInt(KEY_HIGH_PRIORITY_RESTORE_SOURCES, all) & all;
+    }
+
+    void setHighPriorityRestoreSources(int sources) {
+        prefs.edit()
+                .putInt(KEY_HIGH_PRIORITY_RESTORE_SOURCES, sources & (ALERT_SOURCE_APP | ALERT_SOURCE_REMOTE))
+                .apply();
     }
 
     AlertTextFilter highPriorityRemoteFilter() {
@@ -681,7 +716,7 @@ final class Config {
     }
 
     String remoteLinkEndpoint() {
-        return string(KEY_REMOTE_LINK_ENDPOINT, "https://server:1234");
+        return string(KEY_REMOTE_LINK_ENDPOINT, PLACEHOLDER_ENDPOINT);
     }
 
     String remoteLinkUsername() {
@@ -1148,7 +1183,7 @@ final class Config {
             boolean includeExtendedFields,
             boolean caseSensitiveSsid) {
         prefs.edit()
-                .putString(KEY_SERVER_BASE_URL, clean(serverBaseUrl, "https://server:1234"))
+                .putString(KEY_SERVER_BASE_URL, clean(serverBaseUrl, PLACEHOLDER_ENDPOINT))
                 .putString(KEY_TRACK_PATH, clean(trackPath, "/track.php"))
                 .putString(KEY_SSID_PATTERN, clean(ssidPattern, "SSID*"))
                 .putInt(KEY_INTERVAL_MINUTES, parseInt(lowBatteryIntervalMinutes, 6, 1, 1440))
@@ -1308,7 +1343,7 @@ final class Config {
             boolean acceptAnySslCert) {
         prefs.edit()
                 .putBoolean(KEY_REMOTE_LINK_ENABLED, enabled)
-                .putString(KEY_REMOTE_LINK_ENDPOINT, clean(endpoint, "https://server:1234"))
+                .putString(KEY_REMOTE_LINK_ENDPOINT, clean(endpoint, PLACEHOLDER_ENDPOINT))
                 .putString(KEY_REMOTE_LINK_USERNAME, clean(username, ""))
                 .putString(KEY_REMOTE_LINK_PASSWORD, clean(password, ""))
                 .putInt(KEY_REMOTE_LINK_HEARTBEAT_SECONDS, parseInt(heartbeatSeconds, 60, 10, 3600))

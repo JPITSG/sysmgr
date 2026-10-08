@@ -41,6 +41,7 @@ final class FeatureTile extends LinearLayout {
     private LinearLayout texts;
     private CompactSwitch toggle;
     private boolean mirroring;
+    private boolean toggleReady = true;
     private boolean wide;
     private String status = "";
     private String detail = "";
@@ -176,10 +177,32 @@ final class FeatureTile extends LinearLayout {
                 if (!mirroring) {
                     listener.onToggled(checked);
                 }
+                applyToggleLook();
             }
         });
+        applyToggleLook();
         arrange();
         applyStyle();
+    }
+
+    /**
+     * Says whether the feature has everything it needs to be turned on. A switch that is off and
+     * not ready is drawn faded; it still answers a tap, with the reason it cannot turn on.
+     */
+    void setToggleReady(boolean ready) {
+        if (toggleReady != ready) {
+            toggleReady = ready;
+            applyToggleLook();
+        }
+    }
+
+    private void applyToggleLook() {
+        if (toggle == null) {
+            return;
+        }
+        boolean faded = !toggleReady && !toggle.isChecked();
+        toggle.setDimmed(faded);
+        toggle.setContentDescription(faded ? title + ", not ready" : title);
     }
 
     /** Shows the feature's real state on the switch without reporting it as a tap. */
@@ -193,6 +216,7 @@ final class FeatureTile extends LinearLayout {
         } finally {
             mirroring = false;
         }
+        applyToggleLook();
     }
 
     int tone() {

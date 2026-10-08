@@ -187,7 +187,7 @@ public final class MainActivity extends Activity {
     private TextView upgradeAvailableVersionValue;
     private TextView upgradeDateValue;
     private TextView upgradeSizeValue;
-    private Switch upgradeAutoSwitch;
+    private ToggleSwitch upgradeAutoSwitch;
     private Button upgradeRefreshButton;
     private Button upgradeInstallButton;
     private TextView wifiBadge;
@@ -357,13 +357,13 @@ public final class MainActivity extends Activity {
     private Switch includeExtendedFieldsSwitch;
     private Switch caseSensitiveSsidSwitch;
     private Switch gpsUseRemoteLinkSwitch;
-    private Switch highPriorityEnabledSwitch;
-    private Switch highPriorityRemoteEnabledSwitch;
+    private ToggleSwitch highPriorityEnabledSwitch;
+    private ToggleSwitch highPriorityRemoteEnabledSwitch;
     private Switch highPriorityRaiseAlarmVolumeSwitch;
-    private Switch batteryAlertEnabledSwitch;
+    private ToggleSwitch batteryAlertEnabledSwitch;
     private Switch batteryAlertUseExactAlarmsSwitch;
     private Switch batteryAlertAllowIdleAlarmsSwitch;
-    private Switch rebootAutomationEnabledSwitch;
+    private ToggleSwitch rebootAutomationEnabledSwitch;
     private Switch rebootNotificationTriggerEnabledSwitch;
     private Switch rebootRemoteTriggerEnabledSwitch;
     private Switch rebootScheduleEnabledSwitch;
@@ -378,10 +378,10 @@ public final class MainActivity extends Activity {
     private Switch vncEnabledWhenVpnConnectedSwitch;
     private Switch vncEnabledOnCellularOnlySwitch;
     private Switch vncWakeOnConnectSwitch;
-    private Switch logEnabledSwitch;
+    private ToggleSwitch logEnabledSwitch;
     private Switch clearNotificationsOnOpenSwitch;
     private Switch notificationActionButtonsEnabledSwitch;
-    private Switch notificationBackupEnabledSwitch;
+    private ToggleSwitch notificationBackupEnabledSwitch;
     private Switch notificationBackupIncludeSysmgrSwitch;
     private FrameLayout rootFrame;
     private ScrollView homeScroll;
@@ -412,6 +412,10 @@ public final class MainActivity extends Activity {
     private LiveSaveGroup vpnSettingsSave;
     private LiveSaveGroup vncSettingsSave;
     private LiveSaveGroup beaconSettingsSave;
+    private LiveSaveGroup logSettingsSave;
+    /** The overview switch waiting on a permission prompt, and the request it is waiting for. */
+    private String pendingEnableId = "";
+    private int pendingEnableRequest;
     private Toast settingsFeedbackToast;
     private BroadcastReceiver remoteLinkStateReceiver;
     private BroadcastReceiver notificationHistoryReceiver;
@@ -917,6 +921,7 @@ public final class MainActivity extends Activity {
         buildUpgradePanel();
         buildLogPanel();
         buildAppearancePanel();
+        wireOverviewSwitches();
 
         setContentView(rootFrame);
         configureSystemBars();
@@ -1391,12 +1396,6 @@ public final class MainActivity extends Activity {
                 "Reports this phone's location to your server on a schedule.",
                 R.drawable.ic_gps, Ui.ACCENT_EMERALD, true);
         statusPill = panel.pill;
-        panel.tile.enableToggle(new FeatureTile.ToggleListener() {
-            @Override
-            public void onToggled(boolean on) {
-                toggleTracking(on);
-            }
-        });
         buildGpsLoggerControls(panel.content);
         buildEndpointSubsection(panel.content);
         buildWifiSubsection(panel.content);
@@ -1542,12 +1541,6 @@ public final class MainActivity extends Activity {
                 R.drawable.ic_shield_lock, Ui.ACCENT_BLUE, true);
         openVpnPanel = frame;
         openVpnPill = frame.pill;
-        frame.tile.enableToggle(new FeatureTile.ToggleListener() {
-            @Override
-            public void onToggled(boolean on) {
-                toggleVpn(on);
-            }
-        });
 
         LinearLayout profile = section(frame.content, "Profile");
         openVpnProfileSummary = newColumn();
@@ -1611,7 +1604,6 @@ public final class MainActivity extends Activity {
 
         vncEnabledSwitch = addMasterToggle(frame, R.drawable.ic_cast,
                 "Enable VNC server", "Let a VNC client see and drive this screen");
-        mirrorToTile(frame, vncEnabledSwitch);
 
         LinearLayout engine = section(frame.content, "Engine");
         addVncEngineInput(engine);
@@ -1815,7 +1807,6 @@ public final class MainActivity extends Activity {
 
         beaconEnabledSwitch = addMasterToggle(frame, R.drawable.ic_radio,
                 "Enable beacon", "Advertise over Bluetooth at the rate your battery rules allow");
-        mirrorToTile(frame, beaconEnabledSwitch);
 
         LinearLayout identity = section(frame.content, "Identity");
         addFieldLabel(identity, "Proximity UUID — match receivers on this");
@@ -1963,7 +1954,6 @@ public final class MainActivity extends Activity {
 
         remoteLinkEnabledSwitch = addMasterToggle(frame, R.drawable.ic_link,
                 "Enable Remote Link", "Keep a connection open to your server");
-        mirrorToTile(frame, remoteLinkEnabledSwitch);
         // The Remote Link notification is shown or hidden per channel in
         // Android's notification settings.
 
@@ -4093,28 +4083,6 @@ public final class MainActivity extends Activity {
         return sw;
     }
 
-    /**
-     * Shows a page's master switch on its overview tile. The page's switch stays the single
-     * source of truth: a tap on the tile's switch just flips that one, so saving, validation,
-     * permission prompts and revert-on-failure behave exactly as they do on the page, and the
-     * tile follows however the page's switch changes (loading, a remote command, a failed save).
-     */
-    private void mirrorToTile(final Panel page, final ToggleSwitch pageSwitch) {
-        page.tile.enableToggle(new FeatureTile.ToggleListener() {
-            @Override
-            public void onToggled(boolean on) {
-                pageSwitch.setChecked(on);
-            }
-        });
-        pageSwitch.addHook(new ToggleSwitch.Hook() {
-            @Override
-            public void onChecked(boolean checked) {
-                page.tile.setToggleChecked(checked);
-            }
-        });
-        page.tile.setToggleChecked(pageSwitch.isChecked());
-    }
-
     /** A line of small explanatory text under a control. */
     private TextView addNote(LinearLayout parent, String text) {
         TextView note = historyText(text, 12, COLOR_TEXT_FAINT, false);
@@ -4619,12 +4587,12 @@ public final class MainActivity extends Activity {
         return group;
     }
 
-    private Switch addGroupedToggle(LinearLayout group, String text) {
+    private ToggleSwitch addGroupedToggle(LinearLayout group, String text) {
         return addGroupedToggle(group, text, null);
     }
 
     /** A labelled switch row; rows in one group are separated by hairlines. */
-    private Switch addGroupedToggle(LinearLayout group, String text, String description) {
+    private ToggleSwitch addGroupedToggle(LinearLayout group, String text, String description) {
         if (group.getChildCount() > 0) {
             addDivider(group, 0);
         }
@@ -4648,7 +4616,7 @@ public final class MainActivity extends Activity {
             texts.addView(hint, topMarginParams(3));
         }
 
-        final Switch sw = makeSwitch();
+        final ToggleSwitch sw = makeSwitch();
         LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -4856,6 +4824,7 @@ public final class MainActivity extends Activity {
         setTileDetail("permissions", permissionsNeedingAttention == 0
                 ? "Everything granted" : permissionsNeedingAttention + " to fix");
         refreshDashboard();
+        refreshToggleReadiness();
 
         // Wi-Fi identity and the log file are read independently off the main
         // thread and applied when ready. The Wi-Fi lookup can block ~1.2s while
@@ -6067,14 +6036,14 @@ public final class MainActivity extends Activity {
         bindLiveToggles(notificationHistorySettings,
                 clearNotificationsOnOpenSwitch, notificationActionButtonsEnabledSwitch);
 
-        final LiveSaveGroup logSettings = liveSaveGroup(new LiveSaveAction() {
+        logSettingsSave = liveSaveGroup(new LiveSaveAction() {
             @Override
             public boolean save() {
                 return saveLogConfigOnly();
             }
         });
-        bindLiveEdits(logSettings, logMaxLinesField);
-        bindLiveToggles(logSettings, new LiveSaveAction() {
+        bindLiveEdits(logSettingsSave, logMaxLinesField);
+        bindLiveToggles(logSettingsSave, new LiveSaveAction() {
             @Override
             public boolean save() {
                 return saveLogToggleOnly();
@@ -6293,32 +6262,11 @@ public final class MainActivity extends Activity {
     }
 
     private boolean requireEndpoint(EditText field, String label, String... allowedSchemes) {
-        String value = text(field).trim();
-        try {
-            URI uri = URI.create(value);
-            String scheme = uri.getScheme();
-            boolean allowed = false;
-            if (scheme != null) {
-                for (String candidate : allowedSchemes) {
-                    if (candidate.equalsIgnoreCase(scheme)) {
-                        allowed = true;
-                        break;
-                    }
-                }
-            }
-            int port = uri.getPort();
-            if (!allowed
-                    || uri.getHost() == null
-                    || uri.getHost().trim().isEmpty()
-                    || port == 0
-                    || port > 65535) {
-                return invalidSetting(field, label, "Use a complete server URL");
-            }
-            setFieldError(field, null);
-            return true;
-        } catch (RuntimeException e) {
+        if (!Readiness.completeEndpoint(text(field), allowedSchemes)) {
             return invalidSetting(field, label, "Use a complete server URL");
         }
+        setFieldError(field, null);
+        return true;
     }
 
     private boolean requireIpv4(EditText field, String label, boolean optional) {
@@ -6773,34 +6721,258 @@ public final class MainActivity extends Activity {
         refreshStatusAndLog();
     }
 
-    /**
-     * The overview switch for tracking. It does what the Start and Stop buttons do, including
-     * saving edits first, then shows whether tracking really is on: it stays off when the
-     * settings are invalid or location access is missing.
-     */
-    private void toggleTracking(boolean on) {
-        if (flushSettingsForAction(on ? "start" : "stop")) {
-            if (on) {
-                startTracking();
-            } else {
-                stopTracking();
+    // ============================================================
+    //  Overview switches
+    // ============================================================
+
+    /** The tiles on the overview that carry a switch. */
+    private static final String[] SWITCH_TILES = {
+            "remote_link", "vpn", "vnc", "beacon", "gps", "notification_backup", "alerts",
+            "battery", "reboot", "upgrade", "log"};
+
+    /** The page switches that say whether a feature is on. None for features that are started and stopped. */
+    private ToggleSwitch[] pageSwitchesFor(String id) {
+        switch (id) {
+            case "remote_link":
+                return new ToggleSwitch[]{remoteLinkEnabledSwitch};
+            case "vnc":
+                return new ToggleSwitch[]{vncEnabledSwitch};
+            case "beacon":
+                return new ToggleSwitch[]{beaconEnabledSwitch};
+            case "notification_backup":
+                return new ToggleSwitch[]{notificationBackupEnabledSwitch};
+            case "alerts":
+                return new ToggleSwitch[]{highPriorityEnabledSwitch, highPriorityRemoteEnabledSwitch};
+            case "battery":
+                return new ToggleSwitch[]{batteryAlertEnabledSwitch};
+            case "reboot":
+                return new ToggleSwitch[]{rebootAutomationEnabledSwitch};
+            case "upgrade":
+                return new ToggleSwitch[]{upgradeAutoSwitch};
+            case "log":
+                return new ToggleSwitch[]{logEnabledSwitch};
+            default:
+                return new ToggleSwitch[0];
+        }
+    }
+
+    /** The settings that can have edits waiting on the feature's page. */
+    private LiveSaveGroup settingsGroupFor(String id) {
+        switch (id) {
+            case "remote_link":
+                return remoteLinkSettingsSave;
+            case "vpn":
+                return vpnSettingsSave;
+            case "vnc":
+                return vncSettingsSave;
+            case "beacon":
+                return beaconSettingsSave;
+            case "gps":
+                return gpsSettingsSave;
+            case "alerts":
+                return highPrioritySettingsSave;
+            case "battery":
+                return batteryAlertSettingsSave;
+            case "reboot":
+                return rebootSettingsSave;
+            case "log":
+                return logSettingsSave;
+            default:
+                return null;
+        }
+    }
+
+    private static boolean anyChecked(ToggleSwitch[] switches) {
+        for (ToggleSwitch sw : switches) {
+            if (sw.isChecked()) {
+                return true;
             }
         }
-        dashboardTileToggle("gps", Config.get(this).isTrackingEnabled());
+        return false;
     }
 
     /**
-     * The overview switch for the VPN. On means connected or connecting; it runs the same
-     * checks as the Connect button and stays off if the profile is not ready.
+     * Puts a switch on each tile that has one. A page's own switch stays the single source of truth
+     * for its feature: the tile follows it however it changes (loading, a remote command, a save
+     * that failed), and a tap on the tile's switch goes through {@link #overviewSwitched}.
      */
-    private void toggleVpn(boolean on) {
-        boolean active = false;
-        if (on) {
-            active = flushSettingsForAction("vpn_connect") && vpnConnect();
-        } else {
-            vpnDisconnect();
+    private void wireOverviewSwitches() {
+        for (final String id : SWITCH_TILES) {
+            final FeatureTile tile = dashboard.tile(id);
+            tile.enableToggle(new FeatureTile.ToggleListener() {
+                @Override
+                public void onToggled(boolean on) {
+                    overviewSwitched(id, on);
+                }
+            });
+            final ToggleSwitch[] pages = pageSwitchesFor(id);
+            for (ToggleSwitch page : pages) {
+                page.addHook(new ToggleSwitch.Hook() {
+                    @Override
+                    public void onChecked(boolean checked) {
+                        tile.setToggleChecked(anyChecked(pages));
+                    }
+                });
+            }
+            if (pages.length > 0) {
+                tile.setToggleChecked(anyChecked(pages));
+            }
         }
-        dashboardTileToggle("vpn", active);
+    }
+
+    /**
+     * A tap on a switch on the overview. Turning a feature off always works. Turning it on needs
+     * the feature to be set up and ready (see {@link Readiness}); when it is not, the switch goes
+     * back to off and a message says what is missing. Either way the switch ends up showing what
+     * really happened.
+     */
+    private void overviewSwitched(String id, boolean on) {
+        pendingEnableId = "";
+        boolean enabled = false;
+        if (!on) {
+            disableFeature(id);
+        } else if (readyToEnable(id, true)) {
+            enabled = enableFeature(id);
+        }
+        dashboardTileToggle(id, enabled);
+    }
+
+    /**
+     * Whether the feature may be switched on now. Edits waiting on its page are saved first, and
+     * refused here if they are not valid; then it must have everything it needs. When it does
+     * not, says why, and asks for the permission if that is what is missing.
+     */
+    private boolean readyToEnable(String id, boolean mayPrompt) {
+        LiveSaveGroup group = settingsGroupFor(id);
+        if (group != null && !flushLiveSaveGroup(group)) {
+            return false;
+        }
+        Readiness.Block block = Readiness.check(this, id);
+        if (block == null) {
+            return true;
+        }
+        FeatureTile tile = dashboard.tile(id);
+        String title = tile == null ? id : tile.title();
+        LogStore.append(this, "ui", "Overview switch refused " + id + ": " + block.reason);
+        if (settingsFeedbackToast != null) {
+            settingsFeedbackToast.cancel();
+        }
+        settingsFeedbackToast = Toast.makeText(getApplicationContext(),
+                title + " isn't ready — " + block.reason, Toast.LENGTH_LONG);
+        settingsFeedbackToast.show();
+        if (mayPrompt && block.fix != Readiness.FIX_NONE) {
+            askForPermission(id, block.fix);
+        }
+        return false;
+    }
+
+    /** Shows the permission prompt, and remembers which switch asked so it can finish when it is answered. */
+    private void askForPermission(String id, int fix) {
+        pendingEnableId = id;
+        if (fix == Readiness.FIX_LOCATION) {
+            pendingEnableRequest = REQUEST_COMMON_PERMISSIONS;
+            requestCommonPermissions();
+        } else if (fix == Readiness.FIX_BLUETOOTH) {
+            pendingEnableRequest = REQUEST_BLUETOOTH_ADVERTISE;
+            requestBluetoothAdvertise();
+        } else if (fix == Readiness.FIX_NOTIFICATIONS) {
+            pendingEnableRequest = REQUEST_NOTIFICATIONS;
+            requestNotificationPermission();
+        } else {
+            pendingEnableId = "";
+        }
+    }
+
+    /** Called once the permission prompt a switch asked for is answered: turns it on if that was all it needed. */
+    private void finishPendingEnable(int requestCode) {
+        String id = pendingEnableId;
+        if (id.isEmpty() || requestCode != pendingEnableRequest) {
+            return;
+        }
+        pendingEnableId = "";
+        dashboardTileToggle(id, readyToEnable(id, false) && enableFeature(id));
+    }
+
+    /** Switches the feature on and says whether it is on afterwards. */
+    private boolean enableFeature(String id) {
+        switch (id) {
+            case "gps":
+                startTracking();
+                return Config.get(this).isTrackingEnabled();
+            case "vpn":
+                return vpnConnect();
+            case "alerts":
+                enableAlerts();
+                return anyChecked(pageSwitchesFor(id));
+            default:
+                ToggleSwitch[] pages = pageSwitchesFor(id);
+                if (pages.length > 0) {
+                    pages[0].setChecked(true);
+                }
+                return anyChecked(pages);
+        }
+    }
+
+    private void disableFeature(String id) {
+        switch (id) {
+            case "gps":
+                stopTracking();
+                break;
+            case "vpn":
+                vpnDisconnect();
+                break;
+            case "alerts":
+                disableAlerts();
+                break;
+            default:
+                for (ToggleSwitch sw : pageSwitchesFor(id)) {
+                    sw.setChecked(false);
+                }
+                break;
+        }
+    }
+
+    /**
+     * High-priority alerts have two sources, and the overview has one switch. Turning it on brings
+     * back the sources it last turned off, as far as they can run, or else whichever can.
+     */
+    private void enableAlerts() {
+        int wanted = Config.get(this).highPriorityRestoreSources();
+        boolean app = (wanted & Config.ALERT_SOURCE_APP) != 0 && Readiness.appAlerts(this) == null;
+        boolean remote = (wanted & Config.ALERT_SOURCE_REMOTE) != 0 && Readiness.remoteAlerts(this) == null;
+        if (!app && !remote) {
+            app = Readiness.appAlerts(this) == null;
+            remote = Readiness.remoteAlerts(this) == null;
+        }
+        if (app) {
+            highPriorityEnabledSwitch.setChecked(true);
+        }
+        if (remote) {
+            highPriorityRemoteEnabledSwitch.setChecked(true);
+        }
+    }
+
+    private void disableAlerts() {
+        int on = (highPriorityEnabledSwitch.isChecked() ? Config.ALERT_SOURCE_APP : 0)
+                | (highPriorityRemoteEnabledSwitch.isChecked() ? Config.ALERT_SOURCE_REMOTE : 0);
+        if (on != 0) {
+            Config.get(this).setHighPriorityRestoreSources(on);
+        }
+        highPriorityEnabledSwitch.setChecked(false);
+        highPriorityRemoteEnabledSwitch.setChecked(false);
+    }
+
+    /** Fades the switches of features that cannot be turned on yet. */
+    private void refreshToggleReadiness() {
+        if (dashboard == null) {
+            return;
+        }
+        for (String id : SWITCH_TILES) {
+            FeatureTile tile = dashboard.tile(id);
+            if (tile != null) {
+                tile.setToggleReady(Readiness.check(this, id) == null);
+            }
+        }
     }
 
     private void dashboardTileToggle(String id, boolean on) {
@@ -7666,6 +7838,7 @@ public final class MainActivity extends Activity {
             BeaconManager.sync(this, "advertise-permission-granted");
         }
         refreshStatusAndLog();
+        finishPendingEnable(requestCode);
     }
 
     private View.OnClickListener action(final String command) {
