@@ -1,7 +1,6 @@
 package com.jpitsg.sysman;
 
 import android.Manifest;
-import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlarmManager;
 import android.app.NotificationManager;
@@ -17,7 +16,6 @@ import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -28,7 +26,6 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.RippleDrawable;
 import android.location.LocationManager;
 import android.media.projection.MediaProjectionConfig;
 import android.media.projection.MediaProjectionManager;
@@ -41,6 +38,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
@@ -57,9 +55,18 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.animation.AccelerateInterpolator;
+import android.view.animation.DecelerateInterpolator;
+import android.view.inputmethod.InputMethodManager;
+import android.window.BackEvent;
+import android.window.OnBackAnimationCallback;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -77,8 +84,34 @@ import java.net.URI;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+
+import static com.jpitsg.sysman.Ui.COLOR_BAD;
+import static com.jpitsg.sysman.Ui.COLOR_BORDER;
+import static com.jpitsg.sysman.Ui.COLOR_DANGER;
+import static com.jpitsg.sysman.Ui.COLOR_DANGER_CONTAINER;
+import static com.jpitsg.sysman.Ui.COLOR_DANGER_ON_CONTAINER;
+import static com.jpitsg.sysman.Ui.COLOR_FIELD_BG;
+import static com.jpitsg.sysman.Ui.COLOR_FIELD_BORDER;
+import static com.jpitsg.sysman.Ui.COLOR_GROUPED;
+import static com.jpitsg.sysman.Ui.COLOR_LABEL;
+import static com.jpitsg.sysman.Ui.COLOR_NEUTRAL_CONTAINER;
+import static com.jpitsg.sysman.Ui.COLOR_NEUTRAL_ON_CONTAINER;
+import static com.jpitsg.sysman.Ui.COLOR_OK;
+import static com.jpitsg.sysman.Ui.COLOR_ON_ACCENT;
+import static com.jpitsg.sysman.Ui.COLOR_ON_DANGER;
+import static com.jpitsg.sysman.Ui.COLOR_PRIMARY;
+import static com.jpitsg.sysman.Ui.COLOR_PRIMARY_CONTAINER;
+import static com.jpitsg.sysman.Ui.COLOR_PRIMARY_ON_CONTAINER;
+import static com.jpitsg.sysman.Ui.COLOR_RIPPLE_LIGHT;
+import static com.jpitsg.sysman.Ui.COLOR_SURFACE;
+import static com.jpitsg.sysman.Ui.COLOR_TEXT;
+import static com.jpitsg.sysman.Ui.COLOR_TEXT_DIM;
+import static com.jpitsg.sysman.Ui.COLOR_TEXT_FAINT;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_COMMON_PERMISSIONS = 10;
@@ -95,53 +128,39 @@ public final class MainActivity extends Activity {
     /** Set on the intent when a notification is asking for screen-capture consent. */
     static final String EXTRA_REQUEST_PROJECTION = "request_projection";
 
+    /** Saved so a recreate (a theme change, say) lands back on the page the user was on. */
+    private static final String STATE_PAGE = "page";
+    private static final String STATE_HOME_SCROLL = "home_scroll";
+
+    /**
+     * How long the app may sit in the background before coming back to it starts
+     * from the overview again. A shorter excursion — granting a permission in
+     * Android's settings, say — leaves the user on the page they were using.
+     */
+    private static final long RESET_TO_OVERVIEW_AFTER_MS = 30_000L;
+
     /** Single spacing unit used for every margin and every padding in the UI. */
     private static final int GAP = Ui.GAP;
 
     private static final int CARD_CORNER = Ui.CARD_CORNER;
+    private static final int SECTION_CORNER = Ui.SECTION_CORNER;
     private static final int FIELD_CORNER = Ui.FIELD_CORNER;
     private static final int BUTTON_CORNER = Ui.BUTTON_CORNER;
     private static final int GROUP_CORNER = Ui.GROUP_CORNER;
-    private static final int PILL_CORNER = Ui.PILL_CORNER;
     private static final int FIELD_MIN_HEIGHT = Ui.FIELD_MIN_HEIGHT;
     private static final int BUTTON_MIN_HEIGHT = Ui.BUTTON_MIN_HEIGHT;
-    private static final int TOGGLE_ROW_MIN_HEIGHT = 48;
-    private static final int STATUS_ROW_MIN_HEIGHT = 36;
-    private static final int PILL_WIDTH = 118;
-    private static final int PANEL_ANIMATION_MS = 180;
-    private static final int CHEVRON_SIZE = 32;
+    private static final int TOGGLE_ROW_MIN_HEIGHT = 52;
+    private static final int STATUS_ROW_MIN_HEIGHT = 40;
+    private static final int PAGE_TRANSITION_MS = 280;
     private static final int STATUS_DOT_SIZE = 8;
     private static final int LOG_VISIBLE_LINES = 16;
     private static final int NOTIFICATION_HISTORY_PAGE_SIZE = 25;
     private static final long LIVE_SAVE_DELAY_MS = 600L;
     private static final long LIVE_STATUS_TICK_MS = 1000L;
 
-    private static final int COLOR_BG = Ui.COLOR_BG;
-    private static final int COLOR_SURFACE = Ui.COLOR_SURFACE;
-    private static final int COLOR_GROUPED = Ui.COLOR_GROUPED;
-    private static final int COLOR_BORDER = Ui.COLOR_BORDER;
-    private static final int COLOR_PRIMARY = Ui.COLOR_PRIMARY;
-    private static final int COLOR_PRIMARY_CONTAINER = Ui.COLOR_PRIMARY_CONTAINER;
-    private static final int COLOR_PRIMARY_ON_CONTAINER = Ui.COLOR_PRIMARY_ON_CONTAINER;
-    private static final int COLOR_NEUTRAL_CONTAINER = Ui.COLOR_NEUTRAL_CONTAINER;
-    private static final int COLOR_NEUTRAL_ON_CONTAINER = Ui.COLOR_NEUTRAL_ON_CONTAINER;
-    private static final int COLOR_DANGER = Ui.COLOR_DANGER;
-    private static final int COLOR_DANGER_CONTAINER = Ui.COLOR_DANGER_CONTAINER;
-    private static final int COLOR_DANGER_ON_CONTAINER = Ui.COLOR_DANGER_ON_CONTAINER;
-    private static final int COLOR_FIELD_BG = Ui.COLOR_FIELD_BG;
-    private static final int COLOR_FIELD_BORDER = Ui.COLOR_FIELD_BORDER;
-    private static final int COLOR_TEXT = Ui.COLOR_TEXT;
-    private static final int COLOR_TEXT_DIM = Ui.COLOR_TEXT_DIM;
-    private static final int COLOR_TEXT_FAINT = Ui.COLOR_TEXT_FAINT;
-    private static final int COLOR_LABEL = Ui.COLOR_LABEL;
-    private static final int COLOR_OK = Ui.COLOR_OK;
-    private static final int COLOR_BAD = Ui.COLOR_BAD;
-    private static final int COLOR_LOG_BG = 0xFF14201D;
+    /** The log console stays dark in both themes, like a terminal. */
+    private static final int COLOR_LOG_BG = 0xFF0C1412;
     private static final int COLOR_LOG_FG = 0xFFBFE0CB;
-    private static final int COLOR_RIPPLE_DARK = Ui.COLOR_RIPPLE_DARK;
-    private static final int COLOR_RIPPLE_LIGHT = Ui.COLOR_RIPPLE_LIGHT;
-    private static final int COLOR_SWITCH_TRACK_OFF = 0xFFCED4D2;
-    private static final int COLOR_SWITCH_TRACK_ON = 0x991E6F4F;
 
     private LinearLayout statusContainer;
     private TextView statusPill;
@@ -184,7 +203,6 @@ public final class MainActivity extends Activity {
     private volatile boolean pendingNotificationForce;
     private volatile boolean notificationBackupRefreshInFlight;
     private volatile boolean pendingNotificationBackupRefresh;
-    private ScrollView contentScrollView;
     private LinearLayout volumeRuleList;
     private NotificationHistoryStore.Entry pendingImageSaveEntry;
     private TextView logView;
@@ -363,7 +381,24 @@ public final class MainActivity extends Activity {
     private Switch notificationActionButtonsEnabledSwitch;
     private Switch notificationBackupEnabledSwitch;
     private Switch notificationBackupIncludeSysmgrSwitch;
-    private final List<Panel> panels = new ArrayList<>();
+    private FrameLayout rootFrame;
+    private ScrollView homeScroll;
+    private FrameLayout pageLayer;
+    private Dashboard dashboard;
+    private View statusScrim;
+    private final Map<String, Panel> pagesById = new LinkedHashMap<>();
+    private final Map<TextView, Panel> pillOwners = new HashMap<>();
+    private final Map<EditText, TextView> fieldErrors = new HashMap<>();
+    private final java.util.Set<EditText> invalidFields = new java.util.HashSet<>();
+    private Panel currentPage;
+    private long stoppedAtMillis;
+    private int insetLeft;
+    private int insetTop;
+    private int insetRight;
+    private int insetBottom;
+    private int insetIme;
+    private Object backCallback;
+    private int permissionsNeedingAttention;
     private final Handler liveSaveHandler = new Handler(Looper.getMainLooper());
     private final Handler liveStatusHandler = new Handler(Looper.getMainLooper());
     private final List<LiveSaveGroup> liveSaveGroups = new ArrayList<>();
@@ -409,17 +444,34 @@ public final class MainActivity extends Activity {
         }
     };
 
+    /** One feature page: its overview tile, pinned bar and the column its builder fills. */
     private static final class Panel {
-        final View card;
+        final String id;
+        final String title;
+        final int accent;
+        final LinearLayout card;
+        final LinearLayout bar;
+        final View barLine;
+        final FrameLayout host;
+        final ScrollView scroll;
         final LinearLayout content;
-        final TextView pill;
-        final TextView indicator;
+        final StatusPill pill;
+        final FeatureTile tile;
 
-        Panel(View card, LinearLayout content, TextView pill, TextView indicator) {
+        Panel(String id, String title, int accent, LinearLayout card, LinearLayout bar, View barLine,
+              FrameLayout host, ScrollView scroll, LinearLayout content, StatusPill pill,
+              FeatureTile tile) {
+            this.id = id;
+            this.title = title;
+            this.accent = accent;
             this.card = card;
+            this.bar = bar;
+            this.barLine = barLine;
+            this.host = host;
+            this.scroll = scroll;
             this.content = content;
             this.pill = pill;
-            this.indicator = indicator;
+            this.tile = tile;
         }
     }
 
@@ -545,25 +597,60 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // The palette is chosen before anything is inflated: every view reads it as it is built.
+        Ui.applyTheme(this);
+        setTheme(Ui.dark ? R.style.AppTheme_Dark : R.style.AppTheme_Light);
         super.onCreate(savedInstanceState);
         setTitle("System Manager");
-        configureSystemBars();
         ServiceNotifications.deleteLegacyHiddenChannels(this);
         buildUi();
         loadConfigIntoFields();
         wireLiveSettings();
+        restoreNavigation(savedInstanceState);
         LogStore.append(this, "ui", "MainActivity opened");
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putString(STATE_PAGE, currentPage == null ? "" : currentPage.id);
+        outState.putInt(STATE_HOME_SCROLL, homeScroll == null ? 0 : homeScroll.getScrollY());
+    }
+
+    private void restoreNavigation(Bundle state) {
+        if (state == null) {
+            return;
+        }
+        final int scrollY = state.getInt(STATE_HOME_SCROLL, 0);
+        homeScroll.post(new Runnable() {
+            @Override
+            public void run() {
+                homeScroll.scrollTo(0, scrollY);
+            }
+        });
+        String page = state.getString(STATE_PAGE, "");
+        if (!page.isEmpty()) {
+            openPage(page, false);
+        }
     }
 
     @Override
     protected void onStart() {
         super.onStart();
-        // Coming back to the app always starts from the same place: every panel
-        // shut and the page at the top. onStart rather than onResume so a
-        // permission dialog, which only pauses the activity, leaves the screen
-        // as the user left it.
-        collapseAllPanels();
+        // After a long absence the app starts from the overview, as it always has. A short
+        // trip out and back (a permission screen) is not an absence, so the page stays.
+        if (stoppedAtMillis != 0L
+                && SystemClock.elapsedRealtime() - stoppedAtMillis > RESET_TO_OVERVIEW_AFTER_MS) {
+            showHome(false);
+            homeScroll.scrollTo(0, 0);
+        }
         autoUpgradeCheckPending = Config.get(this).autoUpgradeEnabled();
+    }
+
+    @Override
+    protected void onStop() {
+        stoppedAtMillis = SystemClock.elapsedRealtime();
+        super.onStop();
     }
 
     @Override
@@ -639,6 +726,10 @@ public final class MainActivity extends Activity {
         for (LiveSaveGroup group : liveSaveGroups) {
             group.cancel();
         }
+        if (backCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback((OnBackInvokedCallback) backCallback);
+            backCallback = null;
+        }
         super.onDestroy();
     }
 
@@ -646,9 +737,44 @@ public final class MainActivity extends Activity {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         configureSystemBars();
-        View decor = getWindow().getDecorView();
-        decor.requestApplyInsets();
-        decor.requestLayout();
+        rootFrame.requestApplyInsets();
+        rootFrame.requestLayout();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        if (currentPage != null) {
+            showHome(true);
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    /** From Android 13 the back gesture reaches the app only through a registered callback. */
+    private void updateBackCallback() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return;
+        }
+        OnBackInvokedDispatcher dispatcher = getOnBackInvokedDispatcher();
+        if (currentPage != null && backCallback == null) {
+            OnBackInvokedCallback callback;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                callback = new PageBackPreview();
+            } else {
+                callback = new OnBackInvokedCallback() {
+                    @Override
+                    public void onBackInvoked() {
+                        showHome(true);
+                    }
+                };
+            }
+            backCallback = callback;
+            dispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
+        } else if (currentPage == null && backCallback != null) {
+            dispatcher.unregisterOnBackInvokedCallback((OnBackInvokedCallback) backCallback);
+            backCallback = null;
+        }
     }
 
     // ============================================================
@@ -693,37 +819,102 @@ public final class MainActivity extends Activity {
     // ============================================================
 
     private void buildUi() {
-        ScrollView scrollView = new ScrollView(this);
-        contentScrollView = scrollView;
-        scrollView.setBackgroundColor(COLOR_BG);
-        scrollView.setFillViewport(false);
-        scrollView.setClipToPadding(false);
+        rootFrame = new FrameLayout(this);
+        rootFrame.setBackground(Ui.backdrop(this));
 
-        LinearLayout root = newColumn();
-        root.setBackgroundColor(COLOR_BG);
-        applyDynamicInsets(root);
+        dashboard = new Dashboard(this, new Dashboard.Listener() {
+            @Override
+            public void onOpenPage(String id) {
+                openPage(id, true);
+            }
 
-        scrollView.addView(root, new ScrollView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
+            @Override
+            public void onToggleTheme() {
+                setThemeModeAndRecreate(Ui.dark ? Ui.MODE_LIGHT : Ui.MODE_DARK);
+            }
 
-        buildNotificationHistoryPanel(root);
-        buildGpsLoggerPanel(root);
-        buildRemoteLinkPanel(root);
-        buildNotificationBackupPanel(root);
-        buildHighPriorityPanel(root);
-        buildBatteryAlertPanel(root);
-        buildVolumeControlPanel(root);
-        buildOpenVpnPanel(root);
-        buildVncPanel(root);
-        buildBeaconPanel(root);
-        buildRebootPanel(root);
-        buildSettingsTransferPanel(root);
-        buildPermissionsPanel(root);
-        buildUpgradePanel(root);
-        buildLogPanel(root);
+            @Override
+            public void onOpenUpdate() {
+                openPage("upgrade", true);
+            }
+        });
+        dashboard.setIdentity(AppVersion.name(this), Dashboard.deviceName(this));
 
-        setContentView(scrollView);
+        homeScroll = new ScrollView(this);
+        homeScroll.setFillViewport(false);
+        homeScroll.setClipToPadding(false);
+        homeScroll.setVerticalScrollBarEnabled(false);
+        homeScroll.addView(dashboard.view(), new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_HORIZONTAL));
+        rootFrame.addView(homeScroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // A soft veil behind the status bar, so content scrolling under the clock stays legible.
+        statusScrim = new View(this);
+        statusScrim.setAlpha(0f);
+        statusScrim.setBackground(new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{Ui.alpha(Ui.COLOR_BG, 0.96f), Ui.alpha(Ui.COLOR_BG, 0.88f), Ui.alpha(Ui.COLOR_BG, 0f)}));
+        rootFrame.addView(statusScrim, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        homeScroll.setOnScrollChangeListener(new View.OnScrollChangeListener() {
+            @Override
+            public void onScrollChange(View v, int scrollX, int scrollY, int oldX, int oldY) {
+                statusScrim.setAlpha(Math.min(1f, scrollY / (float) dp(40)));
+            }
+        });
+
+        pageLayer = new FrameLayout(this);
+        pageLayer.setVisibility(View.GONE);
+        rootFrame.addView(pageLayer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        rootFrame.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View view, WindowInsets insets) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    android.graphics.Insets bars = insets.getInsets(
+                            WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                    insetLeft = bars.left;
+                    insetTop = bars.top;
+                    insetRight = bars.right;
+                    insetBottom = bars.bottom;
+                    insetIme = insets.getInsets(WindowInsets.Type.ime()).bottom;
+                } else {
+                    insetLeft = insets.getSystemWindowInsetLeft();
+                    insetTop = insets.getSystemWindowInsetTop();
+                    insetRight = insets.getSystemWindowInsetRight();
+                    // Before Android 11 the keyboard is folded into the system window inset;
+                    // the stable inset is what the bars alone take.
+                    insetBottom = insets.getStableInsetBottom();
+                    insetIme = Math.max(0, insets.getSystemWindowInsetBottom() - insets.getStableInsetBottom());
+                }
+                applyInsets();
+                return insets;
+            }
+        });
+
+        // Order is the order of the tiles on the overview, grouped by purpose.
+        buildRemoteLinkPanel();
+        buildOpenVpnPanel();
+        buildVncPanel();
+        buildBeaconPanel();
+        buildGpsLoggerPanel();
+        buildNotificationHistoryPanel();
+        buildNotificationBackupPanel();
+        buildHighPriorityPanel();
+        buildBatteryAlertPanel();
+        buildVolumeControlPanel();
+        buildRebootPanel();
+        buildPermissionsPanel();
+        buildSettingsTransferPanel();
+        buildUpgradePanel();
+        buildLogPanel();
+        buildAppearancePanel();
+
+        setContentView(rootFrame);
+        configureSystemBars();
         BatteryAlertManager.sync(this, "activity-open");
         RemoteLinkManager.sync(this, "activity-open");
         VolumeControlManager.sync(this, "activity-open");
@@ -731,35 +922,394 @@ public final class MainActivity extends Activity {
         BeaconManager.sync(this, "activity-open");
     }
 
+    // ============================================================
+    //  Pages & navigation
+    // ============================================================
+
+    /**
+     * Creates a feature page and its tile on the overview. The page is built now
+     * but only attached to the window while it is open; its fields are ordinary
+     * views, so settings load into them whether or not it is showing.
+     */
+    private Panel addPage(String id, String group, String title, String description,
+                          int iconRes, int accent, boolean inDial) {
+        FeatureTile tile = dashboard.addTile(id, group, title, iconRes, accent, inDial);
+
+        LinearLayout card = newColumn();
+        card.setBackground(Ui.backdrop(this));
+        // Keeps touches on the page from reaching the overview underneath it.
+        card.setClickable(true);
+
+        LinearLayout bar = newRow();
+        card.addView(bar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        FrameLayout back = new FrameLayout(this);
+        back.setBackground(Ui.ripple(COLOR_RIPPLE_LIGHT,
+                roundedFill(COLOR_SURFACE, 22, 1, COLOR_BORDER), dp(22)));
+        Ui.elevate(back, 1f);
+        back.setClickable(true);
+        back.setFocusable(true);
+        back.setContentDescription("Back");
+        back.addView(Ui.icon(this, R.drawable.ic_arrow_back, 22, COLOR_TEXT),
+                new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER));
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                showHome(true);
+            }
+        });
+        bar.addView(back, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
+        TextView titleView = Ui.text(this, title, 20, COLOR_TEXT, true);
+        titleView.setTypeface(Ui.FONT_BOLD);
+        titleView.setSingleLine(true);
+        titleView.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        titleLp.leftMargin = dp(14);
+        bar.addView(titleView, titleLp);
+
+        StatusPill pill = new StatusPill(this, true);
+        LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        pillLp.leftMargin = dp(10);
+        bar.addView(pill, pillLp);
+
+        View barLine = new View(this);
+        barLine.setBackgroundColor(COLOR_BORDER);
+        barLine.setAlpha(0f);
+        card.addView(barLine, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
+        FrameLayout host = new FrameLayout(this);
+        card.addView(host, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(false);
+        scroll.setClipToPadding(false);
+        host.addView(scroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        ContentColumn content = new ContentColumn(this);
+        content.setClipChildren(false);
+        content.setClipToPadding(false);
+        scroll.addView(content, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_HORIZONTAL));
+
+        if (description != null && !description.isEmpty()) {
+            TextView intro = Ui.text(this, description, 13.5f, COLOR_TEXT_DIM, false);
+            intro.setLineSpacing(0, 1.25f);
+            intro.setPadding(dp(4), dp(4), dp(4), 0);
+            content.addView(intro, matchWrapParams());
+        }
+
+        final View line = barLine;
+        scroll.setOnScrollChangeListener(new View.OnScrollChangeListener() {
+            @Override
+            public void onScrollChange(View v, int scrollX, int scrollY, int oldX, int oldY) {
+                line.setAlpha(Math.min(1f, scrollY / (float) dp(16)));
+            }
+        });
+
+        Panel panel = new Panel(id, title, accent, card, bar, barLine, host, scroll, content, pill, tile);
+        pagesById.put(id, panel);
+        pillOwners.put(pill, panel);
+        applyInsets(panel);
+        return panel;
+    }
+
+    private void applyInsets() {
+        if (dashboard != null) {
+            dashboard.setInsets(insetLeft, insetTop, insetRight, insetBottom);
+        }
+        if (statusScrim != null) {
+            statusScrim.getLayoutParams().height = insetTop + dp(20);
+            statusScrim.requestLayout();
+        }
+        for (Panel panel : pagesById.values()) {
+            applyInsets(panel);
+        }
+    }
+
+    private void applyInsets(Panel panel) {
+        panel.bar.setPadding(insetLeft + dp(10), insetTop + dp(10), insetRight + dp(Ui.PAGE_PADDING), dp(8));
+        // With the keyboard up the scroll view itself shrinks, so Android scrolls the focused field into view.
+        panel.host.setPadding(0, 0, 0, insetIme);
+        panel.content.setPadding(insetLeft + dp(Ui.PAGE_PADDING), dp(6),
+                insetRight + dp(Ui.PAGE_PADDING), dp(32) + (insetIme > 0 ? 0 : insetBottom));
+    }
+
+    private void openPage(String id, boolean animate) {
+        final Panel panel = pagesById.get(id);
+        if (panel == null || panel == currentPage) {
+            return;
+        }
+        settleNavigation();
+        hideKeyboard();
+        if (currentPage != null) {
+            pageLayer.removeView(currentPage.card);
+        }
+        currentPage = panel;
+        ViewGroup parent = (ViewGroup) panel.card.getParent();
+        if (parent != null) {
+            parent.removeView(panel.card);
+        }
+        pageLayer.addView(panel.card, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        panel.scroll.scrollTo(0, 0);
+        updateBackCallback();
+        onPageOpened(panel);
+        if (!animate) {
+            settleNavigation();
+            return;
+        }
+        pageLayer.setAlpha(0f);
+        pageLayer.setTranslationX(dp(40));
+        pageLayer.setVisibility(View.VISIBLE);
+        pageLayer.animate().alpha(1f).translationX(0f)
+                .setDuration(PAGE_TRANSITION_MS)
+                .setInterpolator(new DecelerateInterpolator(2.2f))
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (currentPage == panel) {
+                            settleNavigation();
+                        }
+                    }
+                }).start();
+        homeScroll.animate().alpha(0.3f).translationX(-dp(28))
+                .setDuration(PAGE_TRANSITION_MS)
+                .setInterpolator(new DecelerateInterpolator(2.2f)).start();
+    }
+
+    private void showHome(boolean animate) {
+        showHome(animate, false);
+    }
+
+    /**
+     * Closes the open page. After a back-gesture preview the layers are already part-way,
+     * so the closing animation carries on from where the finger left them.
+     */
+    private void showHome(boolean animate, boolean fromPreview) {
+        if (currentPage == null) {
+            return;
+        }
+        if (!fromPreview) {
+            settleNavigation();
+        }
+        hideKeyboard();
+        flushPendingLiveSaves();
+        currentPage = null;
+        updateBackCallback();
+        homeScroll.setVisibility(View.VISIBLE);
+        if (!animate) {
+            settleNavigation();
+            return;
+        }
+        if (!fromPreview) {
+            homeScroll.setAlpha(0.3f);
+            homeScroll.setTranslationX(-dp(28));
+        }
+        homeScroll.animate().alpha(1f).translationX(0f)
+                .setDuration(PAGE_TRANSITION_MS)
+                .setInterpolator(new DecelerateInterpolator(2.2f)).start();
+        pageLayer.animate().alpha(0f).translationX(dp(40)).scaleX(1f).scaleY(1f)
+                .setDuration(PAGE_TRANSITION_MS - 60)
+                .setInterpolator(new AccelerateInterpolator(1.4f))
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (currentPage == null) {
+                            settleNavigation();
+                        }
+                    }
+                }).start();
+    }
+
+    /**
+     * Back-gesture preview (Android 14+): the page follows the finger and shrinks slightly,
+     * the overview rises into place beneath it, and releasing either completes the close or,
+     * if the gesture is abandoned, puts everything back.
+     */
+    private final class PageBackPreview implements OnBackAnimationCallback {
+        @Override
+        public void onBackStarted(BackEvent event) {
+            if (currentPage == null) {
+                return;
+            }
+            settleNavigation();
+            homeScroll.setVisibility(View.VISIBLE);
+            homeScroll.setAlpha(0.3f);
+            homeScroll.setTranslationX(-dp(28));
+            pageLayer.setPivotX(pageLayer.getWidth() / 2f);
+            pageLayer.setPivotY(pageLayer.getHeight() / 2f);
+        }
+
+        @Override
+        public void onBackProgressed(BackEvent event) {
+            if (currentPage == null) {
+                return;
+            }
+            float progress = event.getProgress();
+            float direction = event.getSwipeEdge() == BackEvent.EDGE_RIGHT ? -1f : 1f;
+            pageLayer.setTranslationX(direction * dp(48) * progress);
+            pageLayer.setScaleX(1f - 0.06f * progress);
+            pageLayer.setScaleY(1f - 0.06f * progress);
+            pageLayer.setAlpha(1f - 0.2f * progress);
+            homeScroll.setAlpha(0.3f + 0.7f * progress);
+            homeScroll.setTranslationX(-dp(28) * (1f - progress));
+        }
+
+        @Override
+        public void onBackInvoked() {
+            showHome(true, true);
+        }
+
+        @Override
+        public void onBackCancelled() {
+            if (currentPage == null) {
+                return;
+            }
+            homeScroll.animate().alpha(0.3f).translationX(-dp(28)).setDuration(160).start();
+            pageLayer.animate().alpha(1f).translationX(0f).scaleX(1f).scaleY(1f)
+                    .setDuration(180)
+                    .withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (currentPage != null) {
+                                settleNavigation();
+                            }
+                        }
+                    }).start();
+        }
+    }
+
+    /** Ends any running page transition and puts every layer in its final state. */
+    private void settleNavigation() {
+        homeScroll.animate().cancel();
+        pageLayer.animate().cancel();
+        homeScroll.setAlpha(1f);
+        homeScroll.setTranslationX(0f);
+        pageLayer.setAlpha(1f);
+        pageLayer.setTranslationX(0f);
+        pageLayer.setScaleX(1f);
+        pageLayer.setScaleY(1f);
+        if (currentPage != null) {
+            homeScroll.setVisibility(View.INVISIBLE);
+            pageLayer.setVisibility(View.VISIBLE);
+        } else {
+            homeScroll.setVisibility(View.VISIBLE);
+            pageLayer.removeAllViews();
+            pageLayer.setVisibility(View.GONE);
+        }
+    }
+
+    private void onPageOpened(Panel panel) {
+        if (panel == openVpnPanel) {
+            resolveVpnEngineVersion();
+        }
+    }
+
+    private void hideKeyboard() {
+        View focus = getCurrentFocus();
+        if (focus == null) {
+            return;
+        }
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) {
+            imm.hideSoftInputFromWindow(focus.getWindowToken(), 0);
+        }
+        focus.clearFocus();
+    }
+
+    private void setThemeModeAndRecreate(int mode) {
+        if (Ui.themeMode(this) == mode) {
+            return;
+        }
+        flushPendingLiveSaves();
+        Ui.setThemeMode(this, mode);
+        recreate();
+    }
+
+    // ============================================================
+    //  System bars & insets
+    // ============================================================
+
+    /** The window draws under both system bars; the content pads itself with the insets. */
+    private void configureSystemBars() {
+        Window window = getWindow();
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.setNavigationBarContrastEnforced(false);
+            window.setStatusBarContrastEnforced(false);
+        }
+        boolean lightBars = !Ui.dark;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                controller.setSystemBarsAppearance(lightBars ? mask : 0, mask);
+            }
+        } else {
+            int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+            if (lightBars) {
+                flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                }
+            }
+            window.getDecorView().setSystemUiVisibility(flags);
+        }
+    }
+
     private void buildGpsLoggerControls(LinearLayout panel) {
+        LinearLayout controls = section(panel, "Tracking");
         LinearLayout row1 = newRow();
-        panel.addView(row1, stack(panel));
-        startTrackingButton = primaryButton("Start Tracking", action("start"));
-        stopTrackingButton = neutralButton("Stop Tracking", action("stop"));
+        controls.addView(row1, stack(controls));
+        startTrackingButton = primaryButton("Start Tracking", R.drawable.ic_play, action("start"));
+        stopTrackingButton = neutralButton("Stop Tracking", R.drawable.ic_stop, action("stop"));
         addRowButton(row1, startTrackingButton);
         addRowButton(row1, stopTrackingButton);
 
         LinearLayout row2 = newRow();
-        panel.addView(row2, stack(panel));
-        addRowButton(row2, tonalButton("Send Now", action("send")));
+        controls.addView(row2, stack(controls));
+        addRowButton(row2, tonalButton("Send Now", R.drawable.ic_send, action("send")));
     }
 
     // ============================================================
     //  Feature panels
     // ============================================================
 
-    private void buildNotificationHistoryPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Notification History", true);
+    private void buildNotificationHistoryPanel() {
+        Panel frame = addPage("history", "Tracking & history", "Notification History",
+                "Every notification this phone has received, kept on the device with its images.",
+                R.drawable.ic_inbox, Ui.ACCENT_BLUE, false);
         notificationHistoryPill = frame.pill;
 
+        LinearLayout buttons = newRow();
+        LinearLayout.LayoutParams buttonsLp = matchWrapParams();
+        buttonsLp.topMargin = dp(16);
+        frame.content.addView(buttons, buttonsLp);
+        addRowButton(buttons, tonalButton("Refresh", R.drawable.ic_refresh, action("refresh_notification_history")));
+        addRowButton(buttons, neutralButton("Clear", R.drawable.ic_trash, action("clear_notification_history")));
+
         notificationHistoryList = newColumn();
-        notificationHistoryList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        notificationHistoryList.setClipToOutline(true);
-        frame.content.addView(notificationHistoryList, stack(frame.content));
+        notificationHistoryList.setClipChildren(false);
+        LinearLayout.LayoutParams listLp = matchWrapParams();
+        listLp.topMargin = dp(16);
+        frame.content.addView(notificationHistoryList, listLp);
 
         notificationHistoryPageRow = newRow();
-        frame.content.addView(notificationHistoryPageRow, stack(frame.content));
-        notificationHistoryPrevButton = neutralButton("Prev", action("notification_history_prev"));
+        LinearLayout.LayoutParams pageRowLp = matchWrapParams();
+        pageRowLp.topMargin = dp(16);
+        frame.content.addView(notificationHistoryPageRow, pageRowLp);
+        notificationHistoryPrevButton = neutralButton("Prev", R.drawable.ic_arrow_back, action("notification_history_prev"));
         notificationHistoryPageRow.addView(notificationHistoryPrevButton,
                 inRow(notificationHistoryPageRow, 0, dp(BUTTON_MIN_HEIGHT), 1f));
         notificationHistoryPageLabel = new TextView(this);
@@ -770,33 +1320,30 @@ public final class MainActivity extends Activity {
         notificationHistoryPageLabel.setLineSpacing(0, 1.1f);
         notificationHistoryPageRow.addView(notificationHistoryPageLabel,
                 inRow(notificationHistoryPageRow, 0, dp(BUTTON_MIN_HEIGHT), 1.6f));
-        notificationHistoryNextButton = neutralButton("Next", action("notification_history_next"));
+        notificationHistoryNextButton = neutralButton("Next", R.drawable.ic_chevron_right, action("notification_history_next"));
         notificationHistoryPageRow.addView(notificationHistoryNextButton,
                 inRow(notificationHistoryPageRow, 0, dp(BUTTON_MIN_HEIGHT), 1f));
 
-        LinearLayout optionsGroup = addToggleGroup(frame.content);
+        LinearLayout options = section(frame.content, "Options");
+        LinearLayout optionsGroup = addToggleGroup(options);
         clearNotificationsOnOpenSwitch = addGroupedToggle(optionsGroup, "Clear Android notifications on app open");
         notificationActionButtonsEnabledSwitch = addGroupedToggle(
                 optionsGroup, "Show Delete and Clear buttons on notifications");
-
-        LinearLayout buttons = newRow();
-        frame.content.addView(buttons, stack(frame.content));
-        addRowButton(buttons, tonalButton("Refresh", action("refresh_notification_history")));
-        addRowButton(buttons, neutralButton("Clear", action("clear_notification_history")));
     }
 
-    private void buildNotificationBackupPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Notification Backup", true);
+    private void buildNotificationBackupPanel() {
+        Panel frame = addPage("notification_backup", "Tracking & history", "Notification Backup",
+                "Mirror every notification to your server so none are lost.",
+                R.drawable.ic_upload_cloud, Ui.ACCENT_CYAN, true);
         notificationBackupPill = frame.pill;
 
-        LinearLayout backupGroup = addToggleGroup(frame.content);
-        notificationBackupEnabledSwitch = addGroupedToggle(backupGroup, "Send to server");
-        notificationBackupIncludeSysmgrSwitch = addGroupedToggle(backupGroup, "Include own notifications");
+        notificationBackupEnabledSwitch = addMasterToggle(frame, R.drawable.ic_upload_cloud,
+                "Send to server", "Queued on the phone and delivered over the Remote Link");
 
         LinearLayout statusCard = newRow();
         statusCard.setGravity(Gravity.CENTER_VERTICAL);
-        statusCard.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        statusCard.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        statusCard.setBackground(roundedFill(COLOR_SURFACE, SECTION_CORNER, 1, COLOR_BORDER));
+        statusCard.setPadding(dp(16), dp(14), dp(16), dp(14));
         statusCard.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT));
         statusCard.setVisibility(View.GONE);
         notificationBackupStatusCard = statusCard;
@@ -806,85 +1353,84 @@ public final class MainActivity extends Activity {
         statusCard.addView(notificationBackupDot, inRow(statusCard, dp(STATUS_DOT_SIZE), dp(STATUS_DOT_SIZE), 0f));
 
         notificationBackupStatus = new TextView(this);
-        notificationBackupStatus.setTextSize(13);
+        notificationBackupStatus.setTextSize(13.5f);
         notificationBackupStatus.setTextColor(COLOR_TEXT);
         notificationBackupStatus.setIncludeFontPadding(false);
-        notificationBackupStatus.setLineSpacing(0, 1.1f);
+        notificationBackupStatus.setLineSpacing(0, 1.15f);
         notificationBackupStatus.setPadding(dp(GAP), 0, dp(GAP), 0);
         statusCard.addView(notificationBackupStatus, inRow(statusCard, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        notificationBackupCountPill = new TextView(this);
-        notificationBackupCountPill.setTextSize(11);
-        notificationBackupCountPill.setTypeface(Typeface.DEFAULT_BOLD);
-        notificationBackupCountPill.setLetterSpacing(0.06f);
-        notificationBackupCountPill.setIncludeFontPadding(false);
-        Ui.marqueeLabel(notificationBackupCountPill);
-        notificationBackupCountPill.setPadding(dp(GAP), dp(4), dp(GAP), dp(4));
+        notificationBackupCountPill = new StatusPill(this, false);
         notificationBackupCountPill.setVisibility(View.GONE);
         statusCard.addView(notificationBackupCountPill, inRow(statusCard,
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
 
-        frame.content.addView(statusCard, stack(frame.content));
+        LinearLayout.LayoutParams statusLp = matchWrapParams();
+        statusLp.topMargin = dp(14);
+        frame.content.addView(statusCard, statusLp);
 
-        addSubsectionLabel(frame.content, "Statistics");
-        LinearLayout statsCard = newColumn();
-        statsCard.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
-        statsCard.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        frame.content.addView(statsCard, stack(frame.content));
+        LinearLayout options = section(frame.content, "Options");
+        LinearLayout backupGroup = addToggleGroup(options);
+        notificationBackupIncludeSysmgrSwitch = addGroupedToggle(backupGroup, "Include own notifications",
+                "Also back up System Manager's own notifications");
+
+        LinearLayout statsCard = section(frame.content, "Statistics");
         notificationBackupLastSentValue = addInfoRow(
                 statsCard, "Last notification sent", "Never", COLOR_TEXT_DIM);
         notificationBackupSentCountValue = addInfoRow(
                 statsCard, "Notifications sent", "0", COLOR_TEXT_DIM);
     }
 
-    private void buildGpsLoggerPanel(LinearLayout root) {
-        Panel panel = addExpandablePanel(root, "GPS Logger Settings", true);
+    private void buildGpsLoggerPanel() {
+        Panel panel = addPage("gps", "Tracking & history", "GPS Logger",
+                "Reports this phone's location to your server on a schedule.",
+                R.drawable.ic_gps, Ui.ACCENT_EMERALD, true);
         statusPill = panel.pill;
+        buildGpsLoggerControls(panel.content);
         buildEndpointSubsection(panel.content);
         buildWifiSubsection(panel.content);
         buildLocationSubsection(panel.content);
         buildSchedulingSubsection(panel.content);
-        buildGpsLoggerControls(panel.content);
     }
 
     private void buildEndpointSubsection(LinearLayout panel) {
-        addSubsectionLabel(panel, "Server");
-        serverBaseUrlField = addField(panel, "Server base URL", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        trackPathField = addField(panel, "Track path", InputType.TYPE_CLASS_TEXT);
-        httpTimeoutField = addField(panel, "HTTP timeout (seconds)", InputType.TYPE_CLASS_NUMBER);
-        LinearLayout group = addToggleGroup(panel);
+        LinearLayout section = section(panel, "Server");
+        serverBaseUrlField = addField(section, "Server base URL", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        trackPathField = addField(section, "Track path", InputType.TYPE_CLASS_TEXT);
+        httpTimeoutField = addField(section, "HTTP timeout (seconds)", InputType.TYPE_CLASS_NUMBER);
+        LinearLayout group = addToggleGroup(section);
         gpsUseRemoteLinkSwitch = addGroupedToggle(group, "Send GPS over Remote Link");
         includeExtendedFieldsSwitch = addGroupedToggle(group, "Include extended fields");
     }
 
     private void buildWifiSubsection(LinearLayout panel) {
-        addSubsectionLabel(panel, "Wi-Fi Matching");
-        ssidPatternField = addField(panel, "SSID pattern", InputType.TYPE_CLASS_TEXT);
-        LinearLayout group = addToggleGroup(panel);
+        LinearLayout section = section(panel, "Wi-Fi matching");
+        ssidPatternField = addField(section, "SSID pattern", InputType.TYPE_CLASS_TEXT);
+        LinearLayout group = addToggleGroup(section);
         caseSensitiveSsidSwitch = addGroupedToggle(group, "Case-sensitive SSID match");
         requestGpsOnSsidMismatchSwitch = addGroupedToggle(group, "Request GPS when SSID differs");
         useFallbackOnSsidMatchSwitch = addGroupedToggle(group, "Use fallback when SSID matches");
     }
 
     private void buildLocationSubsection(LinearLayout panel) {
-        addSubsectionLabel(panel, "Location");
-        highBatteryIntervalField = addField(panel, "Interval when battery ≥ threshold (minutes)", InputType.TYPE_CLASS_NUMBER);
-        lowBatteryIntervalField = addField(panel, "Interval when battery < threshold (minutes)", InputType.TYPE_CLASS_NUMBER);
-        batteryThresholdField = addField(panel, "Battery threshold (%)", InputType.TYPE_CLASS_NUMBER);
-        locationTimeoutField = addField(panel, "Location timeout (seconds)", InputType.TYPE_CLASS_NUMBER);
-        desiredAccuracyField = addField(panel, "Desired accuracy (meters)", InputType.TYPE_CLASS_NUMBER);
-        maxCachedLocationField = addField(panel, "Max cached location (minutes)", InputType.TYPE_CLASS_NUMBER);
-        fallbackLatitudeField = addField(panel, "Fallback latitude", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-        fallbackLongitudeField = addField(panel, "Fallback longitude", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-        LinearLayout group = addToggleGroup(panel);
+        LinearLayout section = section(panel, "Location");
+        highBatteryIntervalField = addField(section, "Interval when battery ≥ threshold (minutes)", InputType.TYPE_CLASS_NUMBER);
+        lowBatteryIntervalField = addField(section, "Interval when battery < threshold (minutes)", InputType.TYPE_CLASS_NUMBER);
+        batteryThresholdField = addField(section, "Battery threshold (%)", InputType.TYPE_CLASS_NUMBER);
+        locationTimeoutField = addField(section, "Location timeout (seconds)", InputType.TYPE_CLASS_NUMBER);
+        desiredAccuracyField = addField(section, "Desired accuracy (meters)", InputType.TYPE_CLASS_NUMBER);
+        maxCachedLocationField = addField(section, "Max cached location (minutes)", InputType.TYPE_CLASS_NUMBER);
+        fallbackLatitudeField = addField(section, "Fallback latitude", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        fallbackLongitudeField = addField(section, "Fallback longitude", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        LinearLayout group = addToggleGroup(section);
         useGpsProviderSwitch = addGroupedToggle(group, "Use GPS provider");
         useNetworkProviderSwitch = addGroupedToggle(group, "Use network provider");
         useCachedBeforeFreshSwitch = addGroupedToggle(group, "Prefer accurate cached location");
     }
 
     private void buildSchedulingSubsection(LinearLayout panel) {
-        addSubsectionLabel(panel, "Schedule");
-        LinearLayout group = addToggleGroup(panel);
+        LinearLayout section = section(panel, "Schedule");
+        LinearLayout group = addToggleGroup(section);
         useExactAlarmsSwitch = addGroupedToggle(group, "Use exact GPS, volume, and reboot alarms");
         allowIdleAlarmsSwitch = addGroupedToggle(group, "Allow GPS, volume, and reboot alarms while idle");
         postOnStartupSwitch = addGroupedToggle(group, "Send once after boot");
@@ -892,196 +1438,188 @@ public final class MainActivity extends Activity {
         // The Wi-Fi monitor's own notification toggle lives under Permissions.
     }
 
-    private void buildHighPriorityPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "High Priority Alerts", true);
+    private void buildHighPriorityPanel() {
+        Panel frame = addPage("alerts", "Alerts & automation", "High Priority Alerts",
+                "Sound a loud alarm for notifications that match your rules, even in silent mode.",
+                R.drawable.ic_bell_ring, Ui.ACCENT_ROSE, true);
         highPriorityPill = frame.pill;
 
-        addSubsectionLabel(frame.content, "Package Based Alerts");
-        LinearLayout packageGroup = addToggleGroup(frame.content);
+        LinearLayout app = section(frame.content, "Package based alerts");
+        LinearLayout packageGroup = addToggleGroup(app);
         highPriorityEnabledSwitch = addGroupedToggle(packageGroup, "Enable package-based alerts");
-        highPriorityPackageField = addField(frame.content, "Notification app", InputType.TYPE_CLASS_TEXT);
+        highPriorityPackageField = addField(app, "Notification app", InputType.TYPE_CLASS_TEXT);
         configureAppPickerField(highPriorityPackageField);
-        highPriorityTitleFilterField = addField(frame.content, "Title contains", InputType.TYPE_CLASS_TEXT);
-        highPriorityTitleExcludeField = addField(frame.content, "Title does not contain", InputType.TYPE_CLASS_TEXT);
-        highPriorityTextFilterField = addField(frame.content, "Message contains", InputType.TYPE_CLASS_TEXT);
-        highPriorityTextExcludeField = addField(frame.content, "Message does not contain", InputType.TYPE_CLASS_TEXT);
-        highPriorityDedupeSecondsField = addField(frame.content, "Duplicate window (seconds)", InputType.TYPE_CLASS_NUMBER);
+        highPriorityTitleFilterField = addField(app, "Title contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityTitleExcludeField = addField(app, "Title does not contain", InputType.TYPE_CLASS_TEXT);
+        highPriorityTextFilterField = addField(app, "Message contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityTextExcludeField = addField(app, "Message does not contain", InputType.TYPE_CLASS_TEXT);
+        highPriorityDedupeSecondsField = addField(app, "Duplicate window (seconds)", InputType.TYPE_CLASS_NUMBER);
 
-        addSubsectionLabel(frame.content, "Remote Link Alerts");
-        LinearLayout socketGroup = addToggleGroup(frame.content);
+        LinearLayout remote = section(frame.content, "Remote Link alerts");
+        LinearLayout socketGroup = addToggleGroup(remote);
         highPriorityRemoteEnabledSwitch = addGroupedToggle(socketGroup, "Enable Remote Link alerts");
-        highPriorityRemoteTitleFilterField = addField(frame.content, "Title contains", InputType.TYPE_CLASS_TEXT);
-        highPriorityRemoteTitleExcludeField = addField(frame.content, "Title does not contain", InputType.TYPE_CLASS_TEXT);
-        highPriorityRemoteTextFilterField = addField(frame.content, "Message contains", InputType.TYPE_CLASS_TEXT);
-        highPriorityRemoteTextExcludeField = addField(frame.content, "Message does not contain", InputType.TYPE_CLASS_TEXT);
-        highPriorityRemoteDedupeSecondsField = addField(frame.content, "Duplicate window (seconds)", InputType.TYPE_CLASS_NUMBER);
+        highPriorityRemoteTitleFilterField = addField(remote, "Title contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityRemoteTitleExcludeField = addField(remote, "Title does not contain", InputType.TYPE_CLASS_TEXT);
+        highPriorityRemoteTextFilterField = addField(remote, "Message contains", InputType.TYPE_CLASS_TEXT);
+        highPriorityRemoteTextExcludeField = addField(remote, "Message does not contain", InputType.TYPE_CLASS_TEXT);
+        highPriorityRemoteDedupeSecondsField = addField(remote, "Duplicate window (seconds)", InputType.TYPE_CLASS_NUMBER);
 
-        addSubsectionLabel(frame.content, "Tone & Volume");
-        highPriorityToneTitleField = addField(frame.content, "Alarm tone", InputType.TYPE_CLASS_TEXT);
+        LinearLayout tone = section(frame.content, "Tone & volume");
+        highPriorityToneTitleField = addField(tone, "Alarm tone", InputType.TYPE_CLASS_TEXT);
         configureTonePickerField(highPriorityToneTitleField);
-        highPriorityPlaySecondsField = addField(frame.content, "Play duration (seconds)", InputType.TYPE_CLASS_NUMBER);
-        highPriorityAlarmVolumePercentField = addField(frame.content, "Alarm volume (%)", InputType.TYPE_CLASS_NUMBER);
-        LinearLayout volumeGroup = addToggleGroup(frame.content);
+        highPriorityPlaySecondsField = addField(tone, "Play duration (seconds)", InputType.TYPE_CLASS_NUMBER);
+        highPriorityAlarmVolumePercentField = addField(tone, "Alarm volume (%)", InputType.TYPE_CLASS_NUMBER);
+        LinearLayout volumeGroup = addToggleGroup(tone);
         highPriorityRaiseAlarmVolumeSwitch = addGroupedToggle(volumeGroup, "Temporarily raise alarm volume");
 
-        LinearLayout row = newRow();
-        frame.content.addView(row, stack(frame.content));
-        addRowButton(row, tonalButton("Test Alert", action("test_high_priority_alert")));
-        addRowButton(row, tonalButton("Notification Access", action("notification_access")));
-
+        addStackedButton(tone, tonalButton("Test Alert", R.drawable.ic_bell_ring, action("test_high_priority_alert")));
+        addStackedButton(tone, neutralButton("Notification Access", R.drawable.ic_key, action("notification_access")));
     }
 
-    private void buildBatteryAlertPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Battery Alerts", true);
+    private void buildBatteryAlertPanel() {
+        Panel frame = addPage("battery", "Alerts & automation", "Battery Alerts",
+                "Get warned when the battery runs low.",
+                R.drawable.ic_battery, Ui.ACCENT_AMBER, true);
         batteryAlertPill = frame.pill;
 
-        LinearLayout enableGroup = addToggleGroup(frame.content);
-        batteryAlertEnabledSwitch = addGroupedToggle(enableGroup, "Enable battery alerts");
+        batteryAlertEnabledSwitch = addMasterToggle(frame, R.drawable.ic_battery,
+                "Enable battery alerts", "Notify when the charge drops below your threshold");
 
-        addSubsectionLabel(frame.content, "Alert Settings");
-        batteryAlertThresholdField = addField(frame.content, "Alert threshold (%)", InputType.TYPE_CLASS_NUMBER);
-        batteryAlertCheckIntervalField = addField(frame.content, "Check interval (minutes)", InputType.TYPE_CLASS_NUMBER);
-        batteryAlertVibrateSecondsField = addField(frame.content, "Vibration duration (seconds)", InputType.TYPE_CLASS_NUMBER);
+        LinearLayout alert = section(frame.content, "Alert settings");
+        batteryAlertThresholdField = addField(alert, "Alert threshold (%)", InputType.TYPE_CLASS_NUMBER);
+        batteryAlertCheckIntervalField = addField(alert, "Check interval (minutes)", InputType.TYPE_CLASS_NUMBER);
+        batteryAlertVibrateSecondsField = addField(alert, "Vibration duration (seconds)", InputType.TYPE_CLASS_NUMBER);
 
-        addSubsectionLabel(frame.content, "Schedule");
-        LinearLayout scheduleGroup = addToggleGroup(frame.content);
+        LinearLayout schedule = section(frame.content, "Schedule");
+        LinearLayout scheduleGroup = addToggleGroup(schedule);
         batteryAlertUseExactAlarmsSwitch = addGroupedToggle(scheduleGroup, "Use exact battery alert alarms");
         batteryAlertAllowIdleAlarmsSwitch = addGroupedToggle(scheduleGroup, "Allow battery alert alarms while idle");
 
-        LinearLayout row = newRow();
-        frame.content.addView(row, stack(frame.content));
-        addRowButton(row, tonalButton("Test Battery Alert", action("test_battery_alert")));
-        addRowButton(row, tonalButton("Notification Permission", action("notifications")));
-
+        addStackedButton(schedule, tonalButton("Test Battery Alert", R.drawable.ic_battery, action("test_battery_alert")));
+        addStackedButton(schedule, neutralButton("Notification Permission", R.drawable.ic_bell, action("notifications")));
     }
 
-    private void buildVolumeControlPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Volume Control", true);
+    private void buildVolumeControlPanel() {
+        Panel frame = addPage("volume", "Alerts & automation", "Volume Control",
+                "Change volumes and Do Not Disturb at chosen times of day.",
+                R.drawable.ic_volume, Ui.ACCENT_VIOLET, true);
         volumeControlPill = frame.pill;
 
-        addSubsectionLabel(frame.content, "Add Rule");
-        volumeRuleTimeButton = addPickerButton(frame.content, "Time", "Select Time", new View.OnClickListener() {
+        LinearLayout add = section(frame.content, "Add rule");
+        volumeRuleTimeButton = addPickerButton(add, "Time", "Select Time", new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 showVolumeRuleTimePicker();
             }
         });
-        volumeRuleMediaInput = addVolumeInput(frame.content, "Media");
-        volumeRuleRingInput = addVolumeInput(frame.content, "Ring");
-        volumeRuleNotificationInput = addVolumeInput(frame.content, "Notification");
-        volumeRuleAlarmInput = addVolumeInput(frame.content, "Alarm");
-        addDndModeInput(frame.content);
+        volumeRuleMediaInput = addVolumeInput(add, "Media");
+        volumeRuleRingInput = addVolumeInput(add, "Ring");
+        volumeRuleNotificationInput = addVolumeInput(add, "Notification");
+        volumeRuleAlarmInput = addVolumeInput(add, "Alarm");
+        addDndModeInput(add);
 
         LinearLayout addRow = newRow();
-        frame.content.addView(addRow, stack(frame.content));
-        addRowButton(addRow, tonalButton("Add Rule", action("add_volume_rule")));
+        add.addView(addRow, stack(add));
+        addRowButton(addRow, primaryButton("Add Rule", R.drawable.ic_plus, action("add_volume_rule")));
 
-        addSubsectionLabel(frame.content, "Rules");
-        volumeRuleList = newColumn();
-        volumeRuleList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        frame.content.addView(volumeRuleList, stack(frame.content));
+        volumeRuleList = listCard(frame.content, "Rules");
     }
 
-    private void buildOpenVpnPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "OpenVPN", true);
+    private void buildOpenVpnPanel() {
+        Panel frame = addPage("vpn", "Connectivity", "OpenVPN",
+                "A built-in VPN client that works without root.",
+                R.drawable.ic_shield_lock, Ui.ACCENT_BLUE, true);
         openVpnPanel = frame;
         openVpnPill = frame.pill;
 
-        addSubsectionLabel(frame.content, "Profile");
+        LinearLayout profile = section(frame.content, "Profile");
         openVpnProfileSummary = newColumn();
-        openVpnProfileSummary.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        frame.content.addView(openVpnProfileSummary, stack(frame.content));
+        profile.addView(openVpnProfileSummary, stack(profile));
 
         LinearLayout importRow = newRow();
-        frame.content.addView(importRow, stack(frame.content));
-        addRowButton(importRow, tonalButton("Import Profile", action("vpn_import_profile")));
-        addRowButton(importRow, neutralButton("Clear Profile", action("vpn_clear_profile")));
+        profile.addView(importRow, stack(profile));
+        addRowButton(importRow, tonalButton("Import Profile", R.drawable.ic_download, action("vpn_import_profile")));
+        addRowButton(importRow, neutralButton("Clear Profile", R.drawable.ic_trash, action("vpn_clear_profile")));
 
         openVpnEditRow = newRow();
-        frame.content.addView(openVpnEditRow, stack(frame.content));
-        addRowButton(openVpnEditRow, tonalButton("Edit Profile", action("vpn_edit_profile")));
+        profile.addView(openVpnEditRow, stack(profile));
+        addRowButton(openVpnEditRow, tonalButton("Edit Profile", R.drawable.ic_edit, action("vpn_edit_profile")));
 
-        addSubsectionLabel(frame.content, "Files");
-        openVpnSlotList = newColumn();
-        openVpnSlotList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        frame.content.addView(openVpnSlotList, stack(frame.content));
+        openVpnSlotList = listCard(frame.content, "Files");
 
         vpnAuthSection = newColumn();
-        frame.content.addView(vpnAuthSection, stack(frame.content));
-        addSubsectionLabel(vpnAuthSection, "Authentication");
+        frame.content.addView(vpnAuthSection, matchWrapParams());
+        LinearLayout auth = section(vpnAuthSection, "Authentication");
         vpnUserPassBlock = newColumn();
-        vpnAuthSection.addView(vpnUserPassBlock, stack(vpnAuthSection));
+        auth.addView(vpnUserPassBlock, stack(auth));
         vpnUsernameField = addField(vpnUserPassBlock, "Username", InputType.TYPE_CLASS_TEXT);
         vpnPasswordField = addField(vpnUserPassBlock, "Password",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         vpnPassphraseBlock = newColumn();
-        vpnAuthSection.addView(vpnPassphraseBlock, stack(vpnAuthSection));
+        auth.addView(vpnPassphraseBlock, stack(auth));
         vpnKeyPassphraseField = addField(vpnPassphraseBlock, "Private key passphrase",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
 
         vpnTapSection = newColumn();
-        frame.content.addView(vpnTapSection, stack(frame.content));
-        addSubsectionLabel(vpnTapSection, "TAP Addressing");
-        vpnTapStaticIpField = addField(vpnTapSection, "Static IP (blank = server-assigned)", InputType.TYPE_CLASS_TEXT);
-        vpnTapNetmaskField = addField(vpnTapSection, "Netmask", InputType.TYPE_CLASS_TEXT);
-        vpnTapGatewayField = addField(vpnTapSection, "Gateway (optional)", InputType.TYPE_CLASS_TEXT);
+        frame.content.addView(vpnTapSection, matchWrapParams());
+        LinearLayout tap = section(vpnTapSection, "TAP addressing");
+        vpnTapStaticIpField = addField(tap, "Static IP (blank = server-assigned)", InputType.TYPE_CLASS_TEXT);
+        vpnTapNetmaskField = addField(tap, "Netmask", InputType.TYPE_CLASS_TEXT);
+        vpnTapGatewayField = addField(tap, "Gateway (optional)", InputType.TYPE_CLASS_TEXT);
 
-        addSubsectionLabel(frame.content, "Remote Control");
-        LinearLayout remoteGroup = addToggleGroup(frame.content);
+        LinearLayout remote = section(frame.content, "Remote control");
+        LinearLayout remoteGroup = addToggleGroup(remote);
         vpnRemoteCommandEnabledSwitch = addGroupedToggle(remoteGroup, "Allow VPN control from Remote Link");
 
-        addSubsectionLabel(frame.content, "Status");
-        openVpnStatusText = historyText("Off", 13, COLOR_TEXT_DIM, false);
-        openVpnStatusText.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
-        openVpnStatusText.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        frame.content.addView(openVpnStatusText, stack(frame.content));
+        LinearLayout status = section(frame.content, "Status");
+        openVpnStatusText = historyText("Off", 14, COLOR_TEXT, false);
+        openVpnStatusText.setLineSpacing(0, 1.25f);
+        status.addView(openVpnStatusText, stack(status));
 
-        openVpnEngineVersionText = historyText("OpenVPN engine: resolving…", 11, COLOR_TEXT_FAINT, false);
-        frame.content.addView(openVpnEngineVersionText, stack(frame.content));
+        openVpnEngineVersionText = addNote(status, "OpenVPN engine: resolving…");
 
         LinearLayout controlRow = newRow();
-        frame.content.addView(controlRow, stack(frame.content));
-        vpnConnectButton = primaryButton("Connect", action("vpn_connect"));
-        vpnDisconnectButton = neutralButton("Disconnect", action("vpn_disconnect"));
+        status.addView(controlRow, stack(status));
+        vpnConnectButton = primaryButton("Connect", R.drawable.ic_play, action("vpn_connect"));
+        vpnDisconnectButton = neutralButton("Disconnect", R.drawable.ic_stop, action("vpn_disconnect"));
         addRowButton(controlRow, vpnConnectButton);
         addRowButton(controlRow, vpnDisconnectButton);
     }
 
-    private void buildVncPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "VNC Server", true);
+    private void buildVncPanel() {
+        Panel frame = addPage("vnc", "Connectivity", "VNC Server",
+                "View and control this screen from any VNC client.",
+                R.drawable.ic_cast, Ui.ACCENT_VIOLET, true);
         vncPill = frame.pill;
 
-        LinearLayout enableGroup = addToggleGroup(frame.content);
-        vncEnabledSwitch = addGroupedToggle(enableGroup, "Enable VNC server");
+        vncEnabledSwitch = addMasterToggle(frame, R.drawable.ic_cast,
+                "Enable VNC server", "Let a VNC client see and drive this screen");
 
-        addSubsectionLabel(frame.content, "Engine");
-        addVncEngineInput(frame.content);
-        vncEngineNoteText = historyText("", 11, COLOR_TEXT_FAINT, false);
-        frame.content.addView(vncEngineNoteText, stack(frame.content));
+        LinearLayout engine = section(frame.content, "Engine");
+        addVncEngineInput(engine);
+        vncEngineNoteText = addNote(engine, "");
 
-        addSubsectionLabel(frame.content, "Access");
-        vncPasswordField = addField(frame.content, "Password (VNC uses the first 8 characters)",
+        LinearLayout access = section(frame.content, "Access");
+        vncPasswordField = addField(access, "Password (VNC uses the first 8 characters)",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        vncPortField = addField(frame.content, "Port", InputType.TYPE_CLASS_NUMBER);
-        vncAllowedClientsField = addField(frame.content,
+        vncPortField = addField(access, "Port", InputType.TYPE_CLASS_NUMBER);
+        vncAllowedClientsField = addField(access,
                 "Allowed clients (blank = any; IP or CIDR, comma separated)", InputType.TYPE_CLASS_TEXT);
-        LinearLayout accessGroup = addToggleGroup(frame.content);
+        LinearLayout accessGroup = addToggleGroup(access);
         vncViewOnlySwitch = addGroupedToggle(accessGroup, "View only (no input)");
         // The key mapping is not discoverable, and the typing limit is a real
         // constraint rather than a bug: there is no key injection without a
         // platform signature.
-        TextView inputNote = historyText(
+        addNote(access,
                 "Touch, drag, scroll and right-click (long press) work anywhere. Typing only "
                         + "reaches a focused text field. On the device PIN screen, digits type "
                         + "the PIN, Backspace/Delete removes a digit, and Enter submits it.\n"
                         + "Esc Back · Home Home · End Recents · "
                         + "arrows D-pad · F1 Notifications · F2 Quick Settings · F3 Menu · "
-                        + "F4 Power · F5 Lock · F6 Screenshot",
-                11, COLOR_TEXT_FAINT, false);
-        frame.content.addView(inputNote, stack(frame.content));
+                        + "F4 Power · F5 Lock · F6 Screenshot");
 
-        addSubsectionLabel(frame.content, "Availability");
-        LinearLayout availabilityGroup = addToggleGroup(frame.content);
+        LinearLayout availability = section(frame.content, "Availability");
+        LinearLayout availabilityGroup = addToggleGroup(availability);
         vncEnabledOnMatchingWifiSwitch = addGroupedToggle(
                 availabilityGroup, "Enable on matching Wi-Fi SSID");
         vncEnabledWhenVpnConnectedSwitch = addGroupedToggle(
@@ -1089,54 +1627,47 @@ public final class MainActivity extends Activity {
         vncEnabledOnCellularOnlySwitch = addGroupedToggle(
                 availabilityGroup, "Enable on cellular only");
         vncMatchingWifiSsidField = addField(
-                frame.content, "Wi-Fi SSID pattern (* wildcard)", InputType.TYPE_CLASS_TEXT);
-        TextView availabilityNote = historyText(
+                availability, "Wi-Fi SSID pattern (* wildcard)", InputType.TYPE_CLASS_TEXT);
+        addNote(availability,
                 "When one or more conditions are selected, the enabled server runs while any "
-                        + "selected condition matches. With none selected, it runs on any connection.",
-                11, COLOR_TEXT_FAINT, false);
-        frame.content.addView(availabilityNote, stack(frame.content));
+                        + "selected condition matches. With none selected, it runs on any connection.");
 
-        addSubsectionLabel(frame.content, "Capture");
-        addVncScaleInput(frame.content);
-        vncMaxFpsField = addField(frame.content, "Max frames per second", InputType.TYPE_CLASS_NUMBER);
-        vncIdleTimeoutField = addField(frame.content, "Idle timeout (minutes, 0 = never)",
+        LinearLayout capture = section(frame.content, "Capture");
+        addVncScaleInput(capture);
+        vncMaxFpsField = addField(capture, "Max frames per second", InputType.TYPE_CLASS_NUMBER);
+        vncIdleTimeoutField = addField(capture, "Idle timeout (minutes, 0 = never)",
                 InputType.TYPE_CLASS_NUMBER);
-        LinearLayout captureGroup = addToggleGroup(frame.content);
+        LinearLayout captureGroup = addToggleGroup(capture);
         vncWakeOnConnectSwitch = addGroupedToggle(captureGroup,
                 "Wake a sleeping screen when a client connects");
-        TextView awakeNote = historyText(
-                "The display stays awake while a VNC client is connected.",
-                11, COLOR_TEXT_FAINT, false);
-        frame.content.addView(awakeNote, stack(frame.content));
+        addNote(capture, "The display stays awake while a VNC client is connected.");
 
         LinearLayout probeRow = newRow();
-        frame.content.addView(probeRow, stack(frame.content));
-        vncTestCaptureButton = tonalButton("Test Capture", action("vnc_test_capture"));
+        capture.addView(probeRow, stack(capture));
+        vncTestCaptureButton = tonalButton("Test Capture", R.drawable.ic_activity, action("vnc_test_capture"));
         addRowButton(probeRow, vncTestCaptureButton);
-        vncProbeText = historyText("", 11, COLOR_TEXT_FAINT, false);
-        frame.content.addView(vncProbeText, stack(frame.content));
+        vncProbeText = addNote(capture, "");
 
-        addSubsectionLabel(frame.content, "Remote Control");
-        LinearLayout remoteGroup = addToggleGroup(frame.content);
+        LinearLayout remote = section(frame.content, "Remote control");
+        LinearLayout remoteGroup = addToggleGroup(remote);
         vncRemoteCommandEnabledSwitch = addGroupedToggle(
                 remoteGroup, "Allow VNC control from Remote Link");
 
-        addSubsectionLabel(frame.content, "Status");
-        vncStatusText = historyText("Off", 13, COLOR_TEXT_DIM, false);
-        vncStatusText.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
-        vncStatusText.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        frame.content.addView(vncStatusText, stack(frame.content));
+        LinearLayout status = section(frame.content, "Status");
+        vncStatusText = historyText("Off", 14, COLOR_TEXT, false);
+        vncStatusText.setLineSpacing(0, 1.25f);
+        status.addView(vncStatusText, stack(status));
 
         LinearLayout controlRow = newRow();
-        frame.content.addView(controlRow, stack(frame.content));
-        vncStartButton = primaryButton("Start", action("vnc_start"));
-        vncStopButton = neutralButton("Stop", action("vnc_stop"));
+        status.addView(controlRow, stack(status));
+        vncStartButton = primaryButton("Start", R.drawable.ic_play, action("vnc_start"));
+        vncStopButton = neutralButton("Stop", R.drawable.ic_stop, action("vnc_stop"));
         addRowButton(controlRow, vncStartButton);
         addRowButton(controlRow, vncStopButton);
 
         vncAuthorizeRow = newRow();
-        frame.content.addView(vncAuthorizeRow, stack(frame.content));
-        addRowButton(vncAuthorizeRow, tonalButton("Authorise Screen Capture", action("vnc_authorize")));
+        status.addView(vncAuthorizeRow, stack(status));
+        addRowButton(vncAuthorizeRow, tonalButton("Authorise Screen Capture", R.drawable.ic_cast, action("vnc_authorize")));
     }
 
     private void addVncEngineInput(LinearLayout root) {
@@ -1215,7 +1746,7 @@ public final class MainActivity extends Activity {
     private void addVncScaleInput(LinearLayout root) {
         addFieldLabel(root, "Scale");
         LinearLayout row = newRow();
-        root.addView(row, stack(root));
+        root.addView(row, belowLabel(root));
         vncScaleFullButton = tonalButton("100%", new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -1258,66 +1789,62 @@ public final class MainActivity extends Activity {
         styleChoiceButton(vncScaleHalfButton, vncScalePercent == Config.VNC_SCALE_HALF);
     }
 
-    private void buildBeaconPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Beacon", true);
+    private void buildBeaconPanel() {
+        Panel frame = addPage("beacon", "Connectivity", "Beacon",
+                "Broadcast this phone as a Bluetooth iBeacon that your own receivers can find.",
+                R.drawable.ic_radio, Ui.ACCENT_TEAL, true);
         beaconPill = frame.pill;
 
-        LinearLayout enableGroup = addToggleGroup(frame.content);
-        beaconEnabledSwitch = addGroupedToggle(enableGroup, "Enable beacon");
+        beaconEnabledSwitch = addMasterToggle(frame, R.drawable.ic_radio,
+                "Enable beacon", "Advertise over Bluetooth at the rate your battery rules allow");
 
-        addSubsectionLabel(frame.content, "Identity");
-        addFieldLabel(frame.content, "Proximity UUID — match receivers on this");
+        LinearLayout identity = section(frame.content, "Identity");
+        addFieldLabel(identity, "Proximity UUID — match receivers on this");
         beaconUuidValue = historyText("", 13, COLOR_TEXT, false);
         beaconUuidValue.setTypeface(Typeface.MONOSPACE);
         beaconUuidValue.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        beaconUuidValue.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        beaconUuidValue.setPadding(dp(14), dp(GAP), dp(14), dp(GAP));
         beaconUuidValue.setMinHeight(dp(FIELD_MIN_HEIGHT));
         beaconUuidValue.setGravity(Gravity.CENTER_VERTICAL);
         beaconUuidValue.setTextIsSelectable(true);
-        frame.content.addView(beaconUuidValue, stack(frame.content));
+        identity.addView(beaconUuidValue, belowLabel(identity));
 
         LinearLayout uuidRow = newRow();
-        frame.content.addView(uuidRow, stack(frame.content));
-        addRowButton(uuidRow, tonalButton("Copy UUID", action("beacon_copy_uuid")));
-        addRowButton(uuidRow, neutralButton("New UUID", action("beacon_new_uuid")));
+        identity.addView(uuidRow, stack(identity));
+        addRowButton(uuidRow, tonalButton("Copy UUID", R.drawable.ic_copy, action("beacon_copy_uuid")));
+        addRowButton(uuidRow, neutralButton("New UUID", R.drawable.ic_refresh, action("beacon_new_uuid")));
 
-        beaconMajorField = addField(frame.content, "Major (0-65535)", InputType.TYPE_CLASS_NUMBER);
-        beaconMinorField = addField(frame.content, "Minor (0-65535)", InputType.TYPE_CLASS_NUMBER);
+        beaconMajorField = addField(identity, "Major (0-65535)", InputType.TYPE_CLASS_NUMBER);
+        beaconMinorField = addField(identity, "Minor (0-65535)", InputType.TYPE_CLASS_NUMBER);
 
-        addSubsectionLabel(frame.content, "Signal");
-        addBeaconTxPowerInput(frame.content);
-        beaconMeasuredPowerField = addField(frame.content, "Measured power at 1 m (dBm)",
+        LinearLayout signal = section(frame.content, "Signal");
+        addBeaconTxPowerInput(signal);
+        beaconMeasuredPowerField = addField(signal, "Measured power at 1 m (dBm)",
                 InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
 
-        addSubsectionLabel(frame.content, "Add Battery Rule");
-        beaconRuleBatteryField = addField(frame.content, "Battery at or above (%)", InputType.TYPE_CLASS_NUMBER);
-        beaconRuleIntervalField = addField(frame.content, "Broadcast every (seconds, 0 = don't broadcast)",
+        LinearLayout addRule = section(frame.content, "Add battery rule");
+        beaconRuleBatteryField = addField(addRule, "Battery at or above (%)", InputType.TYPE_CLASS_NUMBER);
+        beaconRuleIntervalField = addField(addRule, "Broadcast every (seconds, 0 = don't broadcast)",
                 InputType.TYPE_CLASS_NUMBER);
         LinearLayout addRuleRow = newRow();
-        frame.content.addView(addRuleRow, stack(frame.content));
-        addRowButton(addRuleRow, tonalButton("Add Rule", action("add_beacon_rule")));
+        addRule.addView(addRuleRow, stack(addRule));
+        addRowButton(addRuleRow, primaryButton("Add Rule", R.drawable.ic_plus, action("add_beacon_rule")));
 
-        addSubsectionLabel(frame.content, "Battery Rules");
-        beaconRuleList = newColumn();
-        beaconRuleList.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        beaconRuleList.setClipToOutline(true);
-        frame.content.addView(beaconRuleList, stack(frame.content));
+        beaconRuleList = listCard(frame.content, "Battery rules");
 
-        addSubsectionLabel(frame.content, "Status");
+        LinearLayout status = section(frame.content, "Status");
         beaconStatusList = newColumn();
-        beaconStatusList.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
-        beaconStatusList.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        frame.content.addView(beaconStatusList, stack(frame.content));
+        status.addView(beaconStatusList, stack(status));
 
         LinearLayout buttonRow = newRow();
-        frame.content.addView(buttonRow, stack(frame.content));
-        addRowButton(buttonRow, tonalButton("Bluetooth Settings", action("bluetooth_settings")));
+        status.addView(buttonRow, stack(status));
+        addRowButton(buttonRow, tonalButton("Bluetooth Settings", R.drawable.ic_bluetooth, action("bluetooth_settings")));
     }
 
     private void addBeaconTxPowerInput(LinearLayout root) {
         addFieldLabel(root, "Transmit power");
         LinearLayout row = newRow();
-        root.addView(row, stack(root));
+        root.addView(row, belowLabel(root));
         beaconTxUltraLowButton = tonalButton("Ultra", new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -1368,86 +1895,79 @@ public final class MainActivity extends Activity {
         styleChoiceButton(beaconTxHighButton, beaconTxPowerDbm == Config.BEACON_TX_POWER_HIGH);
     }
 
-    private void buildRebootPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Reboot Automation", true);
+    private void buildRebootPanel() {
+        Panel frame = addPage("reboot", "Alerts & automation", "Reboot Automation",
+                "Restart the phone on a schedule, from a matching notification, or on command.",
+                R.drawable.ic_power, Ui.ACCENT_ORANGE, true);
         rebootPill = frame.pill;
 
-        LinearLayout enableGroup = addToggleGroup(frame.content);
-        rebootAutomationEnabledSwitch = addGroupedToggle(enableGroup, "Enable reboot automation");
+        rebootAutomationEnabledSwitch = addMasterToggle(frame, R.drawable.ic_power,
+                "Enable reboot automation", "Uses the Accessibility service to open the power menu");
 
-        addSubsectionLabel(frame.content, "Notification Trigger");
-        LinearLayout notifGroup = addToggleGroup(frame.content);
+        LinearLayout notification = section(frame.content, "Notification trigger");
+        LinearLayout notifGroup = addToggleGroup(notification);
         rebootNotificationTriggerEnabledSwitch = addGroupedToggle(notifGroup, "Reboot from matching notification");
-        rebootTriggerPackageField = addField(frame.content, "Notification app", InputType.TYPE_CLASS_TEXT);
+        rebootTriggerPackageField = addField(notification, "Notification app", InputType.TYPE_CLASS_TEXT);
         configureAppPickerField(rebootTriggerPackageField);
-        rebootTriggerTitleField = addField(frame.content, "Title contains", InputType.TYPE_CLASS_TEXT);
-        rebootTriggerTextField = addField(frame.content, "Text contains", InputType.TYPE_CLASS_TEXT);
+        rebootTriggerTitleField = addField(notification, "Title contains", InputType.TYPE_CLASS_TEXT);
+        rebootTriggerTextField = addField(notification, "Text contains", InputType.TYPE_CLASS_TEXT);
 
-        addSubsectionLabel(frame.content, "Remote Link Trigger");
-        LinearLayout remoteGroup = addToggleGroup(frame.content);
+        LinearLayout remote = section(frame.content, "Remote Link trigger");
+        LinearLayout remoteGroup = addToggleGroup(remote);
         rebootRemoteTriggerEnabledSwitch = addGroupedToggle(remoteGroup, "Reboot from Remote Link");
 
-        addSubsectionLabel(frame.content, "Daily Schedule");
-        LinearLayout scheduleGroup = addToggleGroup(frame.content);
+        LinearLayout schedule = section(frame.content, "Daily schedule");
+        LinearLayout scheduleGroup = addToggleGroup(schedule);
         rebootScheduleEnabledSwitch = addGroupedToggle(scheduleGroup, "Enable scheduled reboot");
-        rebootScheduleHourField = addField(frame.content, "Hour (0-23)", InputType.TYPE_CLASS_NUMBER);
-        rebootScheduleMinuteField = addField(frame.content, "Minute (0-59)", InputType.TYPE_CLASS_NUMBER);
-        rebootWifiPatternField = addField(frame.content, "SSID pattern", InputType.TYPE_CLASS_TEXT);
-        LinearLayout wifiMatchGroup = addToggleGroup(frame.content);
+        rebootScheduleHourField = addField(schedule, "Hour (0-23)", InputType.TYPE_CLASS_NUMBER);
+        rebootScheduleMinuteField = addField(schedule, "Minute (0-59)", InputType.TYPE_CLASS_NUMBER);
+        rebootWifiPatternField = addField(schedule, "SSID pattern", InputType.TYPE_CLASS_TEXT);
+        LinearLayout wifiMatchGroup = addToggleGroup(schedule);
         rebootOnlyWhenWifiNotMatchingSwitch = addGroupedToggle(wifiMatchGroup, "Only reboot when SSID doesn't match");
 
-        addSubsectionLabel(frame.content, "Automation");
-        rebootPinSequenceField = addField(frame.content, "PIN sequence (optional)", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        rebootDelayedTestSecondsField = addField(frame.content, "Delayed lock test delay (seconds)", InputType.TYPE_CLASS_NUMBER);
-        rebootPowerDialogWaitMsField = addField(frame.content, "Power dialog wait (milliseconds)", InputType.TYPE_CLASS_NUMBER);
-        rebootStepWaitMsField = addField(frame.content, "Step wait (milliseconds)", InputType.TYPE_CLASS_NUMBER);
+        LinearLayout automation = section(frame.content, "Automation");
+        rebootPinSequenceField = addField(automation, "PIN sequence (optional)", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        rebootDelayedTestSecondsField = addField(automation, "Delayed lock test delay (seconds)", InputType.TYPE_CLASS_NUMBER);
+        rebootPowerDialogWaitMsField = addField(automation, "Power dialog wait (milliseconds)", InputType.TYPE_CLASS_NUMBER);
+        rebootStepWaitMsField = addField(automation, "Step wait (milliseconds)", InputType.TYPE_CLASS_NUMBER);
 
-        LinearLayout row1 = newRow();
-        frame.content.addView(row1, stack(frame.content));
-        addRowButton(row1, tonalButton("Test Now", action("test_reboot_now")));
-        addRowButton(row1, tonalButton("Delayed Lock Test", action("test_reboot_delayed")));
-
-        LinearLayout row2 = newRow();
-        frame.content.addView(row2, stack(frame.content));
-        addRowButton(row2, tonalButton("Accessibility", action("accessibility_settings")));
+        addStackedButton(automation, tonalButton("Test Now", R.drawable.ic_power, action("test_reboot_now")));
+        addStackedButton(automation, tonalButton("Delayed Lock Test", R.drawable.ic_clock, action("test_reboot_delayed")));
+        addStackedButton(automation, neutralButton("Accessibility", R.drawable.ic_user, action("accessibility_settings")));
     }
 
-    private void buildRemoteLinkPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Remote Link", true);
+    private void buildRemoteLinkPanel() {
+        Panel frame = addPage("remote_link", "Connectivity", "Remote Link",
+                "A secure connection to your server for commands, alerts and backups.",
+                R.drawable.ic_link, Ui.ACCENT_CYAN, true);
         remoteLinkPill = frame.pill;
 
-        LinearLayout enableGroup = addToggleGroup(frame.content);
-        remoteLinkEnabledSwitch = addGroupedToggle(enableGroup, "Enable Remote Link");
-        remoteLinkAcceptAnySslCertSwitch = addGroupedToggle(enableGroup, "Accept any SSL cert");
+        remoteLinkEnabledSwitch = addMasterToggle(frame, R.drawable.ic_link,
+                "Enable Remote Link", "Keep a connection open to your server");
         // The Remote Link notification is shown or hidden per channel in
         // Android's notification settings.
 
-        addSubsectionLabel(frame.content, "Connection");
-        remoteLinkEndpointField = addField(frame.content, "Remote Link endpoint", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        remoteLinkUsernameField = addField(frame.content, "Username", InputType.TYPE_CLASS_TEXT);
-        remoteLinkPasswordField = addField(frame.content, "Password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        remoteLinkHeartbeatSecondsField = addField(frame.content, "Heartbeat (seconds)", InputType.TYPE_CLASS_NUMBER);
+        LinearLayout connection = section(frame.content, "Connection");
+        remoteLinkEndpointField = addField(connection, "Remote Link endpoint", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        remoteLinkUsernameField = addField(connection, "Username", InputType.TYPE_CLASS_TEXT);
+        remoteLinkPasswordField = addField(connection, "Password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        remoteLinkHeartbeatSecondsField = addField(connection, "Heartbeat (seconds)", InputType.TYPE_CLASS_NUMBER);
+        LinearLayout sslGroup = addToggleGroup(connection);
+        remoteLinkAcceptAnySslCertSwitch = addGroupedToggle(sslGroup, "Accept any SSL cert",
+                "Skips certificate checks, as a self-signed server needs");
 
         LinearLayout row = newRow();
-        frame.content.addView(row, stack(frame.content));
-        addRowButton(row, tonalButton("Reconnect", action("remote_link_reconnect")));
-        addRowButton(row, tonalButton("Ping", action("remote_link_ping")));
+        connection.addView(row, stack(connection));
+        addRowButton(row, tonalButton("Reconnect", R.drawable.ic_refresh, action("remote_link_reconnect")));
+        addRowButton(row, tonalButton("Ping", R.drawable.ic_activity, action("remote_link_ping")));
 
-        addSubsectionLabel(frame.content, "Link Statistics");
-        LinearLayout statistics = newColumn();
-        statistics.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
-        statistics.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        frame.content.addView(statistics, stack(frame.content));
+        LinearLayout statistics = section(frame.content, "Link statistics");
         remoteLinkUptimeValue = addInfoRow(
                 statistics, "Up — last 24 hours", "100.000%", COLOR_TEXT);
         remoteLinkDowntimeValue = addInfoRow(
                 statistics, "Down — last 24 hours", "00:00:00", COLOR_TEXT);
 
-        addSubsectionLabel(frame.content, "Link Test");
-        LinearLayout testStatus = newColumn();
-        testStatus.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
-        testStatus.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        frame.content.addView(testStatus, stack(frame.content));
+        LinearLayout testStatus = section(frame.content, "Link test");
         remoteLinkLatencyValue = addInfoRow(testStatus, "Latency", "Unknown", COLOR_TEXT_DIM);
         remoteLinkUploadThroughputValue = addInfoRow(
                 testStatus, "Send throughput", "Unknown", COLOR_TEXT_DIM);
@@ -1455,97 +1975,79 @@ public final class MainActivity extends Activity {
                 testStatus, "Receive throughput", "Unknown", COLOR_TEXT_DIM);
 
         LinearLayout testRow = newRow();
-        frame.content.addView(testRow, stack(frame.content));
+        testStatus.addView(testRow, stack(testStatus));
         remoteLinkLatencyButton = tonalButton("Test Latency", action("remote_link_latency"));
         remoteLinkThroughputButton = tonalButton("Test Throughput", action("remote_link_throughput"));
         addRowButton(testRow, remoteLinkLatencyButton);
         addRowButton(testRow, remoteLinkThroughputButton);
     }
 
-    private void buildSettingsTransferPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Backup", true);
+    private void buildSettingsTransferPanel() {
+        Panel frame = addPage("backup", "System", "Backup",
+                "Save every setting, credential, history item and VPN file to your server, and restore it later.",
+                R.drawable.ic_archive, Ui.ACCENT_TEAL, false);
         systemBackupPill = frame.pill;
 
+        LinearLayout actions = section(frame.content, "Backup & restore");
         LinearLayout row = newRow();
-        frame.content.addView(row, stack(frame.content));
-        backUpButton = tonalButton("Back Up Now", action("backup_now"));
-        restoreBackupButton = tonalButton("Restore", action("restore_backup"));
+        actions.addView(row, stack(actions));
+        backUpButton = primaryButton("Back Up Now", R.drawable.ic_upload_cloud, action("backup_now"));
+        restoreBackupButton = tonalButton("Restore", R.drawable.ic_download, action("restore_backup"));
         addRowButton(row, backUpButton);
         addRowButton(row, restoreBackupButton);
+        addNote(actions, "Needs a connected Remote Link and a server with backups enabled. "
+                + "Restoring replaces everything on this phone with the saved copy.");
     }
 
-    private void buildPermissionsPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Permissions", true);
+    private void buildPermissionsPanel() {
+        Panel frame = addPage("permissions", "System", "Permissions",
+                "What System Manager needs in order to do its job. Tap anything marked Needed to fix it.",
+                R.drawable.ic_shield_check, Ui.ACCENT_EMERALD, true);
         permissionsPill = frame.pill;
 
-        addSubsectionLabel(frame.content, "Readiness");
+        LinearLayout readiness = section(frame.content, "Readiness");
         statusContainer = newColumn();
-        statusContainer.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
-        statusContainer.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        frame.content.addView(statusContainer, stack(frame.content));
+        readiness.addView(statusContainer, stack(readiness));
 
-        addSubsectionLabel(frame.content, "Grant Access");
-        LinearLayout r1 = newRow();
-        frame.content.addView(r1, stack(frame.content));
-        addRowButton(r1, tonalButton("Location & Wi-Fi", action("common_permissions")));
-        addRowButton(r1, tonalButton("Background Location", action("background_location")));
-
-        LinearLayout r2 = newRow();
-        frame.content.addView(r2, stack(frame.content));
-        addRowButton(r2, tonalButton("Exact Alarms", action("exact_alarm")));
-        addRowButton(r2, tonalButton("Battery Settings", action("battery")));
-
-        LinearLayout r3 = newRow();
-        frame.content.addView(r3, stack(frame.content));
-        addRowButton(r3, tonalButton("App Settings", action("app_settings")));
-        addRowButton(r3, tonalButton("Location Settings", action("location_settings")));
-
-        LinearLayout r4 = newRow();
-        frame.content.addView(r4, stack(frame.content));
-        addRowButton(r4, tonalButton("Notification Access", action("notification_access")));
-        addRowButton(r4, tonalButton("Accessibility", action("accessibility_settings")));
-
-        LinearLayout r5 = newRow();
-        frame.content.addView(r5, stack(frame.content));
-        addRowButton(r5, tonalButton("DND Access", action("dnd_access")));
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            addRowButton(r5, tonalButton("Notification Permission", action("notifications")));
-        }
-
-        LinearLayout r6 = newRow();
-        frame.content.addView(r6, stack(frame.content));
-        addRowButton(r6, tonalButton("Bluetooth Advertise", action("bluetooth_permission")));
-        addRowButton(r6, tonalButton("Bluetooth Settings", action("bluetooth_settings")));
-
-        addSubsectionLabel(frame.content, "Service Notifications");
-        LinearLayout serviceNotifications = addToggleGroup(frame.content);
-        showWifiMonitorNotificationSwitch = addGroupedToggle(serviceNotifications, "Wi-Fi monitor");
-
-        wifiMonitorWarning = historyText("", 12, COLOR_BAD, false);
+        wifiMonitorWarning = historyText("", 12.5f, COLOR_BAD, false);
         wifiMonitorWarning.setVisibility(View.GONE);
-        frame.content.addView(wifiMonitorWarning, stack(frame.content));
+        readiness.addView(wifiMonitorWarning, stack(readiness));
 
-        TextView serviceNotificationNote = historyText(
-                "Other service notifications are shown or hidden per channel in "
-                        + "Android's notification settings.",
-                11, COLOR_TEXT_FAINT, false);
-        frame.content.addView(serviceNotificationNote, stack(frame.content));
+        LinearLayout grant = listCard(frame.content, "Grant access");
+        addActionRow(grant, R.drawable.ic_pin, "Location & Wi-Fi", "Fine location and nearby Wi-Fi devices", "common_permissions");
+        addActionRow(grant, R.drawable.ic_gps, "Background location", "Allow all the time", "background_location");
+        addActionRow(grant, R.drawable.ic_clock, "Exact alarms", "Run schedules on time", "exact_alarm");
+        addActionRow(grant, R.drawable.ic_battery, "Battery settings", "Allow unrestricted background use", "battery");
+        addActionRow(grant, R.drawable.ic_sliders, "App settings", "Open Android's page for System Manager", "app_settings");
+        addActionRow(grant, R.drawable.ic_pin, "Location settings", "Turn device location on", "location_settings");
+        addActionRow(grant, R.drawable.ic_bell, "Notification access", "Read notifications for alerts and backup", "notification_access");
+        addActionRow(grant, R.drawable.ic_user, "Accessibility", "Reboot automation and the Wi-Fi monitor", "accessibility_settings");
+        addActionRow(grant, R.drawable.ic_volume, "Do Not Disturb access", "Needed by volume rules that change DND", "dnd_access");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            addActionRow(grant, R.drawable.ic_bell_ring, "Notification permission", "Post notifications", "notifications");
+        }
+        addActionRow(grant, R.drawable.ic_bluetooth, "Bluetooth advertise", "Needed by the beacon", "bluetooth_permission");
+        addActionRow(grant, R.drawable.ic_bluetooth, "Bluetooth settings", "Turn Bluetooth on", "bluetooth_settings");
 
+        LinearLayout service = section(frame.content, "Service notifications");
+        LinearLayout serviceNotifications = addToggleGroup(service);
+        showWifiMonitorNotificationSwitch = addGroupedToggle(serviceNotifications, "Wi-Fi monitor");
+        addNote(service, "Other service notifications are shown or hidden per channel in "
+                + "Android's notification settings.");
         LinearLayout r7 = newRow();
-        frame.content.addView(r7, stack(frame.content));
-        addRowButton(r7, tonalButton("Notification Settings", action("notification_settings")));
+        service.addView(r7, stack(service));
+        addRowButton(r7, tonalButton("Notification Settings", R.drawable.ic_bell, action("notification_settings")));
     }
 
-    private void buildUpgradePanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Upgrade", true);
+    private void buildUpgradePanel() {
+        Panel frame = addPage("upgrade", "System", "Upgrade",
+                "Install new versions of System Manager from your server.",
+                R.drawable.ic_download, Ui.ACCENT_BLUE, false);
         upgradePanel = frame;
         upgradePill = frame.pill;
-        frame.card.setVisibility(View.GONE);
+        dashboard.setTileVisible("upgrade", false);
 
-        LinearLayout metadata = newColumn();
-        metadata.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
-        metadata.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        frame.content.addView(metadata, stack(frame.content));
+        LinearLayout metadata = section(frame.content, "Version");
         upgradeCurrentVersionValue = addInfoRow(
                 metadata, "Current version", AppVersion.name(this), COLOR_TEXT);
         upgradeAvailableVersionValue = addInfoRow(
@@ -1553,38 +2055,50 @@ public final class MainActivity extends Activity {
         upgradeDateValue = addInfoRow(metadata, "File date", "Unknown", COLOR_TEXT_DIM);
         upgradeSizeValue = addInfoRow(metadata, "File size", "Unknown", COLOR_TEXT_DIM);
 
-        LinearLayout automatic = addToggleGroup(frame.content);
-        upgradeAutoSwitch = addGroupedToggle(automatic, "Enable automatic upgrades");
+        LinearLayout automatic = section(frame.content, "Automatic upgrades");
+        LinearLayout automaticGroup = addToggleGroup(automatic);
+        upgradeAutoSwitch = addGroupedToggle(automaticGroup, "Enable automatic upgrades",
+                "Offer a new version when you open the app");
 
         LinearLayout buttons = newRow();
-        frame.content.addView(buttons, stack(frame.content));
-        upgradeRefreshButton = tonalButton("Refresh", action("refresh_upgrade"));
-        upgradeInstallButton = primaryButton("Upgrade", action("install_upgrade"));
+        automatic.addView(buttons, stack(automatic));
+        upgradeRefreshButton = tonalButton("Refresh", R.drawable.ic_refresh, action("refresh_upgrade"));
+        upgradeInstallButton = primaryButton("Upgrade", R.drawable.ic_download, action("install_upgrade"));
         addRowButton(buttons, upgradeRefreshButton);
         addRowButton(buttons, upgradeInstallButton);
     }
 
-    private void buildLogPanel(LinearLayout root) {
-        Panel frame = addExpandablePanel(root, "Log", true);
+    private void buildLogPanel() {
+        Panel frame = addPage("log", "System", "Log",
+                "A record of what System Manager has been doing.",
+                R.drawable.ic_terminal, Ui.ACCENT_SLATE, true);
         logPill = frame.pill;
 
-        LinearLayout enableGroup = addToggleGroup(frame.content);
-        logEnabledSwitch = addGroupedToggle(enableGroup, "Enable logging");
+        logEnabledSwitch = addMasterToggle(frame, R.drawable.ic_terminal,
+                "Enable logging", "Keep a rolling log on this phone");
 
-        logMaxLinesField = addField(frame.content, "Retention (lines)", InputType.TYPE_CLASS_NUMBER);
+        LinearLayout retention = section(frame.content, "Retention");
+        logMaxLinesField = addField(retention, "Retention (lines)", InputType.TYPE_CLASS_NUMBER);
 
         LinearLayout buttons = newRow();
-        frame.content.addView(buttons, stack(frame.content));
-        addRowButton(buttons, tonalButton("Refresh", action("refresh_log")));
-        addRowButton(buttons, neutralButton("Clear", action("clear_log")));
+        retention.addView(buttons, stack(retention));
+        addRowButton(buttons, tonalButton("Refresh", R.drawable.ic_refresh, action("refresh_log")));
+        addRowButton(buttons, neutralButton("Clear", R.drawable.ic_trash, action("clear_log")));
+
+        TextView consoleHeader = Ui.caps(this, "Console");
+        consoleHeader.setPadding(dp(4), 0, dp(4), 0);
+        LinearLayout.LayoutParams headerLp = matchWrapParams();
+        headerLp.topMargin = dp(24);
+        headerLp.bottomMargin = dp(10);
+        frame.content.addView(consoleHeader, headerLp);
 
         logView = new TextView(this);
         logView.setText("");
         logView.setTextColor(COLOR_LOG_FG);
         logView.setTextSize(11);
         logView.setTypeface(Typeface.MONOSPACE);
-        logView.setBackground(roundedFill(COLOR_LOG_BG, FIELD_CORNER, 0, 0));
-        logView.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        logView.setBackground(roundedFill(COLOR_LOG_BG, SECTION_CORNER, 1, Ui.alpha(COLOR_LOG_FG, 0.12f)));
+        logView.setPadding(dp(14), dp(14), dp(14), dp(14));
         logView.setLineSpacing(0, 1.3f);
         applyFixedTextLineCount(logView, LOG_VISIBLE_LINES);
         logView.setVerticalScrollBarEnabled(true);
@@ -1615,7 +2129,61 @@ public final class MainActivity extends Activity {
                 return false;
             }
         });
-        frame.content.addView(logView, stack(frame.content));
+        frame.content.addView(logView, matchWrapParams());
+    }
+
+    private void buildAppearancePanel() {
+        Panel frame = addPage("appearance", "System", "Appearance",
+                "Choose how System Manager looks. It can follow your phone's setting or stay light or dark.",
+                R.drawable.ic_contrast, Ui.ACCENT_VIOLET, false);
+
+        LinearLayout theme = section(frame.content, "Theme");
+        LinearLayout choices = newRow();
+        theme.addView(choices, stack(theme));
+        int mode = Ui.themeMode(this);
+        addThemeChoice(choices, "System", R.drawable.ic_contrast, Ui.MODE_SYSTEM, mode);
+        addThemeChoice(choices, "Light", R.drawable.ic_sun, Ui.MODE_LIGHT, mode);
+        addThemeChoice(choices, "Dark", R.drawable.ic_moon, Ui.MODE_DARK, mode);
+        addNote(theme, "System follows your phone's dark mode setting, including any schedule it runs.");
+
+        String modeLabel = mode == Ui.MODE_LIGHT ? "LIGHT" : mode == Ui.MODE_DARK ? "DARK" : "AUTOMATIC";
+        setPillState(frame.pill, modeLabel, COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+        frame.tile.setDetail(mode == Ui.MODE_SYSTEM ? (Ui.dark ? "Following the phone: dark" : "Following the phone: light")
+                : "Always " + (mode == Ui.MODE_DARK ? "dark" : "light"));
+
+        LinearLayout about = section(frame.content, "About");
+        addInfoRow(about, "Version", AppVersion.name(this) + " (build " + AppVersion.code(this) + ")", COLOR_TEXT);
+        addInfoRow(about, "Package", getPackageName(), COLOR_TEXT);
+        addInfoRow(about, "Device", Dashboard.deviceName(this), COLOR_TEXT);
+        addInfoRow(about, "Android", Build.VERSION.RELEASE + " · API " + Build.VERSION.SDK_INT, COLOR_TEXT);
+    }
+
+    private void addThemeChoice(LinearLayout row, String label, int iconRes, final int mode, int current) {
+        boolean selected = mode == current;
+        LinearLayout cell = newColumn();
+        cell.setGravity(Gravity.CENTER);
+        cell.setPadding(dp(8), dp(16), dp(8), dp(14));
+        int fg = selected ? COLOR_PRIMARY_ON_CONTAINER : COLOR_TEXT_DIM;
+        cell.setBackground(Ui.ripple(COLOR_RIPPLE_LIGHT,
+                roundedFill(selected ? COLOR_PRIMARY_CONTAINER : COLOR_FIELD_BG, FIELD_CORNER + 2,
+                        selected ? 2 : 1, selected ? COLOR_PRIMARY : COLOR_FIELD_BORDER), dp(FIELD_CORNER + 2)));
+        cell.setClickable(true);
+        cell.setFocusable(true);
+        cell.setContentDescription(label + " theme" + (selected ? ", selected" : ""));
+        cell.addView(Ui.icon(this, iconRes, 26, selected ? COLOR_PRIMARY : COLOR_TEXT_DIM),
+                new LinearLayout.LayoutParams(dp(26), dp(26)));
+        TextView text = historyText(label, 13.5f, fg, true);
+        LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        textLp.topMargin = dp(8);
+        cell.addView(text, textLp);
+        cell.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                setThemeModeAndRecreate(mode);
+            }
+        });
+        row.addView(cell, inRow(row, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
     }
 
     private void refreshNotificationHistory() {
@@ -1664,6 +2232,12 @@ public final class MainActivity extends Activity {
                 Integer.toString(count),
                 count > 0 ? COLOR_PRIMARY_CONTAINER : COLOR_NEUTRAL_CONTAINER,
                 count > 0 ? COLOR_PRIMARY_ON_CONTAINER : COLOR_NEUTRAL_ON_CONTAINER);
+        Panel historyPage = pagesById.get("history");
+        if (historyPage != null) {
+            historyPage.tile.setStatus(count == 0 ? "Empty" : (count == 1 ? "1 saved" : count + " saved"),
+                    count > 0 ? Ui.TONE_OK : Ui.TONE_NEUTRAL);
+            historyPage.tile.setDetail("Kept on this phone");
+        }
         if (notificationHistoryList == null) {
             return;
         }
@@ -1695,9 +2269,6 @@ public final class MainActivity extends Activity {
         }
 
         for (int i = 0; i < entries.size(); i++) {
-            if (i > 0) {
-                addHistorySeparator();
-            }
             addHistoryEntry(entries.get(i));
         }
         renderedNotificationHistoryKey = renderKey;
@@ -1723,12 +2294,11 @@ public final class MainActivity extends Activity {
     }
 
     private void scrollNotificationHistoryToTop() {
-        final ScrollView sv = contentScrollView;
+        Panel history = pagesById.get("history");
+        final ScrollView sv = history == null ? null : history.scroll;
         if (sv == null) {
             return;
         }
-        // The Notification History panel is the first panel, so the top of the
-        // scroll content is the top of that box.
         sv.post(new Runnable() {
             @Override
             public void run() {
@@ -1762,6 +2332,7 @@ public final class MainActivity extends Activity {
         }
         List<Config.VolumeRule> rules = Config.get(this).volumeRules();
         String label = rules.size() == 1 ? "1 RULE" : rules.size() + " RULES";
+        setTileDetail("volume", rules.isEmpty() ? "No schedule" : "Next at " + nextVolumeRuleTime(rules));
         setPillState(
                 volumeControlPill,
                 label,
@@ -1785,12 +2356,37 @@ public final class MainActivity extends Activity {
         for (int i = 0; i < rules.size(); i++) {
             if (i > 0) {
                 View hairline = new View(this);
-                hairline.setBackgroundColor(COLOR_FIELD_BORDER);
+                hairline.setBackgroundColor(COLOR_BORDER);
                 volumeRuleList.addView(hairline, new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
             }
             addVolumeRuleRow(rules.get(i));
         }
+    }
+
+    /** The next rule time of day to come, wrapping to tomorrow's first rule after the last one. */
+    private String nextVolumeRuleTime(List<Config.VolumeRule> rules) {
+        java.util.Calendar now = java.util.Calendar.getInstance();
+        int nowMinute = now.get(java.util.Calendar.HOUR_OF_DAY) * 60 + now.get(java.util.Calendar.MINUTE);
+        Config.VolumeRule next = null;
+        Config.VolumeRule earliest = null;
+        for (Config.VolumeRule rule : rules) {
+            if (earliest == null || rule.minuteOfDay() < earliest.minuteOfDay()) {
+                earliest = rule;
+            }
+            if (rule.minuteOfDay() > nowMinute && (next == null || rule.minuteOfDay() < next.minuteOfDay())) {
+                next = rule;
+            }
+        }
+        return (next != null ? next : earliest).displayTime();
+    }
+
+    /** Shrinks a button to sit beside text in a list row. */
+    private Button compact(Button button) {
+        button.setMinHeight(dp(40));
+        button.setMinimumHeight(dp(40));
+        button.setPadding(dp(10), dp(6), dp(10), dp(6));
+        return button;
     }
 
     private void addVolumeRuleRow(final Config.VolumeRule rule) {
@@ -1805,13 +2401,13 @@ public final class MainActivity extends Activity {
         TextView time = historyText(rule.displayTime(), 16, COLOR_TEXT, true);
         top.addView(time, inRow(top, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        Button delete = neutralButton("Delete", new View.OnClickListener() {
+        Button delete = compact(neutralButton("Delete", R.drawable.ic_trash, new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 deleteVolumeRule(rule);
             }
-        });
-        top.addView(delete, inRow(top, dp(96), dp(BUTTON_MIN_HEIGHT), 0f));
+        }));
+        top.addView(delete, inRow(top, dp(112), dp(40), 0f));
 
         TextView detail = historyText(volumeRuleDetail(rule), 12, COLOR_TEXT_DIM, false);
         detail.setLineSpacing(0, 1.2f);
@@ -1847,11 +2443,17 @@ public final class MainActivity extends Activity {
         renderOpenVpnSlots(meta);
         openVpnEditRow.setVisibility(hasProfile ? View.VISIBLE : View.GONE);
 
+        setTileDetail("vpn", meta != null && meta.hasProfile()
+                ? meta.remoteHost + ":" + meta.remotePort : "Import one to connect");
+
         boolean showAuth = meta != null && (meta.authUserPass || meta.keyEncrypted);
         vpnAuthSection.setVisibility(showAuth ? View.VISIBLE : View.GONE);
         if (showAuth) {
             vpnUserPassBlock.setVisibility(meta.authUserPass ? View.VISIBLE : View.GONE);
             vpnPassphraseBlock.setVisibility(meta.keyEncrypted ? View.VISIBLE : View.GONE);
+            // The gap above the passphrase only belongs there when the username block is showing.
+            ((LinearLayout.LayoutParams) vpnPassphraseBlock.getLayoutParams()).topMargin =
+                    meta.authUserPass ? dp(GAP) : 0;
         }
         vpnTapSection.setVisibility(meta != null && meta.isTap() ? View.VISIBLE : View.GONE);
 
@@ -1870,19 +2472,21 @@ public final class MainActivity extends Activity {
         setOpenVpnPill(openVpnHasProfile, simpleState);
         openVpnStatusText.setText(openVpnStatusLine(simpleState));
         applyButtonState(vpnConnectButton, openVpnProfileReady && !connectedOrConnecting,
-                COLOR_PRIMARY, Color.WHITE);
-        applyButtonState(vpnDisconnectButton, connectedOrConnecting, COLOR_DANGER, Color.WHITE);
+                COLOR_PRIMARY, COLOR_ON_ACCENT);
+        applyButtonState(vpnDisconnectButton, connectedOrConnecting, COLOR_DANGER, COLOR_ON_DANGER);
     }
 
     private void setOpenVpnPill(boolean hasProfile, String simpleState) {
         if (hasProfile && OpenVpnStateStore.SIMPLE_CONNECTED.equals(simpleState)) {
-            setPillState(openVpnPill, "ENABLED", COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+            setPillState(openVpnPill, "CONNECTED", COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
         } else if (hasProfile && OpenVpnStateStore.SIMPLE_CONNECTING.equals(simpleState)) {
             setPillState(openVpnPill, "CONNECTING", COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
         } else if (hasProfile && OpenVpnStateStore.SIMPLE_ERROR.equals(simpleState)) {
             setPillState(openVpnPill, "ERROR", COLOR_DANGER_CONTAINER, COLOR_DANGER_ON_CONTAINER);
+        } else if (hasProfile) {
+            setPillState(openVpnPill, "OFF", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
         } else {
-            setPillState(openVpnPill, "DISABLED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+            setPillState(openVpnPill, "NO PROFILE", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
         }
     }
 
@@ -1903,7 +2507,8 @@ public final class MainActivity extends Activity {
 
     private void renderOpenVpnSummary(final OpenVpnProfileStore.Meta meta) {
         openVpnProfileSummary.removeAllViews();
-        openVpnProfileSummary.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
+        openVpnProfileSummary.setBackground(roundedFill(COLOR_GROUPED, GROUP_CORNER, 1, COLOR_BORDER));
+        openVpnProfileSummary.setPadding(dp(14), dp(14), dp(14), dp(14));
         if (meta == null || !meta.hasProfile()) {
             TextView empty = historyText("No profile imported", 13, COLOR_TEXT_DIM, false);
             empty.setGravity(Gravity.CENTER);
@@ -1951,11 +2556,11 @@ public final class MainActivity extends Activity {
 
     private void renderOpenVpnSlots(OpenVpnProfileStore.Meta meta) {
         openVpnSlotList.removeAllViews();
-        openVpnSlotList.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
         if (meta == null || meta.requiredSlots.isEmpty()) {
             TextView empty = historyText(meta == null ? "Import a profile to see its files"
                     : "Profile references no external files", 13, COLOR_TEXT_DIM, false);
             empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(16), dp(20), dp(16), dp(20));
             openVpnSlotList.addView(empty, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             return;
@@ -1964,7 +2569,7 @@ public final class MainActivity extends Activity {
         for (String slot : meta.requiredSlots) {
             if (!first) {
                 View hairline = new View(this);
-                hairline.setBackgroundColor(COLOR_FIELD_BORDER);
+                hairline.setBackgroundColor(COLOR_BORDER);
                 openVpnSlotList.addView(hairline, new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
             }
@@ -1975,7 +2580,10 @@ public final class MainActivity extends Activity {
 
     private void addVpnSlotRow(final String slotId, String satisfiedBy) {
         LinearLayout row = newRow();
-        row.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT));
+        row.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT + 6));
+        row.setPadding(dp(14), dp(8), dp(14), dp(8));
+        row.setClickable(true);
+        row.setBackground(Ui.ripple(COLOR_RIPPLE_LIGHT, roundedFill(0, 0, 0, 0), 0));
 
         boolean inline = "inline".equals(satisfiedBy);
         boolean imported = "file".equals(satisfiedBy);
@@ -2046,8 +2654,8 @@ public final class MainActivity extends Activity {
             openVpnEngineVersionText.setText("Engine: " + cached);
             return;
         }
-        boolean expanded = openVpnPanel != null && openVpnPanel.content.getVisibility() == View.VISIBLE;
-        if (!expanded && !OpenVpnProfileStore.hasProfile(this)) {
+        boolean showing = openVpnPanel != null && currentPage == openVpnPanel;
+        if (!showing && !OpenVpnProfileStore.hasProfile(this)) {
             return;
         }
         OpenVpnHoldTester.resolveVersionAsync(this, new OpenVpnHoldTester.VersionCallback() {
@@ -2064,6 +2672,11 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    /** Rounded fill with the corner and stroke given in dp. */
+    private GradientDrawable roundedFill(int color, int cornerDp, int strokeDp, int strokeColor) {
+        return Ui.roundedFill(color, dp(cornerDp), strokeDp > 0 ? dp(strokeDp) : 0, strokeColor);
     }
 
     private LinearLayout.LayoutParams matchWrapParams() {
@@ -2492,57 +3105,70 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void addHistoryEntry(NotificationHistoryStore.Entry entry) {
+    private void addHistoryEntry(final NotificationHistoryStore.Entry entry) {
+        boolean urgent = entry.highPriority;
         LinearLayout item = newColumn();
-        item.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        item.setBackgroundColor(entry.highPriority ? COLOR_DANGER_CONTAINER : COLOR_FIELD_BG);
+        item.setPadding(dp(15), dp(13), dp(15), dp(14));
+        item.setBackground(Ui.roundedFill(urgent ? COLOR_DANGER_CONTAINER : COLOR_SURFACE, dp(18), dp(1),
+                urgent ? Ui.alpha(COLOR_DANGER, 0.4f) : COLOR_BORDER));
+        Ui.elevate(item, urgent ? 0f : 1f);
 
         LinearLayout meta = newRow();
         item.addView(meta, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        TextView source = historyText(entry.source.toUpperCase(Locale.US), 10,
-                entry.highPriority ? COLOR_DANGER_ON_CONTAINER : COLOR_PRIMARY, true);
-        source.setLetterSpacing(0.12f);
+        if (urgent) {
+            meta.addView(Ui.icon(this, R.drawable.ic_bell_ring, 14, COLOR_DANGER_ON_CONTAINER),
+                    inRow(meta, dp(14), dp(14), 0f));
+        }
+        TextView source = historyText(entry.source.toUpperCase(Locale.US), 10.5f,
+                urgent ? COLOR_DANGER_ON_CONTAINER : COLOR_PRIMARY, true);
+        source.setLetterSpacing(0.1f);
         source.setSingleLine(true);
         source.setEllipsize(TextUtils.TruncateAt.END);
-        meta.addView(source, inRow(meta, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams sourceLp = inRow(meta, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        if (urgent) {
+            sourceLp.leftMargin = dp(6);
+        }
+        meta.addView(source, sourceLp);
 
-        TextView time = historyText(formatHistoryTime(entry.timestampMillis), 11, COLOR_TEXT_FAINT, false);
+        TextView time = historyText(formatHistoryTime(entry.timestampMillis), 11.5f,
+                urgent ? COLOR_DANGER_ON_CONTAINER : COLOR_TEXT_FAINT, false);
         time.setSingleLine(true);
         meta.addView(time, inRow(meta, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
 
-        TextView title = historyText(historyDisplayTitle(entry), 14,
-                entry.highPriority ? COLOR_DANGER_ON_CONTAINER : COLOR_TEXT, true);
+        TextView title = historyText(historyDisplayTitle(entry), 15,
+                urgent ? COLOR_DANGER_ON_CONTAINER : COLOR_TEXT, true);
         title.setMaxLines(2);
         title.setEllipsize(TextUtils.TruncateAt.END);
-        item.addView(title, topMarginParams(6));
+        item.addView(title, topMarginParams(8));
 
         String detail = historyDetail(entry);
         if (hasText(detail)) {
-            TextView body = historyText(detail, 12, COLOR_TEXT_DIM, false);
+            TextView body = historyText(detail, 13, urgent ? COLOR_DANGER_ON_CONTAINER : COLOR_TEXT_DIM, false);
+            body.setLineSpacing(0, 1.2f);
             body.setMaxLines(3);
             body.setEllipsize(TextUtils.TruncateAt.END);
-            item.addView(body, topMarginParams(6));
+            item.addView(body, topMarginParams(5));
         }
 
         Bitmap image = decodeHistoryImage(entry);
         if (image != null) {
             AspectImageView imageView = new AspectImageView(this);
             imageView.setImageBitmap(image);
-            imageView.setBackground(roundedFill(COLOR_SURFACE, FIELD_CORNER, 1, COLOR_BORDER));
-            item.addView(imageView, topMarginParams(8));
+            imageView.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_BORDER));
+            item.addView(imageView, topMarginParams(10));
 
             LinearLayout imageActions = newRow();
-            item.addView(imageActions, topMarginParams(8));
-            addRowButton(imageActions, tonalButton("Save", new View.OnClickListener() {
+            item.addView(imageActions, topMarginParams(10));
+            addRowButton(imageActions, tonalButton("Save", R.drawable.ic_download, new View.OnClickListener() {
                 @Override
                 public void onClick(View view) {
                     saveNotificationImage(entry);
                 }
             }));
-            addRowButton(imageActions, tonalButton("Share", new View.OnClickListener() {
+            addRowButton(imageActions, tonalButton("Share", R.drawable.ic_send, new View.OnClickListener() {
                 @Override
                 public void onClick(View view) {
                     shareNotificationImage(entry);
@@ -2551,34 +3177,32 @@ public final class MainActivity extends Activity {
         }
 
         setHistorySwipeToClear(item, entry);
-        notificationHistoryList.addView(item, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams itemLp = matchWrapParams();
+        if (notificationHistoryList.getChildCount() > 0) {
+            itemLp.topMargin = dp(10);
+        }
+        notificationHistoryList.addView(item, itemLp);
     }
 
     private void addHistoryEmptyRow(String text) {
-        TextView empty = historyText(text, 13, COLOR_TEXT_DIM, false);
+        LinearLayout box = newColumn();
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+        box.setPadding(dp(16), dp(34), dp(16), dp(34));
+        box.setBackground(Ui.roundedFill(COLOR_SURFACE, dp(18), dp(1), COLOR_BORDER));
+        box.addView(Ui.icon(this, R.drawable.ic_inbox, 34, COLOR_TEXT_FAINT),
+                new LinearLayout.LayoutParams(dp(34), dp(34)));
+        TextView empty = historyText(text, 14, COLOR_TEXT_DIM, false);
         empty.setGravity(Gravity.CENTER);
-        empty.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        notificationHistoryList.addView(empty, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
+        box.addView(empty, topMarginParams(12));
+        notificationHistoryList.addView(box, matchWrapParams());
     }
 
-    private void addHistorySeparator() {
-        View hairline = new View(this);
-        hairline.setBackgroundColor(COLOR_FIELD_BORDER);
-        notificationHistoryList.addView(hairline, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(1)));
-    }
-
-    private TextView historyText(String text, int sp, int color, boolean medium) {
+    private TextView historyText(String text, float sp, int color, boolean medium) {
         TextView view = new TextView(this);
         view.setText(text);
         view.setTextSize(sp);
         view.setTextColor(color);
-        view.setTypeface(Typeface.create("sans-serif-medium", medium ? Typeface.BOLD : Typeface.NORMAL));
+        view.setTypeface(medium ? Ui.FONT_BOLD : Typeface.DEFAULT);
         view.setIncludeFontPadding(false);
         view.setLineSpacing(0, 1.15f);
         return view;
@@ -2850,6 +3474,10 @@ public final class MainActivity extends Activity {
         boolean enabled = switchValue(vncEnabledSwitch, Config.get(this).vncEnabled());
         setVncPill(enabled, state);
         vncStatusText.setText(vncStatusLine(enabled, state));
+        String client = VncStateStore.clientAddress(this);
+        setTileDetail("vnc", !enabled ? "Remote screen"
+                : !client.isEmpty() ? "Client " + client
+                : "Port " + Config.get(this).vncPort() + " · " + Config.vncEngineLabel(vncEngine));
 
         // Stop is available whenever the service is up at all, waiting
         // included, so the user can hold it before walking into range.
@@ -2857,8 +3485,8 @@ public final class MainActivity extends Activity {
         boolean retryable = VncStateStore.STATE_OFF.equals(state)
                 || VncStateStore.STATE_BLOCKED.equals(state)
                 || VncStateStore.STATE_ERROR.equals(state);
-        applyButtonState(vncStartButton, enabled && retryable, COLOR_PRIMARY, Color.WHITE);
-        applyButtonState(vncStopButton, running, COLOR_DANGER, Color.WHITE);
+        applyButtonState(vncStartButton, enabled && retryable, COLOR_PRIMARY, COLOR_ON_ACCENT);
+        applyButtonState(vncStopButton, running, COLOR_DANGER, COLOR_ON_DANGER);
         if (vncAuthorizeRow != null) {
             vncAuthorizeRow.setVisibility(
                     Config.VNC_ENGINE_PROJECTION.equals(vncEngine) ? View.VISIBLE : View.GONE);
@@ -3070,6 +3698,10 @@ public final class MainActivity extends Activity {
             }
         }
         renderBeaconPill(enabled, state);
+        setTileDetail("beacon", !enabled ? "Bluetooth iBeacon"
+                : BeaconStateStore.STATE_ADVERTISING.equals(state)
+                ? Config.beaconIntervalDisplay(BeaconStateStore.intervalSeconds(this))
+                : BeaconStateStore.label(state));
         renderBeaconStatus(config, enabled, state);
         renderBeaconRules(config);
         if (beaconUuidValue != null) {
@@ -3189,7 +3821,7 @@ public final class MainActivity extends Activity {
         for (int i = 0; i < rules.size(); i++) {
             if (i > 0) {
                 View hairline = new View(this);
-                hairline.setBackgroundColor(COLOR_FIELD_BORDER);
+                hairline.setBackgroundColor(COLOR_BORDER);
                 beaconRuleList.addView(hairline, new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
             }
@@ -3210,28 +3842,20 @@ public final class MainActivity extends Activity {
         top.addView(threshold, inRow(top, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         if (active) {
-            TextView activePill = new TextView(this);
-            activePill.setText("ACTIVE");
-            activePill.setTextSize(10);
-            activePill.setTypeface(Typeface.DEFAULT_BOLD);
-            activePill.setLetterSpacing(0.12f);
-            activePill.setTextColor(COLOR_PRIMARY_ON_CONTAINER);
-            activePill.setBackground(roundedFill(COLOR_PRIMARY_CONTAINER, PILL_CORNER, 0, 0));
-            activePill.setPadding(dp(GAP), dp(6), dp(GAP), dp(6));
-            activePill.setIncludeFontPadding(false);
-            Ui.marqueeLabel(activePill);
+            StatusPill activePill = new StatusPill(this, true);
+            activePill.set("ACTIVE", Ui.TONE_OK);
             top.addView(activePill, inRow(top,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
         }
 
-        Button delete = neutralButton("Delete", new View.OnClickListener() {
+        Button delete = compact(neutralButton("Delete", R.drawable.ic_trash, new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 deleteBeaconRule(rule);
             }
-        });
-        top.addView(delete, inRow(top, dp(96), dp(BUTTON_MIN_HEIGHT), 0f));
+        }));
+        top.addView(delete, inRow(top, dp(112), dp(40), 0f));
 
         TextView detail = historyText(rule.displayInterval(), 12,
                 rule.broadcasts() ? COLOR_TEXT_DIM : COLOR_BAD, false);
@@ -3337,161 +3961,168 @@ public final class MainActivity extends Activity {
     }
 
     // ============================================================
-    //  Panel / card helpers
+    //  Cards, sections & pills
     // ============================================================
 
-    private Panel addExpandablePanel(LinearLayout root, String title, boolean hasPill) {
-        LinearLayout card = newColumn();
-        card.setBackground(roundedFill(COLOR_SURFACE, CARD_CORNER, 1, COLOR_BORDER));
-        card.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        root.addView(card, stack(root));
-
-        final LinearLayout headerRow = newRow();
-        headerRow.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT));
-        card.addView(headerRow, stack(card));
-
-        TextView titleView = new TextView(this);
-        titleView.setText(title);
-        titleView.setTextSize(17);
-        titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-        titleView.setTextColor(COLOR_TEXT);
-        titleView.setSingleLine(true);
-        titleView.setEllipsize(TextUtils.TruncateAt.END);
-        titleView.setIncludeFontPadding(false);
-        titleView.setPadding(dp(4), 0, 0, 0);
-        headerRow.addView(titleView, inRow(headerRow, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        TextView panelPill = null;
-        if (hasPill) {
-            panelPill = pill("DISABLED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
-            headerRow.addView(panelPill, inRow(headerRow,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+    /**
+     * A titled card on a page. The heading sits above the card, the way Android's own
+     * settings group things; a null title gives an untitled card.
+     */
+    private LinearLayout section(LinearLayout container, String title) {
+        boolean titled = title != null && !title.isEmpty();
+        if (titled) {
+            TextView header = Ui.caps(this, title);
+            header.setPadding(dp(4), 0, dp(4), 0);
+            LinearLayout.LayoutParams headerLp = matchWrapParams();
+            headerLp.topMargin = dp(22);
+            headerLp.bottomMargin = dp(10);
+            container.addView(header, headerLp);
         }
+        LinearLayout card = newColumn();
+        card.setBackground(roundedFill(COLOR_SURFACE, SECTION_CORNER, 1, COLOR_BORDER));
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        Ui.elevate(card, 1f);
+        LinearLayout.LayoutParams cardLp = matchWrapParams();
+        if (!titled) {
+            cardLp.topMargin = dp(14);
+        }
+        container.addView(card, cardLp);
+        return card;
+    }
 
-        final TextView indicator = new TextView(this);
-        indicator.setText("▾");
-        indicator.setTextSize(20);
-        indicator.setTypeface(Typeface.DEFAULT_BOLD);
-        indicator.setTextColor(COLOR_TEXT_FAINT);
-        indicator.setGravity(Gravity.CENTER);
-        indicator.setIncludeFontPadding(false);
-        indicator.setRotation(-90f);
-        headerRow.addView(indicator, inRow(headerRow, dp(CHEVRON_SIZE), dp(CHEVRON_SIZE), 0f));
-
-        final LinearLayout content = newColumn();
-        content.setVisibility(View.GONE);
-        card.addView(content, stack(card));
-
-        headerRow.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                boolean expanded = content.getVisibility() == View.VISIBLE;
-                animatePanel(content, !expanded);
-                indicator.animate().rotation(expanded ? -90f : 0f).setDuration(180).start();
-            }
-        });
-
-        Panel panel = new Panel(card, content, panelPill, indicator);
-        panels.add(panel);
-        return panel;
+    /** A section card without padding, for lists whose rows bring their own. */
+    private LinearLayout listCard(LinearLayout container, String title) {
+        LinearLayout card = section(container, title);
+        card.setPadding(0, 0, 0, 0);
+        card.setClipToOutline(true);
+        return card;
     }
 
     /**
-     * Shuts every panel and returns the page to the top, without animating —
-     * this runs while the window is off screen, so there is nothing to watch.
+     * The headline switch of a page. It lights up in the feature's colour while on, so a page
+     * says at a glance whether the feature is running. The returned switch is an ordinary one:
+     * the caller binds persistence to it like any other.
      */
-    private void collapseAllPanels() {
-        for (Panel panel : panels) {
-            panel.content.animate().cancel();
-            panel.content.setVisibility(View.GONE);
-            ViewGroup.LayoutParams lp = panel.content.getLayoutParams();
-            if (lp != null) {
-                lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                panel.content.setLayoutParams(lp);
-            }
-            panel.indicator.animate().cancel();
-            panel.indicator.setRotation(-90f);
-        }
-        final ScrollView scrollView = contentScrollView;
-        if (scrollView != null) {
-            scrollView.scrollTo(0, 0);
-            // The collapse changes the content height, so the position has to
-            // be reasserted once the new layout has been through a pass.
-            scrollView.post(new Runnable() {
-                @Override
-                public void run() {
-                    scrollView.scrollTo(0, 0);
-                }
-            });
-        }
-    }
+    private Switch addMasterToggle(Panel page, int iconRes, String label, String subtitle) {
+        final int accent = page.accent;
+        final LinearLayout card = newRow();
+        card.setPadding(dp(14), dp(14), dp(14), dp(14));
+        final LinearLayout chip = Ui.iconChip(this, iconRes, 46, 24, COLOR_NEUTRAL_CONTAINER, COLOR_TEXT_FAINT);
+        card.addView(chip);
 
-    private void animatePanel(final View content, boolean expand) {
-        content.animate().cancel();
-        int startHeight = content.getVisibility() == View.VISIBLE ? content.getHeight() : 0;
-        int endHeight;
-        if (expand) {
-            content.setVisibility(View.VISIBLE);
-            content.measure(
-                    View.MeasureSpec.makeMeasureSpec(((View) content.getParent()).getWidth(), View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-            endHeight = content.getMeasuredHeight();
-        } else {
-            endHeight = 0;
+        LinearLayout texts = newColumn();
+        LinearLayout.LayoutParams textsLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        textsLp.leftMargin = dp(14);
+        card.addView(texts, textsLp);
+        texts.addView(historyText(label, 16, COLOR_TEXT, true));
+        if (subtitle != null && !subtitle.isEmpty()) {
+            TextView sub = historyText(subtitle, 12.5f, COLOR_TEXT_DIM, false);
+            sub.setLineSpacing(0, 1.2f);
+            texts.addView(sub, topMarginParams(3));
         }
 
-        final ViewGroup.LayoutParams lp = content.getLayoutParams();
-        ValueAnimator animator = ValueAnimator.ofInt(startHeight, endHeight);
-        animator.setDuration(PANEL_ANIMATION_MS);
-        animator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+        final ToggleSwitch sw = makeSwitch();
+        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        swLp.leftMargin = dp(12);
+        card.addView(sw, swLp);
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onAnimationUpdate(ValueAnimator animation) {
-                lp.height = (Integer) animation.getAnimatedValue();
-                content.setLayoutParams(lp);
+            public void onClick(View view) {
+                sw.toggle();
             }
         });
-        animator.addListener(new android.animation.AnimatorListenerAdapter() {
+        ToggleSwitch.Hook hook = new ToggleSwitch.Hook() {
             @Override
-            public void onAnimationEnd(android.animation.Animator animation) {
-                if (expand) {
-                    lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                    content.setLayoutParams(lp);
+            public void onChecked(boolean on) {
+                int surface = COLOR_SURFACE;
+                int fg = Ui.accentFg(accent);
+                int bg = Ui.accentContainer(accent);
+                GradientDrawable shape;
+                if (on) {
+                    shape = Ui.gradient(GradientDrawable.Orientation.TL_BR,
+                            Ui.blend(bg, surface, Ui.dark ? 0.55f : 0.65f), surface, dp(SECTION_CORNER));
+                    shape.setStroke(dp(1), Ui.blend(fg, surface, Ui.dark ? 0.35f : 0.3f));
+                    chip.setBackground(Ui.roundedFill(bg, dp(16), 0, 0));
+                    ((ImageView) chip.getChildAt(0)).setColorFilter(fg);
                 } else {
-                    content.setVisibility(View.GONE);
-                    lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                    content.setLayoutParams(lp);
+                    shape = Ui.gradient(GradientDrawable.Orientation.TL_BR, surface, surface, dp(SECTION_CORNER));
+                    shape.setStroke(dp(1), COLOR_BORDER);
+                    chip.setBackground(Ui.roundedFill(COLOR_NEUTRAL_CONTAINER, dp(16), 0, 0));
+                    ((ImageView) chip.getChildAt(0)).setColorFilter(COLOR_TEXT_FAINT);
                 }
+                card.setBackground(Ui.ripple(Ui.alpha(fg, 0.12f), shape, dp(SECTION_CORNER)));
             }
-        });
-        animator.start();
+        };
+        sw.setHook(hook);
+        hook.onChecked(false);
+        Ui.elevate(card, 1f);
+        LinearLayout.LayoutParams lp = matchWrapParams();
+        lp.topMargin = dp(16);
+        page.content.addView(card, lp);
+        return sw;
     }
 
-    private TextView pill(String text, int bg, int fg) {
-        TextView v = new TextView(this);
-        v.setText(text);
-        v.setTextSize(10);
-        v.setTypeface(Typeface.DEFAULT_BOLD);
-        v.setLetterSpacing(0.12f);
-        v.setTextColor(fg);
-        v.setBackground(roundedFill(bg, PILL_CORNER, 0, 0));
-        v.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        v.setGravity(Gravity.CENTER);
-        v.setWidth(dp(PILL_WIDTH));
-        v.setIncludeFontPadding(false);
-        // The pill is a fixed width, so a long state word would otherwise be
-        // cut off mid-letter.
-        Ui.marqueeLabel(v);
-        return v;
+    /** A line of small explanatory text under a control. */
+    private TextView addNote(LinearLayout parent, String text) {
+        TextView note = historyText(text, 12, COLOR_TEXT_FAINT, false);
+        note.setLineSpacing(0, 1.25f);
+        LinearLayout.LayoutParams lp = matchWrapParams();
+        if (parent.getChildCount() > 0) {
+            lp.topMargin = dp(12);
+        }
+        parent.addView(note, lp);
+        return note;
     }
 
-    private GradientDrawable roundedFill(int color, int cornerDp, int strokeDp, int strokeColor) {
-        return Ui.roundedFill(color, dp(cornerDp), strokeDp > 0 ? dp(strokeDp) : 0, strokeColor);
+    private void addDivider(LinearLayout parent, int insetStartDp) {
+        View line = new View(this);
+        line.setBackgroundColor(COLOR_BORDER);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+        lp.leftMargin = dp(insetStartDp);
+        parent.addView(line, lp);
+    }
+
+    /** A tappable row of an icon, a title and a hint, which runs {@link #action}. */
+    private void addActionRow(LinearLayout card, int iconRes, String title, String hint, String command) {
+        if (card.getChildCount() > 0) {
+            addDivider(card, 64);
+        }
+        LinearLayout row = newRow();
+        row.setPadding(dp(14), dp(12), dp(10), dp(12));
+        row.setMinimumHeight(dp(56));
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setBackground(Ui.ripple(COLOR_RIPPLE_LIGHT, roundedFill(0, 0, 0, 0), 0));
+        row.addView(Ui.iconChip(this, iconRes, 38, 20, COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER));
+        LinearLayout texts = newColumn();
+        LinearLayout.LayoutParams textsLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        textsLp.leftMargin = dp(14);
+        row.addView(texts, textsLp);
+        texts.addView(historyText(title, 14.5f, COLOR_TEXT, true));
+        if (hint != null && !hint.isEmpty()) {
+            texts.addView(historyText(hint, 12, COLOR_TEXT_DIM, false), topMarginParams(2));
+        }
+        row.addView(Ui.icon(this, R.drawable.ic_chevron_right, 20, COLOR_TEXT_FAINT),
+                new LinearLayout.LayoutParams(dp(20), dp(20)));
+        row.setOnClickListener(action(command));
+        card.addView(row, matchWrapParams());
     }
 
     // ============================================================
     //  Buttons
     // ============================================================
+
+    /** A button on a row of its own, for labels too long to share a line. */
+    private void addStackedButton(LinearLayout parent, Button button) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(BUTTON_MIN_HEIGHT));
+        lp.topMargin = dp(GAP);
+        parent.addView(button, lp);
+    }
 
     private void addRowButton(LinearLayout row, Button button) {
         row.addView(button, inRow(row, 0, dp(BUTTON_MIN_HEIGHT), 1f));
@@ -3504,27 +4135,36 @@ public final class MainActivity extends Activity {
         button.setEnabled(enabled);
         button.setTextColor(enabled ? enabledFg : COLOR_TEXT_FAINT);
         int bg = enabled ? enabledBg : COLOR_FIELD_BG;
-        int ripple = enabled ? COLOR_RIPPLE_LIGHT : 0x00000000;
-        button.setBackground(new RippleDrawable(
-                ColorStateList.valueOf(ripple),
-                roundedFill(bg, BUTTON_CORNER, 0, 0),
-                null));
+        int ripple = enabled ? Ui.alpha(enabledFg, 0.2f) : 0x00000000;
+        button.setBackground(Ui.ripple(ripple,
+                Ui.roundedFill(bg, dp(BUTTON_CORNER), enabled ? 0 : dp(1), COLOR_FIELD_BORDER), dp(BUTTON_CORNER)));
     }
 
     private Button primaryButton(String text, View.OnClickListener listener) {
-        return styledButton(text, listener, COLOR_PRIMARY, Color.WHITE, COLOR_RIPPLE_DARK);
+        return primaryButton(text, 0, listener);
+    }
+
+    private Button primaryButton(String text, int iconRes, View.OnClickListener listener) {
+        return Ui.iconButton(this, text, iconRes, COLOR_PRIMARY, COLOR_ON_ACCENT,
+                Ui.alpha(COLOR_ON_ACCENT, 0.2f), listener);
     }
 
     private Button tonalButton(String text, View.OnClickListener listener) {
-        return styledButton(text, listener, COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER, COLOR_RIPPLE_LIGHT);
+        return tonalButton(text, 0, listener);
+    }
+
+    private Button tonalButton(String text, int iconRes, View.OnClickListener listener) {
+        return Ui.iconButton(this, text, iconRes, COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER,
+                COLOR_RIPPLE_LIGHT, listener);
     }
 
     private Button neutralButton(String text, View.OnClickListener listener) {
-        return styledButton(text, listener, COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER, COLOR_RIPPLE_LIGHT);
+        return neutralButton(text, 0, listener);
     }
 
-    private Button styledButton(String text, View.OnClickListener listener, int bg, int fg, int ripple) {
-        return Ui.button(this, text, bg, fg, ripple, listener);
+    private Button neutralButton(String text, int iconRes, View.OnClickListener listener) {
+        return Ui.iconButton(this, text, iconRes, COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER,
+                COLOR_RIPPLE_LIGHT, listener);
     }
 
     // ============================================================
@@ -3588,43 +4228,58 @@ public final class MainActivity extends Activity {
         addFieldLabel(root, label);
 
         EditText field = new EditText(this);
-        field.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
+        field.setBackground(Ui.fieldBackground(this, false));
         field.setSingleLine(true);
         field.setInputType(inputType);
         field.setTextSize(15);
         field.setTextColor(COLOR_TEXT);
         field.setHintTextColor(COLOR_TEXT_FAINT);
+        field.setHighlightColor(Ui.alpha(COLOR_PRIMARY, 0.3f));
         field.setMinHeight(dp(FIELD_MIN_HEIGHT));
         field.setMinimumHeight(dp(FIELD_MIN_HEIGHT));
         field.setGravity(Gravity.CENTER_VERTICAL);
-        field.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        root.addView(field, stack(root));
+        field.setPadding(dp(14), dp(10), dp(14), dp(10));
+        root.addView(field, belowLabel(root));
         return field;
     }
 
     private void addFieldLabel(LinearLayout root, String label) {
         TextView labelView = new TextView(this);
         labelView.setText(label);
-        labelView.setTextSize(12);
+        labelView.setTextSize(12.5f);
         labelView.setTextColor(COLOR_LABEL);
-        labelView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        labelView.setLetterSpacing(0.02f);
+        labelView.setTypeface(Ui.FONT_MEDIUM);
         labelView.setIncludeFontPadding(false);
-        root.addView(labelView, stack(root));
+        LinearLayout.LayoutParams lp = matchWrapParams();
+        if (root.getChildCount() > 0) {
+            lp.topMargin = dp(16);
+        }
+        root.addView(labelView, lp);
+    }
+
+    /** Layout for the control that sits directly under its {@link #addFieldLabel}. */
+    private LinearLayout.LayoutParams belowLabel(LinearLayout root) {
+        LinearLayout.LayoutParams lp = matchWrapParams();
+        lp.topMargin = dp(7);
+        return lp;
     }
 
     private Button addPickerButton(LinearLayout root, String label, String text, View.OnClickListener listener) {
         addFieldLabel(root, label);
         Button button = tonalButton(text, listener);
-        root.addView(button, stack(root));
+        root.addView(button, belowLabel(root));
         return button;
     }
 
     private VolumeInput addVolumeInput(LinearLayout root, String label) {
         LinearLayout box = newColumn();
         box.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
-        box.setPadding(dp(GAP), dp(GAP), dp(GAP), dp(GAP));
-        root.addView(box, stack(root));
+        box.setPadding(dp(14), dp(12), dp(14), dp(12));
+        LinearLayout.LayoutParams boxLp = stack(root);
+        if (root.getChildCount() > 0) {
+            boxLp.topMargin = dp(16);
+        }
+        root.addView(box, boxLp);
 
         LinearLayout top = newRow();
         box.addView(top, new LinearLayout.LayoutParams(
@@ -3634,40 +4289,44 @@ public final class MainActivity extends Activity {
         TextView title = new TextView(this);
         title.setText(label);
         title.setTextColor(COLOR_TEXT);
-        title.setTextSize(14);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setTextSize(14.5f);
+        title.setTypeface(Ui.FONT_MEDIUM);
         title.setIncludeFontPadding(false);
         top.addView(title, inRow(top, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        final TextView valueView = new TextView(this);
-        valueView.setTextColor(COLOR_TEXT_DIM);
-        valueView.setTextSize(12);
-        valueView.setTypeface(Typeface.DEFAULT_BOLD);
-        valueView.setIncludeFontPadding(false);
-        top.addView(valueView, inRow(top, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+        LinearLayout unchanged = newRow();
+        unchanged.setClickable(true);
+        unchanged.setBackground(Ui.ripple(COLOR_RIPPLE_LIGHT, Ui.roundedFill(0, dp(10), 0, 0), dp(10)));
+        unchanged.setPadding(dp(8), dp(4), 0, dp(4));
+        TextView unchangedLabel = new TextView(this);
+        unchangedLabel.setText("Unchanged");
+        unchangedLabel.setTextColor(COLOR_TEXT_DIM);
+        unchangedLabel.setTextSize(12.5f);
+        unchangedLabel.setSingleLine(true);
+        unchangedLabel.setIncludeFontPadding(false);
+        unchanged.addView(unchangedLabel, inRow(unchanged, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+        final Switch unchangedSwitch = makeSwitch();
+        unchangedSwitch.setChecked(true);
+        unchanged.addView(unchangedSwitch, inRow(unchanged, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+        top.addView(unchanged, inRow(top, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
 
         LinearLayout control = newRow();
-        box.addView(control, topMarginParams(8));
+        box.addView(control, topMarginParams(6));
 
         final SeekBar slider = new SeekBar(this);
         slider.setMax(100);
         slider.setProgress(50);
+        Ui.styleSeekBar(slider);
         control.addView(slider, inRow(control, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        LinearLayout unchanged = newRow();
-        unchanged.setPadding(dp(GAP), 0, 0, 0);
-        TextView unchangedLabel = new TextView(this);
-        unchangedLabel.setText("Unchanged");
-        unchangedLabel.setTextColor(COLOR_TEXT_DIM);
-        unchangedLabel.setTextSize(12);
-        unchangedLabel.setSingleLine(true);
-        unchangedLabel.setIncludeFontPadding(false);
-        unchanged.addView(unchangedLabel, inRow(unchanged, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
-
-        final Switch unchangedSwitch = makeSwitch();
-        unchangedSwitch.setChecked(true);
-        unchanged.addView(unchangedSwitch, inRow(unchanged, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
-        control.addView(unchanged, inRow(control, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+        final TextView valueView = new TextView(this);
+        valueView.setTextColor(COLOR_TEXT_DIM);
+        valueView.setTextSize(13);
+        valueView.setTypeface(Typeface.DEFAULT_BOLD);
+        valueView.setGravity(Gravity.END);
+        valueView.setIncludeFontPadding(false);
+        valueView.setMinWidth(dp(48));
+        control.addView(valueView, inRow(control, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
 
         final VolumeInput input = new VolumeInput(slider, unchangedSwitch, valueView);
         unchanged.setOnClickListener(new View.OnClickListener() {
@@ -3706,7 +4365,7 @@ public final class MainActivity extends Activity {
     private void addDndModeInput(LinearLayout root) {
         addFieldLabel(root, "Do Not Disturb");
         LinearLayout row = newRow();
-        root.addView(row, stack(root));
+        root.addView(row, belowLabel(root));
         volumeRuleDndUnchangedButton = tonalButton("Unchanged", new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -3736,6 +4395,7 @@ public final class MainActivity extends Activity {
         int initialMinute = volumeRuleMinute >= 0 ? volumeRuleMinute : 0;
         TimePickerDialog dialog = new TimePickerDialog(
                 this,
+                Ui.dark ? R.style.SysmgrDialog_Dark : R.style.SysmgrDialog_Light,
                 new TimePickerDialog.OnTimeSetListener() {
                     @Override
                     public void onTimeSet(android.widget.TimePicker view, int hourOfDay, int minute) {
@@ -3792,7 +4452,7 @@ public final class MainActivity extends Activity {
         boolean unchanged = input.unchangedSwitch.isChecked();
         input.slider.setEnabled(!unchanged);
         input.slider.setAlpha(unchanged ? 0.45f : 1f);
-        input.valueView.setText(unchanged ? "UNCHANGED" : input.slider.getProgress() + "%");
+        input.valueView.setText(unchanged ? "—" : input.slider.getProgress() + "%");
         input.valueView.setTextColor(unchanged ? COLOR_TEXT_FAINT : COLOR_PRIMARY);
     }
 
@@ -3815,13 +4475,11 @@ public final class MainActivity extends Activity {
         if (button == null) {
             return;
         }
-        int bg = selected ? COLOR_PRIMARY : COLOR_PRIMARY_CONTAINER;
-        int fg = selected ? Color.WHITE : COLOR_PRIMARY_ON_CONTAINER;
+        int bg = selected ? COLOR_PRIMARY : COLOR_FIELD_BG;
+        int fg = selected ? COLOR_ON_ACCENT : COLOR_TEXT_DIM;
         button.setTextColor(fg);
-        button.setBackground(new RippleDrawable(
-                ColorStateList.valueOf(selected ? COLOR_RIPPLE_DARK : COLOR_RIPPLE_LIGHT),
-                roundedFill(bg, BUTTON_CORNER, 0, 0),
-                null));
+        button.setBackground(Ui.ripple(Ui.alpha(fg, 0.2f),
+                Ui.roundedFill(bg, dp(BUTTON_CORNER), selected ? 0 : dp(1), COLOR_FIELD_BORDER), dp(BUTTON_CORNER)));
     }
 
     private String formatRuleTime(int hour, int minute) {
@@ -3878,41 +4536,49 @@ public final class MainActivity extends Activity {
 
     private LinearLayout addToggleGroup(LinearLayout parent) {
         LinearLayout group = newColumn();
-        group.setBackground(roundedFill(COLOR_FIELD_BG, FIELD_CORNER, 1, COLOR_FIELD_BORDER));
         parent.addView(group, stack(parent));
         return group;
     }
 
-    @SuppressWarnings("deprecation")
     private Switch addGroupedToggle(LinearLayout group, String text) {
+        return addGroupedToggle(group, text, null);
+    }
+
+    /** A labelled switch row; rows in one group are separated by hairlines. */
+    private Switch addGroupedToggle(LinearLayout group, String text, String description) {
         if (group.getChildCount() > 0) {
-            View hairline = new View(this);
-            hairline.setBackgroundColor(COLOR_FIELD_BORDER);
-            LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
-            group.addView(hairline, hlp);
+            addDivider(group, 0);
         }
 
         LinearLayout row = newRow();
-        row.setMinimumHeight(dp(FIELD_MIN_HEIGHT));
-        row.setPadding(dp(GAP), 0, dp(GAP), 0);
+        row.setMinimumHeight(dp(TOGGLE_ROW_MIN_HEIGHT));
+        row.setPadding(0, dp(8), 0, dp(8));
 
+        LinearLayout texts = newColumn();
+        row.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView label = new TextView(this);
         label.setText(text);
         label.setTextColor(COLOR_TEXT);
-        label.setTextSize(14);
+        label.setTextSize(14.5f);
         label.setIncludeFontPadding(false);
-        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        row.addView(label, labelLp);
+        label.setLineSpacing(0, 1.1f);
+        texts.addView(label);
+        if (description != null && !description.isEmpty()) {
+            TextView hint = historyText(description, 12, COLOR_TEXT_DIM, false);
+            hint.setLineSpacing(0, 1.2f);
+            texts.addView(hint, topMarginParams(3));
+        }
 
         final Switch sw = makeSwitch();
         LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
-        swLp.setMargins(dp(GAP), 0, 0, 0);
+        swLp.setMargins(dp(14), 0, 0, 0);
         row.addView(sw, swLp);
 
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setBackground(Ui.ripple(COLOR_RIPPLE_LIGHT, Ui.roundedFill(0, dp(12), 0, 0), dp(12)));
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -3920,134 +4586,86 @@ public final class MainActivity extends Activity {
             }
         });
 
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-        group.addView(row, rowLp);
-
+        group.addView(row, matchWrapParams());
         return sw;
     }
 
-    @SuppressWarnings("deprecation")
-    private Switch makeSwitch() {
-        Switch sw = new Switch(this);
-        ColorStateList trackTint = new ColorStateList(
-                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
-                new int[]{COLOR_SWITCH_TRACK_ON, COLOR_SWITCH_TRACK_OFF});
-        ColorStateList thumbTint = new ColorStateList(
-                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
-                new int[]{COLOR_PRIMARY, 0xFFFFFFFF});
-        sw.setTrackTintList(trackTint);
-        sw.setThumbTintList(thumbTint);
-        return sw;
+    private ToggleSwitch makeSwitch() {
+        return new ToggleSwitch(this);
     }
 
-    private void addSubsectionLabel(LinearLayout panel, String title) {
-        TextView t = new TextView(this);
-        t.setText(title.toUpperCase());
-        t.setTextSize(11);
-        t.setTextColor(COLOR_TEXT_FAINT);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setLetterSpacing(0.16f);
-        t.setIncludeFontPadding(false);
-        panel.addView(t, stack(panel));
-    }
-
+    /** A readiness row: an icon, the requirement and its state; a missing one can be tapped to fix. */
     private void addStatusRow(LinearLayout root, String label, boolean ok) {
-        LinearLayout row = newRow();
-        row.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT));
+        addStatusRow(root, label, ok, null);
+    }
 
-        View dot = new View(this);
-        GradientDrawable d = new GradientDrawable();
-        d.setShape(GradientDrawable.OVAL);
-        d.setColor(ok ? COLOR_OK : COLOR_BAD);
-        dot.setBackground(d);
-        row.addView(dot, inRow(row, dp(STATUS_DOT_SIZE), dp(STATUS_DOT_SIZE), 0f));
+    private void addStatusRow(LinearLayout root, String label, boolean ok, String fixCommand) {
+        if (root.getChildCount() > 0) {
+            addDivider(root, 34);
+        }
+        LinearLayout row = newRow();
+        row.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT + 6));
+
+        row.addView(Ui.icon(this, ok ? R.drawable.ic_check_circle : R.drawable.ic_warning, 20,
+                ok ? COLOR_OK : COLOR_BAD), new LinearLayout.LayoutParams(dp(20), dp(20)));
 
         TextView labelView = new TextView(this);
         labelView.setText(label);
         labelView.setTextColor(COLOR_TEXT);
-        labelView.setTextSize(13);
+        labelView.setTextSize(14);
         labelView.setIncludeFontPadding(false);
-        row.addView(labelView, inRow(row, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        labelLp.leftMargin = dp(14);
+        row.addView(labelView, labelLp);
 
         TextView valueView = new TextView(this);
         valueView.setText(ok ? "READY" : "NEEDED");
         valueView.setTextColor(ok ? COLOR_OK : COLOR_BAD);
-        valueView.setTextSize(10);
+        valueView.setTextSize(10.5f);
         valueView.setTypeface(Typeface.DEFAULT_BOLD);
-        valueView.setLetterSpacing(0.10f);
+        valueView.setLetterSpacing(0.1f);
         valueView.setIncludeFontPadding(false);
-        row.addView(valueView, inRow(row,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 0f));
+        row.addView(valueView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        root.addView(row, stack(root));
+        if (!ok && fixCommand != null) {
+            row.addView(Ui.icon(this, R.drawable.ic_chevron_right, 18, COLOR_BAD),
+                    new LinearLayout.LayoutParams(dp(18), dp(18)));
+            row.setClickable(true);
+            row.setFocusable(true);
+            row.setBackground(Ui.ripple(Ui.alpha(COLOR_BAD, 0.12f), Ui.roundedFill(0, dp(10), 0, 0), dp(10)));
+            row.setOnClickListener(action(fixCommand));
+        }
+        root.addView(row, matchWrapParams());
     }
 
-    /** Label/value row for read-only status cards, styled like {@link #addStatusRow}. */
+    /** Label/value row for read-only status cards. */
     private TextView addInfoRow(LinearLayout root, String label, String value, int valueColor) {
+        if (root.getChildCount() > 0) {
+            addDivider(root, 0);
+        }
         LinearLayout row = newRow();
-        row.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT));
+        row.setMinimumHeight(dp(STATUS_ROW_MIN_HEIGHT + 4));
 
         TextView labelView = new TextView(this);
         labelView.setText(label);
         labelView.setTextColor(COLOR_LABEL);
-        labelView.setTextSize(13);
+        labelView.setTextSize(13.5f);
         labelView.setIncludeFontPadding(false);
         row.addView(labelView, inRow(row, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView valueView = new TextView(this);
         valueView.setText(value);
         valueView.setTextColor(valueColor);
-        valueView.setTextSize(13);
-        valueView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        valueView.setTextSize(13.5f);
+        valueView.setTypeface(Ui.FONT_MEDIUM);
         valueView.setGravity(Gravity.END);
         valueView.setIncludeFontPadding(false);
         valueView.setLineSpacing(0, 1.15f);
         row.addView(valueView, inRow(row, 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
 
-        root.addView(row, stack(root));
+        root.addView(row, matchWrapParams());
         return valueView;
-    }
-
-    // ============================================================
-    //  System bars & insets
-    // ============================================================
-
-    private void configureSystemBars() {
-        Window window = getWindow();
-        window.setStatusBarColor(COLOR_BG);
-        window.setNavigationBarColor(COLOR_BG);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            int flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-            }
-            window.getDecorView().setSystemUiVisibility(flags);
-        }
-    }
-
-    private void applyDynamicInsets(final LinearLayout root) {
-        final int basePadding = dp(GAP);
-        final int topBuffer = dp(4);
-        root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
-            @Override
-            public WindowInsets onApplyWindowInsets(View view, WindowInsets insets) {
-                int topInset;
-                int bottomInset;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    android.graphics.Insets systemBars = insets.getInsets(WindowInsets.Type.systemBars());
-                    topInset = systemBars.top;
-                    bottomInset = systemBars.bottom;
-                } else {
-                    topInset = insets.getSystemWindowInsetTop();
-                    bottomInset = insets.getSystemWindowInsetBottom();
-                }
-                view.setPadding(basePadding, topInset + topBuffer, basePadding, bottomInset);
-                return insets;
-            }
-        });
     }
 
     // ============================================================
@@ -4081,8 +4699,8 @@ public final class MainActivity extends Activity {
         setEnabledPill(logPill, switchValue(logEnabledSwitch, config.logEnabled()));
         refreshSystemBackupStatus();
         refreshUpgradeStatus();
-        applyButtonState(startTrackingButton, !tracking, COLOR_PRIMARY, Color.WHITE);
-        applyButtonState(stopTrackingButton, tracking, COLOR_DANGER, Color.WHITE);
+        applyButtonState(startTrackingButton, !tracking, COLOR_PRIMARY, COLOR_ON_ACCENT);
+        applyButtonState(stopTrackingButton, tracking, COLOR_DANGER, COLOR_ON_DANGER);
 
         renderWifi(config, cachedWifi);
 
@@ -4132,34 +4750,45 @@ public final class MainActivity extends Activity {
                 allPermissionsOk ? COLOR_PRIMARY_ON_CONTAINER : COLOR_DANGER_ON_CONTAINER);
 
         statusContainer.removeAllViews();
-        addStatusRow(statusContainer, "Fine location", fineLocation);
-        addStatusRow(statusContainer, "Background location", backgroundLocation);
-        addStatusRow(statusContainer, "Device location services", locationServices);
-        addStatusRow(statusContainer, "Nearby Wi-Fi", nearbyWifi);
-        addStatusRow(statusContainer, exactAlarmRequested ? "Exact alarms" : "Exact alarms not required", exactAlarms);
-        addStatusRow(statusContainer, "Battery unrestricted", batteryUnrestricted);
-        addStatusRow(statusContainer, "Notifications", notifications);
-        addStatusRow(statusContainer, "Notification access", notificationAccess);
-        addStatusRow(statusContainer, "Accessibility monitor", accessibility);
+        permissionsNeedingAttention = 0;
+        statusRow("Fine location", fineLocation, "common_permissions");
+        statusRow("Background location", backgroundLocation, "background_location");
+        statusRow("Device location services", locationServices, "location_settings");
+        statusRow("Nearby Wi-Fi", nearbyWifi, "common_permissions");
+        statusRow(exactAlarmRequested ? "Exact alarms" : "Exact alarms not required", exactAlarms, "exact_alarm");
+        statusRow("Battery unrestricted", batteryUnrestricted, "battery");
+        statusRow("Notifications", notifications, "notification_settings");
+        statusRow("Notification access", notificationAccess, "notification_access");
+        statusRow("Accessibility monitor", accessibility, "accessibility_settings");
         if (dndRuleConfigured) {
-            addStatusRow(statusContainer, "DND access", dndAccess);
+            statusRow("DND access", dndAccess, "dnd_access");
         }
         if (vpnProfileConfigured) {
-            addStatusRow(statusContainer, "VPN consent", vpnConsent);
+            statusRow("VPN consent", vpnConsent, null);
         }
         if (beaconEnabled) {
-            addStatusRow(statusContainer, "Bluetooth advertise", bluetoothAdvertise);
-            addStatusRow(statusContainer, "Bluetooth on", bluetoothOn);
+            statusRow("Bluetooth advertise", bluetoothAdvertise, "bluetooth_permission");
+            statusRow("Bluetooth on", bluetoothOn, "bluetooth_settings");
         }
         if (hiddenWifiMonitorNeedsAccessibility) {
-            addStatusRow(statusContainer, "Hidden Wi-Fi monitor", false);
+            statusRow("Hidden Wi-Fi monitor", false, "accessibility_settings");
         }
+        setTileDetail("permissions", permissionsNeedingAttention == 0
+                ? "Everything granted" : permissionsNeedingAttention + " to fix");
+        refreshDashboard();
 
         // Wi-Fi identity and the log file are read independently off the main
         // thread and applied when ready. The Wi-Fi lookup can block ~1.2s while
         // identity is resolving (e.g. right after a network change).
         scheduleWifiRefresh();
         scheduleLogRefresh();
+    }
+
+    private void statusRow(String label, boolean ok, String fixCommand) {
+        if (!ok) {
+            permissionsNeedingAttention++;
+        }
+        addStatusRow(statusContainer, label, ok, fixCommand);
     }
 
     private void renderWifi(Config config, WifiSnapshot wifi) {
@@ -4215,6 +4844,7 @@ public final class MainActivity extends Activity {
                         if (wifiSummary != null) {
                             renderWifi(Config.get(MainActivity.this), wifi);
                         }
+                        refreshDashboard();
                         if (wifiIoRequested) {
                             wifiIoRequested = false;
                             scheduleWifiRefresh();
@@ -4277,6 +4907,10 @@ public final class MainActivity extends Activity {
     }
 
     private void setRemoteLinkPill(boolean connected) {
+        if (!Config.get(this).remoteLinkEnabled()) {
+            setPillState(remoteLinkPill, "DISABLED", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+            return;
+        }
         setPillState(
                 remoteLinkPill,
                 connected ? "CONNECTED" : "DISCONNECTED",
@@ -4360,13 +4994,13 @@ public final class MainActivity extends Activity {
         remoteLinkLatencyButton.setText(latencyTesting ? "Stop" : "Test Latency");
         remoteLinkThroughputButton.setText(throughputTesting ? "Stop" : "Test Throughput");
         if (latencyTesting) {
-            applyButtonState(remoteLinkLatencyButton, true, COLOR_DANGER, Color.WHITE);
+            applyButtonState(remoteLinkLatencyButton, true, COLOR_DANGER, COLOR_ON_DANGER);
             applyButtonState(remoteLinkThroughputButton, false,
                     COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
         } else if (throughputTesting) {
             applyButtonState(remoteLinkLatencyButton, false,
                     COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
-            applyButtonState(remoteLinkThroughputButton, true, COLOR_DANGER, Color.WHITE);
+            applyButtonState(remoteLinkThroughputButton, true, COLOR_DANGER, COLOR_ON_DANGER);
         } else {
             applyButtonState(remoteLinkLatencyButton, connected,
                     COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
@@ -4555,6 +5189,7 @@ public final class MainActivity extends Activity {
                 }
                 if (Intent.ACTION_BATTERY_CHANGED.equals(action)) {
                     refreshBeaconPanel();
+                    refreshDashboard();
                     return;
                 }
                 // Permission and radio changes are uncommon, so a complete
@@ -4631,6 +5266,10 @@ public final class MainActivity extends Activity {
             label = backupRestoreInFlight ? "RESTORING" : "BACKING UP";
             background = COLOR_PRIMARY_CONTAINER;
             foreground = COLOR_PRIMARY_ON_CONTAINER;
+        } else if (!config.remoteLinkEnabled()) {
+            label = "LINK OFF";
+            background = COLOR_NEUTRAL_CONTAINER;
+            foreground = COLOR_NEUTRAL_ON_CONTAINER;
         } else if (!connected) {
             label = "LINK OFFLINE";
             background = COLOR_DANGER_CONTAINER;
@@ -4657,9 +5296,9 @@ public final class MainActivity extends Activity {
             foreground = COLOR_PRIMARY_ON_CONTAINER;
         }
         setPillState(systemBackupPill, label, background, foreground);
+        setTileDetail("backup", "Settings, history, VPN");
         boolean canBackUp = connected && checked && available && !backupOperationInFlight;
-        applyButtonState(backUpButton, canBackUp,
-                COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+        applyButtonState(backUpButton, canBackUp, COLOR_PRIMARY, COLOR_ON_ACCENT);
         applyButtonState(restoreBackupButton, canBackUp && exists,
                 COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
     }
@@ -4670,12 +5309,15 @@ public final class MainActivity extends Activity {
         }
         boolean configured = UpgradeStateStore.isConfigured(this);
         if (!configured) {
-            upgradePanel.content.setVisibility(View.GONE);
-            upgradePanel.indicator.setRotation(-90f);
-            upgradePanel.card.setVisibility(View.GONE);
+            dashboard.setTileVisible("upgrade", false);
+            dashboard.setUpdate(null);
+            // The page can still be on screen (or restored); say so rather than show stale state.
+            setPillState(upgradePill, "UNAVAILABLE", COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
+            applyButtonState(upgradeRefreshButton, false, COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
+            applyButtonState(upgradeInstallButton, false, COLOR_PRIMARY, COLOR_ON_ACCENT);
             return;
         }
-        upgradePanel.card.setVisibility(View.VISIBLE);
+        dashboard.setTileVisible("upgrade", true);
 
         boolean connected = Config.get(this).remoteLinkEnabled()
                 && RemoteLinkStateStore.isConnected(this);
@@ -4688,6 +5330,10 @@ public final class MainActivity extends Activity {
             label = "DOWNLOADING";
             background = COLOR_PRIMARY_CONTAINER;
             foreground = COLOR_PRIMARY_ON_CONTAINER;
+        } else if (!Config.get(this).remoteLinkEnabled()) {
+            label = "LINK OFF";
+            background = COLOR_NEUTRAL_CONTAINER;
+            foreground = COLOR_NEUTRAL_ON_CONTAINER;
         } else if (!connected) {
             label = "LINK OFFLINE";
             background = COLOR_DANGER_CONTAINER;
@@ -4706,6 +5352,11 @@ public final class MainActivity extends Activity {
             foreground = COLOR_PRIMARY_ON_CONTAINER;
         }
         setPillState(upgradePill, label, background, foreground);
+        String offered = UpgradeStateStore.apkVersionName(this);
+        boolean newer = exists && UpgradeStateStore.isApkVersionReady(this) && !offered.isEmpty()
+                && UpgradeStateStore.apkVersionCode(this) > AppVersion.code(this);
+        dashboard.setUpdate(newer ? offered : null);
+        setTileDetail("upgrade", newer ? "Version " + offered : "Version " + AppVersion.name(this));
 
         upgradeCurrentVersionValue.setText(AppVersion.name(this));
         upgradeCurrentVersionValue.setTextColor(COLOR_TEXT);
@@ -4753,7 +5404,7 @@ public final class MainActivity extends Activity {
         applyButtonState(upgradeRefreshButton, idleAndConnected,
                 COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
         applyButtonState(upgradeInstallButton, idleAndConnected && checked && exists,
-                COLOR_PRIMARY, Color.WHITE);
+                COLOR_PRIMARY, COLOR_ON_ACCENT);
     }
 
     private void maybePromptAutoUpgrade() {
@@ -4825,20 +5476,152 @@ public final class MainActivity extends Activity {
         if (target == null) {
             return;
         }
-        CharSequence previous = target.getText();
-        boolean textChanged = previous == null || !text.contentEquals(previous);
-        target.setText(text);
-        target.setTextColor(fg);
-        target.setBackground(roundedFill(bg, PILL_CORNER, 0, 0));
-        if (textChanged) {
-            // A state word that is longer than the last one has to be given a
-            // fresh chance to scroll rather than sitting there clipped.
-            Ui.rearmMarquee(target);
+        int tone = Ui.toneOfContainer(bg);
+        if (target instanceof StatusPill) {
+            ((StatusPill) target).set(text, tone);
+        } else {
+            target.setText(text);
+            target.setTextColor(fg);
+            target.setBackground(Ui.roundedFill(bg, dp(Ui.PILL_CORNER), 0, 0));
+        }
+        Panel owner = pillOwners.get(target);
+        if (owner != null) {
+            owner.tile.setStatus(tileStatus(text), tone);
+            dashboard.scheduleHeroRefresh();
+        }
+    }
+
+    /** Pills shout in capitals; a tile speaks in sentences. */
+    private static String tileStatus(String pillText) {
+        return Ui.sentence(pillText).replace("All ok", "All OK");
+    }
+
+    private void setTileDetail(String id, String detail) {
+        FeatureTile tile = dashboard == null ? null : dashboard.tile(id);
+        if (tile != null) {
+            tile.setDetail(detail);
         }
     }
 
     private boolean switchValue(Switch sw, boolean fallback) {
         return sw == null ? fallback : sw.isChecked();
+    }
+
+    // ============================================================
+    //  Overview
+    // ============================================================
+
+    /**
+     * Pushes the vital signs and the one-line summaries into the overview. The state words on
+     * the tiles arrive separately, from whichever refresh sets each page's pill.
+     */
+    private void refreshDashboard() {
+        if (dashboard == null) {
+            return;
+        }
+        Config config = Config.get(this);
+
+        dashboard.setBattery(BatteryReader.batteryPercent(this), BatteryReader.isPluggedIn(this));
+        refreshNetworkVital();
+        boolean linkEnabled = config.remoteLinkEnabled();
+        dashboard.setLink(linkEnabled, linkEnabled && RemoteLinkStateStore.isConnected(this),
+                RemoteLinkAvailabilityStore.snapshot(this).upPercent);
+
+        setTileDetail("remote_link", linkEnabled ? endpointHost(config.remoteLinkEndpoint()) : "Not enabled");
+
+        int battery = BatteryReader.batteryPercent(this);
+        setTileDetail("gps", config.isTrackingEnabled()
+                ? "Every " + config.intervalMinutesForBattery(battery < 0 ? 100 : battery) + " min"
+                : "Not tracking");
+
+        List<String> alertSources = new ArrayList<>();
+        if (config.highPriorityEnabled()) {
+            String app = appLabel(config.highPriorityPackage());
+            alertSources.add(app.isEmpty() ? "App alerts" : app);
+        }
+        if (config.highPriorityRemoteEnabled()) {
+            alertSources.add("Remote Link");
+        }
+        setTileDetail("alerts", alertSources.isEmpty() ? "No sources on" : TextUtils.join(" + ", alertSources));
+
+        setTileDetail("battery", "Alert below " + config.batteryAlertThresholdPercent() + "%");
+
+        List<String> triggers = new ArrayList<>();
+        if (config.rebootScheduleEnabled()) {
+            triggers.add("Daily " + formatRuleTime(config.rebootScheduleHour(), config.rebootScheduleMinute()));
+        }
+        if (config.rebootNotificationTriggerEnabled()) {
+            triggers.add("Notification");
+        }
+        if (config.rebootRemoteTriggerEnabled()) {
+            triggers.add("Remote");
+        }
+        setTileDetail("reboot", triggers.isEmpty() ? "No triggers set" : TextUtils.join(" + ", triggers));
+
+        setTileDetail("log", "Keeps " + config.logMaxLines() + " lines");
+    }
+
+    /**
+     * Describes the network the phone is really on. The Wi-Fi snapshot only counts as
+     * connected when the SSID can be read, which needs the location permission, and a VPN
+     * hides the transport underneath it, so this looks at every network that has internet
+     * and only borrows the snapshot for the name.
+     */
+    @SuppressWarnings("deprecation")
+    private void refreshNetworkVital() {
+        boolean known = false;
+        boolean wifiUp = false;
+        boolean cellularUp = false;
+        boolean otherUp = false;
+        try {
+            ConnectivityManager manager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager != null) {
+                known = true;
+                for (android.net.Network network : manager.getAllNetworks()) {
+                    android.net.NetworkCapabilities caps = manager.getNetworkCapabilities(network);
+                    if (caps == null || !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                        continue;
+                    }
+                    if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) {
+                        wifiUp = true;
+                    } else if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                        cellularUp = true;
+                    } else if (!caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+                        otherUp = true;
+                    }
+                }
+            }
+        } catch (RuntimeException ignored) {
+        }
+        WifiSnapshot wifi = cachedWifi;
+        if (!known) {
+            wifiUp = wifi != null && wifi.connected;
+        }
+        if (wifiUp) {
+            String ssid = wifi == null || wifi.ssidRedacted ? "" : wifi.ssid;
+            dashboard.setNetwork(R.drawable.ic_wifi, ssid.isEmpty() ? "Connected" : ssid, "Wi-Fi");
+        } else if (cellularUp) {
+            dashboard.setNetwork(R.drawable.ic_radio, "Cellular", "Mobile data");
+        } else if (otherUp) {
+            dashboard.setNetwork(R.drawable.ic_globe, "Online", "Network");
+        } else {
+            dashboard.setNetwork(R.drawable.ic_wifi_off, "Offline", "No network");
+        }
+    }
+
+    private static String endpointHost(String endpoint) {
+        String value = endpoint == null ? "" : endpoint.trim();
+        if (value.isEmpty()) {
+            return "No endpoint set";
+        }
+        try {
+            String host = URI.create(value).getHost();
+            if (host != null && !host.isEmpty()) {
+                return host;
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return value;
     }
 
     // ============================================================
@@ -5351,13 +6134,49 @@ public final class MainActivity extends Activity {
         settingsFeedbackToast.show();
     }
 
+    /**
+     * Marks a field invalid with a red ring and a line of explanation beneath it, or clears it
+     * again. The line is part of the layout rather than the platform's error popup, which is
+     * a white box whatever the theme.
+     */
+    private void setFieldError(EditText field, String message) {
+        TextView label = fieldErrors.get(field);
+        boolean invalid = invalidFields.contains(field);
+        if (message == null) {
+            if (invalid) {
+                invalidFields.remove(field);
+                if (label != null) {
+                    label.setVisibility(View.GONE);
+                }
+                field.setBackground(Ui.fieldBackground(this, false));
+            }
+            return;
+        }
+        if (label == null && field.getParent() instanceof LinearLayout) {
+            LinearLayout parent = (LinearLayout) field.getParent();
+            label = historyText("", 12.5f, COLOR_BAD, false);
+            LinearLayout.LayoutParams lp = matchWrapParams();
+            lp.topMargin = dp(6);
+            parent.addView(label, parent.indexOfChild(field) + 1, lp);
+            fieldErrors.put(field, label);
+        }
+        if (label != null) {
+            label.setText(message);
+            label.setVisibility(View.VISIBLE);
+        }
+        if (!invalid) {
+            invalidFields.add(field);
+            field.setBackground(Ui.fieldBackground(this, true));
+        }
+    }
+
     private boolean requireInteger(EditText field, String label, int min, int max) {
         try {
             int value = Integer.parseInt(text(field).trim());
             if (value < min || value > max) {
                 return invalidSetting(field, label, "Use a value from " + min + " to " + max);
             }
-            field.setError(null);
+            setFieldError(field, null);
             return true;
         } catch (RuntimeException e) {
             return invalidSetting(field, label, "Use a value from " + min + " to " + max);
@@ -5370,7 +6189,7 @@ public final class MainActivity extends Activity {
             if (Double.isNaN(value) || Double.isInfinite(value) || value < min || value > max) {
                 return invalidSetting(field, label, "Use a value from " + min + " to " + max);
             }
-            field.setError(null);
+            setFieldError(field, null);
             return true;
         } catch (RuntimeException e) {
             return invalidSetting(field, label, "Use a value from " + min + " to " + max);
@@ -5381,7 +6200,7 @@ public final class MainActivity extends Activity {
         if (text(field).trim().isEmpty()) {
             return invalidSetting(field, label, "This value is required");
         }
-        field.setError(null);
+        setFieldError(field, null);
         return true;
     }
 
@@ -5389,7 +6208,7 @@ public final class MainActivity extends Activity {
         if (appPackageFromField(field).trim().isEmpty()) {
             return invalidSetting(field, label, "Choose an app");
         }
-        field.setError(null);
+        setFieldError(field, null);
         return true;
     }
 
@@ -5415,7 +6234,7 @@ public final class MainActivity extends Activity {
                     || port > 65535) {
                 return invalidSetting(field, label, "Use a complete server URL");
             }
-            field.setError(null);
+            setFieldError(field, null);
             return true;
         } catch (RuntimeException e) {
             return invalidSetting(field, label, "Use a complete server URL");
@@ -5425,13 +6244,13 @@ public final class MainActivity extends Activity {
     private boolean requireIpv4(EditText field, String label, boolean optional) {
         String value = text(field).trim();
         if (optional && value.isEmpty()) {
-            field.setError(null);
+            setFieldError(field, null);
             return true;
         }
         if (strictIpv4Value(value) < 0L) {
             return invalidSetting(field, label, "Use a dotted IPv4 address");
         }
-        field.setError(null);
+        setFieldError(field, null);
         return true;
     }
 
@@ -5441,7 +6260,7 @@ public final class MainActivity extends Activity {
         if (mask <= 0L || (inverted & (inverted + 1L)) != 0L) {
             return invalidSetting(field, label, "Use a contiguous subnet mask");
         }
-        field.setError(null);
+        setFieldError(field, null);
         return true;
     }
 
@@ -5476,7 +6295,7 @@ public final class MainActivity extends Activity {
     }
 
     private boolean invalidSetting(EditText field, String label, String message) {
-        field.setError(message);
+        setFieldError(field, message);
         if (settingsFeedbackToast != null) {
             settingsFeedbackToast.cancel();
         }
@@ -5613,6 +6432,9 @@ public final class MainActivity extends Activity {
         }
 
         setPillState(notificationBackupPill, pillText, pillBg, pillFg);
+        setTileDetail("notification_backup", !enabled ? "Mirror to your server"
+                : queued > 0 ? queued + " waiting to send"
+                : sentCount > 0 ? String.format(Locale.US, "%,d sent", sentCount) : "Nothing sent yet");
 
         if (notificationBackupStatusCard != null) {
             notificationBackupStatusCard.setVisibility(enabled ? View.VISIBLE : View.GONE);
@@ -5627,7 +6449,7 @@ public final class MainActivity extends Activity {
         if (notificationBackupCountPill != null) {
             if (queued > 0) {
                 setPillState(notificationBackupCountPill,
-                        queued == 1 ? "1 queued" : (queued + " queued"),
+                        queued == 1 ? "1 QUEUED" : (queued + " QUEUED"),
                         COLOR_NEUTRAL_CONTAINER, COLOR_NEUTRAL_ON_CONTAINER);
                 notificationBackupCountPill.setVisibility(View.VISIBLE);
             } else {
@@ -5743,7 +6565,7 @@ public final class MainActivity extends Activity {
 
     private boolean saveHighPriorityConfigOnly() {
         if (!highPriorityEnabledSwitch.isChecked()) {
-            highPriorityPackageField.setError(null);
+            setFieldError(highPriorityPackageField, null);
         }
         if ((highPriorityEnabledSwitch.isChecked()
                     && !requireAppSelection(highPriorityPackageField, "High-priority app"))
@@ -6123,7 +6945,7 @@ public final class MainActivity extends Activity {
 
     private boolean saveRebootConfigOnly() {
         if (!rebootNotificationTriggerEnabledSwitch.isChecked()) {
-            rebootTriggerPackageField.setError(null);
+            setFieldError(rebootTriggerPackageField, null);
         }
         if ((rebootNotificationTriggerEnabledSwitch.isChecked()
                     && !requireAppSelection(rebootTriggerPackageField, "Reboot trigger app"))

@@ -21,4 +21,10 @@ final class BatteryReader {
         }
         return Math.round((level * 100f) / scale);
     }
+
+    /** True while the phone is on external power, whether or not it is still charging. */
+    static boolean isPluggedIn(Context context) {
+        Intent intent = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        return intent != null && intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0;
+    }
 }

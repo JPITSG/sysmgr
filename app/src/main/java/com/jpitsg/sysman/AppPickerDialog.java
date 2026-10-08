@@ -39,13 +39,6 @@ final class AppPickerDialog {
         void onAppSelected(String packageName, String label);
     }
 
-    private static final int COLOR_SURFACE = Ui.COLOR_SURFACE;
-    private static final int COLOR_BORDER = Ui.COLOR_BORDER;
-    private static final int COLOR_FIELD_BG = Ui.COLOR_FIELD_BG;
-    private static final int COLOR_FIELD_BORDER = Ui.COLOR_FIELD_BORDER;
-    private static final int COLOR_TEXT = Ui.COLOR_TEXT;
-    private static final int COLOR_TEXT_DIM = Ui.COLOR_TEXT_DIM;
-    private static final int COLOR_PRIMARY = Ui.COLOR_PRIMARY;
     private static final Object CACHE_LOCK = new Object();
     private static List<AppEntry> cachedApps;
 
@@ -73,8 +66,13 @@ final class AppPickerDialog {
 
             LinearLayout root = new LinearLayout(getContext());
             root.setOrientation(LinearLayout.VERTICAL);
-            root.setPadding(dp(getContext(), 18), dp(getContext(), 16), dp(getContext(), 18), dp(getContext(), 18));
-            root.setBackground(roundedFill(COLOR_SURFACE, dp(getContext(), Ui.DIALOG_CORNER), dp(getContext(), 1), COLOR_BORDER));
+            root.setPadding(dp(getContext(), Ui.DIALOG_PADDING), dp(getContext(), 20), dp(getContext(), Ui.DIALOG_PADDING), dp(getContext(), 18));
+            root.setBackground(roundedFill(Ui.COLOR_SURFACE, dp(getContext(), Ui.DIALOG_CORNER), dp(getContext(), 1), Ui.COLOR_BORDER));
+
+            TextView heading = Ui.dialogTitle(getContext(), "Choose an app");
+            LinearLayout.LayoutParams headingLp = matchWrap();
+            headingLp.setMargins(dp(getContext(), 4), dp(getContext(), 4), 0, dp(getContext(), 14));
+            root.addView(heading, headingLp);
 
             LinearLayout header = new LinearLayout(getContext());
             header.setOrientation(LinearLayout.HORIZONTAL);
@@ -87,22 +85,23 @@ final class AppPickerDialog {
             search.setSingleLine(true);
             search.setHint("Search apps");
             search.setTextSize(15);
-            search.setTextColor(COLOR_TEXT);
+            search.setTextColor(Ui.COLOR_TEXT);
             search.setHintTextColor(Ui.COLOR_TEXT_FAINT);
-            search.setBackground(roundedFill(COLOR_FIELD_BG, dp(getContext(), Ui.FIELD_CORNER), dp(getContext(), 1), COLOR_FIELD_BORDER));
+            search.setBackground(Ui.fieldBackground(getContext(), false));
+            search.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                    Ui.tintedIcon(getContext(), R.drawable.ic_search, 20, Ui.COLOR_TEXT_FAINT), null, null, null);
+            search.setCompoundDrawablePadding(dp(getContext(), 10));
             search.setGravity(Gravity.CENTER_VERTICAL);
             search.setMinHeight(dp(getContext(), 50));
             search.setPadding(dp(getContext(), 14), dp(getContext(), 10), dp(getContext(), 14), dp(getContext(), 10));
             header.addView(search, new LinearLayout.LayoutParams(0, dp(getContext(), 50), 1f));
 
-            TextView close = new TextView(getContext());
-            close.setText("×");
-            close.setTextSize(28);
-            close.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-            close.setTextColor(COLOR_TEXT_DIM);
-            close.setGravity(Gravity.CENTER);
+            ImageView close = Ui.icon(getContext(), R.drawable.ic_close, 22, Ui.COLOR_TEXT_DIM);
+            close.setContentDescription("Close");
+            close.setScaleType(ImageView.ScaleType.CENTER);
+            close.setBackground(Ui.ripple(Ui.COLOR_RIPPLE_LIGHT, Ui.roundedFill(0, 0, 0, 0), dp(getContext(), 22)));
             LinearLayout.LayoutParams closeLp = new LinearLayout.LayoutParams(dp(getContext(), 44), dp(getContext(), 50));
-            closeLp.setMargins(dp(getContext(), 10), 0, 0, 0);
+            closeLp.setMargins(dp(getContext(), 8), 0, 0, 0);
             header.addView(close, closeLp);
             close.setOnClickListener(new View.OnClickListener() {
                 @Override
@@ -124,7 +123,7 @@ final class AppPickerDialog {
             TextView loadingText = new TextView(getContext());
             loadingText.setText("Loading apps");
             loadingText.setTextSize(14);
-            loadingText.setTextColor(COLOR_TEXT_DIM);
+            loadingText.setTextColor(Ui.COLOR_TEXT_DIM);
             LinearLayout.LayoutParams loadingTextLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -133,6 +132,7 @@ final class AppPickerDialog {
             root.addView(loading, loadingLp);
 
             final ListView listView = new ListView(getContext());
+            listView.setDivider(new android.graphics.drawable.ColorDrawable(Ui.COLOR_BORDER));
             listView.setDividerHeight(1);
             listView.setAdapter(adapter);
             listView.setVisibility(View.GONE);
@@ -146,7 +146,7 @@ final class AppPickerDialog {
             TextView empty = new TextView(getContext());
             empty.setText("No apps found");
             empty.setTextSize(14);
-            empty.setTextColor(COLOR_TEXT_DIM);
+            empty.setTextColor(Ui.COLOR_TEXT_DIM);
             empty.setGravity(Gravity.CENTER);
             listView.setEmptyView(empty);
             root.addView(empty, new LinearLayout.LayoutParams(
@@ -394,14 +394,14 @@ final class AppPickerDialog {
 
             TextView label = new TextView(context);
             label.setTextSize(15);
-            label.setTextColor(COLOR_TEXT);
+            label.setTextColor(Ui.COLOR_TEXT);
             label.setSingleLine(true);
             label.setEllipsize(TextUtils.TruncateAt.END);
             textBlock.addView(label, matchWrap());
 
             TextView packageName = new TextView(context);
             packageName.setTextSize(12);
-            packageName.setTextColor(COLOR_TEXT_DIM);
+            packageName.setTextColor(Ui.COLOR_TEXT_DIM);
             packageName.setSingleLine(true);
             packageName.setEllipsize(TextUtils.TruncateAt.END);
             textBlock.addView(packageName, matchWrap());
@@ -410,7 +410,7 @@ final class AppPickerDialog {
             selected.setText("Selected");
             selected.setTextSize(11);
             selected.setTypeface(Typeface.DEFAULT_BOLD);
-            selected.setTextColor(COLOR_PRIMARY);
+            selected.setTextColor(Ui.COLOR_PRIMARY);
             selected.setGravity(Gravity.CENTER);
             selected.setPadding(dp(context, 8), 0, 0, 0);
             root.addView(selected, new LinearLayout.LayoutParams(

@@ -1,14 +1,87 @@
 <resources>
-    <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+    <!--
+        The app draws its own light and dark palettes (see Ui.java) and picks
+        AppTheme.Light or AppTheme.Dark itself at start-up from the saved
+        theme choice. AppTheme is only what Android shows before that code
+        runs (the launch window), so it follows the system night setting.
+    -->
+    <style name="AppTheme.Light" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/sysmgr_background</item>
         <item name="android:fontFamily">sans-serif</item>
         <item name="android:colorAccent">@color/sysmgr_accent</item>
         <item name="android:colorPrimary">@color/sysmgr_primary</item>
+        <item name="android:colorControlActivated">@color/sysmgr_accent</item>
         <item name="android:textColor">@color/sysmgr_text</item>
-        <item name="android:statusBarColor">@color/sysmgr_background</item>
-        <item name="android:navigationBarColor">@color/sysmgr_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+    </style>
+
+    <style name="AppTheme.Dark" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/sysmgr_background</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:colorAccent">@color/sysmgr_accent</item>
+        <item name="android:colorPrimary">@color/sysmgr_primary</item>
+        <item name="android:colorControlActivated">@color/sysmgr_accent</item>
+        <item name="android:textColor">@color/sysmgr_text</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+    </style>
+
+    <style name="AppTheme" parent="AppTheme.Light" />
+
+    <!--
+        The platform time picker, dressed in the app's palette. Chosen in code
+        (MainActivity) to match the theme the user picked, which is why there is
+        a light and a dark copy rather than one night-qualified style.
+    -->
+    <style name="SysmgrTimePicker.Light" parent="@android:style/Widget.Material.Light.TimePicker">
+        <item name="android:headerBackground">#FF0A7D5A</item>
+        <item name="android:numbersBackgroundColor">#FFEEF3F1</item>
+        <item name="android:numbersSelectorColor">#FF0A7D5A</item>
+        <item name="android:numbersTextColor">@color/sysmgr_numbers_text_light</item>
+    </style>
+
+    <style name="SysmgrTimePicker.Dark" parent="@android:style/Widget.Material.TimePicker">
+        <item name="android:headerBackground">#FF123B2E</item>
+        <item name="android:numbersBackgroundColor">#FF0B1110</item>
+        <item name="android:numbersSelectorColor">#FF3FD6A0</item>
+        <item name="android:numbersTextColor">@color/sysmgr_numbers_text_dark</item>
+    </style>
+
+    <style name="SysmgrDialogButton.Light" parent="@android:style/Widget.Material.Light.Button.Borderless.Colored">
+        <item name="android:textColor">#FF0A7D5A</item>
+    </style>
+
+    <style name="SysmgrDialogButton.Dark" parent="@android:style/Widget.Material.Button.Borderless.Colored">
+        <item name="android:textColor">#FF3FD6A0</item>
+    </style>
+
+    <style name="SysmgrDialog.Light" parent="@android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:colorAccent">#FF0A7D5A</item>
+        <item name="android:colorBackgroundFloating">#FFFFFFFF</item>
+        <item name="android:timePickerStyle">@style/SysmgrTimePicker.Light</item>
+        <item name="android:buttonBarButtonStyle">@style/SysmgrDialogButton.Light</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/SysmgrDialogButton.Light</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/SysmgrDialogButton.Light</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/SysmgrDialogButton.Light</item>
+    </style>
+
+    <style name="SysmgrDialog.Dark" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#FF3FD6A0</item>
+        <item name="android:colorBackgroundFloating">#FF111917</item>
+        <item name="android:timePickerStyle">@style/SysmgrTimePicker.Dark</item>
+        <item name="android:buttonBarButtonStyle">@style/SysmgrDialogButton.Dark</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/SysmgrDialogButton.Dark</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/SysmgrDialogButton.Dark</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/SysmgrDialogButton.Dark</item>
     </style>
 
     <style name="RebootWakeTheme" parent="@android:style/Theme.Material.NoActionBar">

@@ -24,6 +24,7 @@ import android.view.Window;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ProgressBar;
@@ -42,15 +43,6 @@ final class TonePickerDialog {
         void onToneSelected(String title, String typeLabel);
     }
 
-    private static final int COLOR_SURFACE = Ui.COLOR_SURFACE;
-    private static final int COLOR_BORDER = Ui.COLOR_BORDER;
-    private static final int COLOR_FIELD_BG = Ui.COLOR_FIELD_BG;
-    private static final int COLOR_FIELD_BORDER = Ui.COLOR_FIELD_BORDER;
-    private static final int COLOR_TEXT = Ui.COLOR_TEXT;
-    private static final int COLOR_TEXT_DIM = Ui.COLOR_TEXT_DIM;
-    private static final int COLOR_PRIMARY = Ui.COLOR_PRIMARY;
-    private static final int COLOR_PRIMARY_CONTAINER = Ui.COLOR_PRIMARY_CONTAINER;
-    private static final int COLOR_PRIMARY_ON_CONTAINER = Ui.COLOR_PRIMARY_ON_CONTAINER;
     private static final Object CACHE_LOCK = new Object();
     private static List<ToneEntry> cachedTones;
 
@@ -81,8 +73,13 @@ final class TonePickerDialog {
 
             LinearLayout root = new LinearLayout(getContext());
             root.setOrientation(LinearLayout.VERTICAL);
-            root.setPadding(dp(getContext(), 18), dp(getContext(), 16), dp(getContext(), 18), dp(getContext(), 18));
-            root.setBackground(roundedFill(COLOR_SURFACE, dp(getContext(), Ui.DIALOG_CORNER), dp(getContext(), 1), COLOR_BORDER));
+            root.setPadding(dp(getContext(), Ui.DIALOG_PADDING), dp(getContext(), 20), dp(getContext(), Ui.DIALOG_PADDING), dp(getContext(), 18));
+            root.setBackground(roundedFill(Ui.COLOR_SURFACE, dp(getContext(), Ui.DIALOG_CORNER), dp(getContext(), 1), Ui.COLOR_BORDER));
+
+            TextView heading = Ui.dialogTitle(getContext(), "Choose an alarm tone");
+            LinearLayout.LayoutParams headingLp = matchWrap();
+            headingLp.setMargins(dp(getContext(), 4), dp(getContext(), 4), 0, dp(getContext(), 14));
+            root.addView(heading, headingLp);
 
             LinearLayout header = new LinearLayout(getContext());
             header.setOrientation(LinearLayout.HORIZONTAL);
@@ -95,22 +92,23 @@ final class TonePickerDialog {
             search.setSingleLine(true);
             search.setHint("Search tones");
             search.setTextSize(15);
-            search.setTextColor(COLOR_TEXT);
+            search.setTextColor(Ui.COLOR_TEXT);
             search.setHintTextColor(Ui.COLOR_TEXT_FAINT);
-            search.setBackground(roundedFill(COLOR_FIELD_BG, dp(getContext(), Ui.FIELD_CORNER), dp(getContext(), 1), COLOR_FIELD_BORDER));
+            search.setBackground(Ui.fieldBackground(getContext(), false));
+            search.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                    Ui.tintedIcon(getContext(), R.drawable.ic_search, 20, Ui.COLOR_TEXT_FAINT), null, null, null);
+            search.setCompoundDrawablePadding(dp(getContext(), 10));
             search.setGravity(Gravity.CENTER_VERTICAL);
             search.setMinHeight(dp(getContext(), 50));
             search.setPadding(dp(getContext(), 14), dp(getContext(), 10), dp(getContext(), 14), dp(getContext(), 10));
             header.addView(search, new LinearLayout.LayoutParams(0, dp(getContext(), 50), 1f));
 
-            TextView close = new TextView(getContext());
-            close.setText("×");
-            close.setTextSize(28);
-            close.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-            close.setTextColor(COLOR_TEXT_DIM);
-            close.setGravity(Gravity.CENTER);
+            ImageView close = Ui.icon(getContext(), R.drawable.ic_close, 22, Ui.COLOR_TEXT_DIM);
+            close.setContentDescription("Close");
+            close.setScaleType(ImageView.ScaleType.CENTER);
+            close.setBackground(Ui.ripple(Ui.COLOR_RIPPLE_LIGHT, Ui.roundedFill(0, 0, 0, 0), dp(getContext(), 22)));
             LinearLayout.LayoutParams closeLp = new LinearLayout.LayoutParams(dp(getContext(), 44), dp(getContext(), 50));
-            closeLp.setMargins(dp(getContext(), 10), 0, 0, 0);
+            closeLp.setMargins(dp(getContext(), 8), 0, 0, 0);
             header.addView(close, closeLp);
             close.setOnClickListener(new View.OnClickListener() {
                 @Override
@@ -132,7 +130,7 @@ final class TonePickerDialog {
             TextView loadingText = new TextView(getContext());
             loadingText.setText("Loading tones");
             loadingText.setTextSize(14);
-            loadingText.setTextColor(COLOR_TEXT_DIM);
+            loadingText.setTextColor(Ui.COLOR_TEXT_DIM);
             LinearLayout.LayoutParams loadingTextLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -141,6 +139,7 @@ final class TonePickerDialog {
             root.addView(loading, loadingLp);
 
             final ListView listView = new ListView(getContext());
+            listView.setDivider(new android.graphics.drawable.ColorDrawable(Ui.COLOR_BORDER));
             listView.setDividerHeight(1);
             listView.setAdapter(adapter);
             listView.setVisibility(View.GONE);
@@ -154,7 +153,7 @@ final class TonePickerDialog {
             TextView empty = new TextView(getContext());
             empty.setText("No tones found");
             empty.setTextSize(14);
-            empty.setTextColor(COLOR_TEXT_DIM);
+            empty.setTextColor(Ui.COLOR_TEXT_DIM);
             empty.setGravity(Gravity.CENTER);
             listView.setEmptyView(empty);
             root.addView(empty, new LinearLayout.LayoutParams(
@@ -485,9 +484,9 @@ final class TonePickerDialog {
             TextView badge = new TextView(context);
             badge.setTextSize(12);
             badge.setTypeface(Typeface.DEFAULT_BOLD);
-            badge.setTextColor(COLOR_PRIMARY_ON_CONTAINER);
+            badge.setTextColor(Ui.COLOR_PRIMARY_ON_CONTAINER);
             badge.setGravity(Gravity.CENTER);
-            badge.setBackground(roundedFill(COLOR_PRIMARY_CONTAINER, dp(context, 999), 0, 0));
+            badge.setBackground(roundedFill(Ui.COLOR_PRIMARY_CONTAINER, dp(context, 999), 0, 0));
             LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(dp(context, 42), dp(context, 42));
             badgeLp.setMargins(0, 0, dp(context, 12), 0);
             root.addView(badge, badgeLp);
@@ -499,14 +498,14 @@ final class TonePickerDialog {
 
             TextView title = new TextView(context);
             title.setTextSize(15);
-            title.setTextColor(COLOR_TEXT);
+            title.setTextColor(Ui.COLOR_TEXT);
             title.setSingleLine(true);
             title.setEllipsize(TextUtils.TruncateAt.END);
             textBlock.addView(title, matchWrap());
 
             TextView type = new TextView(context);
             type.setTextSize(12);
-            type.setTextColor(COLOR_TEXT_DIM);
+            type.setTextColor(Ui.COLOR_TEXT_DIM);
             type.setSingleLine(true);
             type.setEllipsize(TextUtils.TruncateAt.END);
             textBlock.addView(type, matchWrap());
@@ -515,7 +514,7 @@ final class TonePickerDialog {
             selected.setText("Selected");
             selected.setTextSize(11);
             selected.setTypeface(Typeface.DEFAULT_BOLD);
-            selected.setTextColor(COLOR_PRIMARY);
+            selected.setTextColor(Ui.COLOR_PRIMARY);
             selected.setGravity(Gravity.CENTER);
             selected.setPadding(dp(context, 8), 0, 0, 0);
             root.addView(selected, new LinearLayout.LayoutParams(

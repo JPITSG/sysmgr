@@ -46,6 +46,14 @@ the pieces are useful to others; it is provided as-is, with no warranty (see
 ## Features
 
 **On-device**
+- **Overview and themes** — the app opens on a status overview rather than a
+  settings list. A dial shows one arc per feature (running, needs attention or
+  off) with battery, network and Remote Link vitals beneath it, a banner appears
+  when your server has a newer APK, and every feature is a tile showing its live
+  state: lit in the feature's colour when running, red when it needs attention,
+  grey when off. Tap a tile to open that feature's settings page. Light, dark
+  or follow-the-phone themes can be switched from the header or from
+  **Appearance**.
 - **GPS logging** — reports location on a schedule, on Wi-Fi change, and/or at
   startup, with a configurable accuracy/timeout strategy.
 - **Remote notifications & high-priority alerts** — the server can push a
@@ -131,6 +139,8 @@ app/                     Android app (plain Java, no Gradle)
 sysmgrd/sysmgrd          Node.js server daemon entry point
 sysmgrd/apk-version.js   Dependency-free APK manifest/version reader
 native/build-openvpn.sh  Reproducible cross-compile of the embedded openvpn binary
+design/                  Source for the launcher icon candidates and the in-app icon set
+tests/                   Beacon recovery tests and a UI screenshot tour
 ISSUES.md                Internal audit notes / known issues
 ```
 
@@ -157,6 +167,24 @@ committed. Point the tools at your SDK/NDK and keystore to produce a signed APK.
 Run `python3 tests/test_beacon_recovery.py` with a JDK 9+ to check beacon
 recovery against simulated Android callbacks and time. This does not test
 Bluetooth reception or device-specific sleep behavior.
+
+#### Interface assets
+
+The interface is built in code (no layout XML), on a small design system in
+`Ui.java` that holds a light and a dark palette; the activity is recreated when
+the theme changes. Two generators keep the artwork reproducible:
+
+- `python3 design/gen_ui_icons.py` writes the line icons in
+  `res/drawable/ic_*.xml` from one source, so they share a grid and stroke.
+- `python3 design/icons/launcher_icons.py --preview sheet.html` renders the
+  launcher icon candidates; `--apply N` writes candidate *N* as the app's
+  adaptive icon (background, foreground, themed-icon layer) and derives the
+  status-bar glyph from it.
+
+`python3 tests/ui_tour.py --out /tmp/tour --themes light dark` drives an
+already-running emulator or phone over `adb`: it opens every page, scrolls each
+to its end and saves one stitched screenshot per page, for a quick visual check
+of both themes. It only navigates and scrolls (needs Pillow).
 
 ### Embedded OpenVPN binary
 
