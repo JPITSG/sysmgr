@@ -1,12 +1,9 @@
 package com.jpitsg.sysman;
 
-import android.app.Dialog;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
@@ -18,7 +15,6 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.Window;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
@@ -50,12 +46,12 @@ final class AppPickerDialog {
         dialog.show();
     }
 
-    private static final class PickerDialog extends Dialog {
+    private static final class PickerDialog extends FittedDialog {
         private final String currentPackage;
         private final Listener listener;
 
         PickerDialog(Context context, String currentPackage, Listener listener) {
-            super(context);
+            super(context, Ui.DIALOG_WIDTH_FRACTION, 0.86f);
             this.currentPackage = currentPackage == null ? "" : currentPackage.trim();
             this.listener = listener;
         }
@@ -191,19 +187,6 @@ final class AppPickerDialog {
                     listView.setVisibility(View.VISIBLE);
                 }
             });
-        }
-
-        @Override
-        public void show() {
-            super.show();
-            Window window = getWindow();
-            if (window == null) {
-                return;
-            }
-            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            int width = (int) (getContext().getResources().getDisplayMetrics().widthPixels * Ui.DIALOG_WIDTH_FRACTION);
-            int height = (int) (getContext().getResources().getDisplayMetrics().heightPixels * 0.86f);
-            window.setLayout(width, height);
         }
     }
 

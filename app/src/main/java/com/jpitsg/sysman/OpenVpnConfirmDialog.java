@@ -1,6 +1,5 @@
 package com.jpitsg.sysman;
 
-import android.app.Dialog;
 import android.content.Context;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -8,6 +7,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 /** App-styled confirmation dialog for destructive or state-changing actions. */
@@ -24,7 +24,7 @@ final class OpenVpnConfirmDialog {
         new ConfirmDialog(context, title, message, confirmLabel, danger, listener).show();
     }
 
-    private static final class ConfirmDialog extends Dialog {
+    private static final class ConfirmDialog extends FittedDialog {
         private final String title;
         private final String message;
         private final String confirmLabel;
@@ -33,7 +33,7 @@ final class OpenVpnConfirmDialog {
 
         ConfirmDialog(Context context, String title, String message, String confirmLabel,
                       boolean danger, Listener listener) {
-            super(context);
+            super(context, Ui.DIALOG_WIDTH_FRACTION, 0f);
             this.title = title;
             this.message = message;
             this.confirmLabel = confirmLabel;
@@ -52,7 +52,11 @@ final class OpenVpnConfirmDialog {
             TextView messageView = Ui.dialogSubtitle(c, message);
             messageView.setTextSize(14);
             messageView.setPadding(0, Ui.dp(c, 8), 0, Ui.dp(c, Ui.GAP + 4));
-            root.addView(messageView, Ui.matchWrap());
+            // A long message scrolls inside the card, so the buttons are always on screen.
+            ScrollView messageScroll = new ScrollView(c);
+            messageScroll.addView(messageView);
+            root.addView(messageScroll, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
             LinearLayout buttons = new LinearLayout(c);
             buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -79,7 +83,6 @@ final class OpenVpnConfirmDialog {
 
             root.addView(buttons, Ui.matchWrap());
             setContentView(root);
-            Ui.sizeDialogWindow(this, Ui.DIALOG_WIDTH_FRACTION, 0f);
         }
     }
 

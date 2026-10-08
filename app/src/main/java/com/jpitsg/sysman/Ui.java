@@ -1,6 +1,5 @@
 package com.jpitsg.sysman;
 
-import android.app.Dialog;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
@@ -8,7 +7,6 @@ import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ClipDrawable;
-import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.InsetDrawable;
@@ -16,7 +14,6 @@ import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.text.TextUtils;
-import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -140,6 +137,8 @@ final class Ui {
     static final int DIALOG_CORNER = 28;
     static final int DIALOG_PADDING = 22;
     static final float DIALOG_WIDTH_FRACTION = 0.92f;
+    /** The most of the screen's height a dialog's card may take. */
+    static final float DIALOG_MAX_HEIGHT_FRACTION = 0.92f;
 
     // ---- Theme application -------------------------------------------------
 
@@ -570,8 +569,7 @@ final class Ui {
 
     /** The rounded, bordered card that is the root of every dialog. */
     static LinearLayout dialogCard(Context c) {
-        LinearLayout root = new LinearLayout(c);
-        root.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout root = new DialogCard(c);
         root.setBackground(roundedFill(COLOR_SURFACE, dp(c, DIALOG_CORNER), dp(c, 1), COLOR_BORDER));
         root.setPadding(dp(c, DIALOG_PADDING), dp(c, DIALOG_PADDING), dp(c, DIALOG_PADDING), dp(c, GAP + 6));
         return root;
@@ -595,20 +593,5 @@ final class Ui {
         t.setLineSpacing(0, 1.2f);
         t.setIncludeFontPadding(false);
         return t;
-    }
-
-    static void sizeDialogWindow(Dialog dialog, float widthFraction, float heightFraction) {
-        if (dialog.getWindow() == null) {
-            return;
-        }
-        // The card draws its own rounded surface, so the window behind it must be clear.
-        dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-        DisplayMetrics m = dialog.getContext().getResources().getDisplayMetrics();
-        int width = Math.min((int) (m.widthPixels * widthFraction),
-                Math.round(CONTENT_MAX_WIDTH * m.density));
-        int height = heightFraction > 0f
-                ? (int) (m.heightPixels * heightFraction)
-                : ViewGroup.LayoutParams.WRAP_CONTENT;
-        dialog.getWindow().setLayout(width, height);
     }
 }

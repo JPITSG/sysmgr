@@ -1,6 +1,5 @@
 package com.jpitsg.sysman;
 
-import android.app.Dialog;
 import android.content.Context;
 import android.graphics.Typeface;
 import android.os.Bundle;
@@ -46,12 +45,12 @@ final class OpenVpnImportDialog {
         new ReportDialog(context, result, null).show();
     }
 
-    private static final class ReportDialog extends Dialog {
+    private static final class ReportDialog extends FittedDialog {
         private final OpenVpnValidationResult result;
         private final Listener listener;
 
         ReportDialog(Context context, OpenVpnValidationResult result, Listener listener) {
-            super(context);
+            super(context, Ui.DIALOG_WIDTH_FRACTION, 0f);
             this.result = result;
             this.listener = listener;
         }
@@ -129,7 +128,6 @@ final class OpenVpnImportDialog {
             root.addView(buttons, Ui.matchWrap());
 
             setContentView(root);
-            Ui.sizeDialogWindow(this, Ui.DIALOG_WIDTH_FRACTION, 0f);
         }
 
         private TextView row(Context c, String text, int color, boolean bold) {

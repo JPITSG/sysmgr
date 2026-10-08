@@ -1,6 +1,5 @@
 package com.jpitsg.sysman;
 
-import android.app.Dialog;
 import android.content.Context;
 import android.graphics.Typeface;
 import android.os.Bundle;
@@ -26,12 +25,12 @@ final class OpenVpnEditDialog {
         new EditDialog(context, initialText, listener).show();
     }
 
-    private static final class EditDialog extends Dialog {
+    private static final class EditDialog extends FittedDialog {
         private final String initialText;
         private final Listener listener;
 
         EditDialog(Context context, String initialText, Listener listener) {
-            super(context);
+            super(context, Ui.DIALOG_WIDTH_FRACTION, 0.82f);
             this.initialText = initialText == null ? "" : initialText;
             this.listener = listener;
         }
@@ -91,7 +90,6 @@ final class OpenVpnEditDialog {
             root.addView(buttons, Ui.matchWrap());
 
             setContentView(root);
-            Ui.sizeDialogWindow(this, Ui.DIALOG_WIDTH_FRACTION, 0.82f);
         }
     }
 

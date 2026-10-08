@@ -11,6 +11,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
@@ -253,6 +254,7 @@ public final class MainActivity extends Activity {
     private Button volumeRuleDndDisableButton;
     private int volumeRuleHour = -1;
     private int volumeRuleMinute = -1;
+    private TimePickerDialog volumeRuleTimeDialog;
     private int volumeRuleDndMode = Config.DND_UNCHANGED;
     private EditText rebootTriggerPackageField;
     private EditText rebootTriggerTitleField;
@@ -739,6 +741,9 @@ public final class MainActivity extends Activity {
         configureSystemBars();
         rootFrame.requestApplyInsets();
         rootFrame.requestLayout();
+        // Rotation does not recreate the activity, so an open dialog has to be sized again.
+        FittedDialog.refitOpen();
+        refitTimePicker();
     }
 
     @Override
@@ -3274,7 +3279,11 @@ public final class MainActivity extends Activity {
             return null;
         }
 
-        int targetWidth = Math.max(dp(160), getResources().getDisplayMetrics().widthPixels - dp(GAP * 6));
+        // Sized for the widest the image can be shown, in either orientation: the decode is cached
+        // and would otherwise stay soft after the screen turns.
+        android.util.DisplayMetrics screen = getResources().getDisplayMetrics();
+        int widest = Math.min(Math.max(screen.widthPixels, screen.heightPixels), dp(Ui.CONTENT_MAX_WIDTH));
+        int targetWidth = Math.max(dp(160), widest - dp(GAP * 6));
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inSampleSize = sampleSize(bounds.outWidth, targetWidth);
         Bitmap decoded = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
@@ -4432,9 +4441,12 @@ public final class MainActivity extends Activity {
     }
 
     private void showVolumeRuleTimePicker() {
-        int initialHour = volumeRuleHour >= 0 ? volumeRuleHour : 17;
-        int initialMinute = volumeRuleMinute >= 0 ? volumeRuleMinute : 0;
-        TimePickerDialog dialog = new TimePickerDialog(
+        showVolumeRuleTimePicker(volumeRuleHour >= 0 ? volumeRuleHour : 17,
+                volumeRuleMinute >= 0 ? volumeRuleMinute : 0);
+    }
+
+    private void showVolumeRuleTimePicker(int initialHour, int initialMinute) {
+        final TimePickerDialog dialog = new TimePickerDialog(
                 this,
                 Ui.dark ? R.style.SysmgrDialog_Dark : R.style.SysmgrDialog_Light,
                 new TimePickerDialog.OnTimeSetListener() {
@@ -4446,7 +4458,33 @@ public final class MainActivity extends Activity {
                 initialHour,
                 initialMinute,
                 true);
+        dialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface ignored) {
+                if (volumeRuleTimeDialog == dialog) {
+                    volumeRuleTimeDialog = null;
+                }
+            }
+        });
+        volumeRuleTimeDialog = dialog;
         dialog.show();
+    }
+
+    /**
+     * The platform time picker lays itself out for the screen it was created on, and rotation does
+     * not recreate the activity, so a picker left open across a turn keeps the old shape and runs
+     * off the new screen. Open a fresh one in its place, on the time that was showing.
+     */
+    private void refitTimePicker() {
+        TimePickerDialog open = volumeRuleTimeDialog;
+        if (open == null || !open.isShowing()) {
+            return;
+        }
+        Bundle state = open.onSaveInstanceState();
+        int hour = state.getInt("hour", volumeRuleHour >= 0 ? volumeRuleHour : 17);
+        int minute = state.getInt("minute", volumeRuleMinute >= 0 ? volumeRuleMinute : 0);
+        open.dismiss();
+        showVolumeRuleTimePicker(hour, minute);
     }
 
     private void setVolumeRuleTime(int hour, int minute) {

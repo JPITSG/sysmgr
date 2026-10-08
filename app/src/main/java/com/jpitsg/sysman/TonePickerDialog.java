@@ -1,11 +1,8 @@
 package com.jpitsg.sysman;
 
-import android.app.Dialog;
 import android.content.Context;
 import android.database.Cursor;
-import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioAttributes;
 import android.media.Ringtone;
@@ -20,7 +17,6 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.Window;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
@@ -54,7 +50,7 @@ final class TonePickerDialog {
         dialog.show();
     }
 
-    private static final class PickerDialog extends Dialog {
+    private static final class PickerDialog extends FittedDialog {
         private final String currentTitle;
         private final Listener listener;
         private ToneAdapter adapter;
@@ -62,7 +58,7 @@ final class TonePickerDialog {
         private String previewUri;
 
         PickerDialog(Context context, String currentTitle, Listener listener) {
-            super(context);
+            super(context, Ui.DIALOG_WIDTH_FRACTION, 0.86f);
             this.currentTitle = currentTitle == null ? "" : currentTitle.trim();
             this.listener = listener;
         }
@@ -203,19 +199,6 @@ final class TonePickerDialog {
                     listView.setVisibility(View.VISIBLE);
                 }
             });
-        }
-
-        @Override
-        public void show() {
-            super.show();
-            Window window = getWindow();
-            if (window == null) {
-                return;
-            }
-            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            int width = (int) (getContext().getResources().getDisplayMetrics().widthPixels * Ui.DIALOG_WIDTH_FRACTION);
-            int height = (int) (getContext().getResources().getDisplayMetrics().heightPixels * 0.86f);
-            window.setLayout(width, height);
         }
 
         @Override
