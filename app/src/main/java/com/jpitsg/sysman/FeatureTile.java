@@ -20,8 +20,9 @@ import android.widget.TextView;
  * One feature on the overview: an icon chip in the feature's own hue, a state
  * dot, the feature name and a live line of status. A feature that can be
  * switched on and off from here has a real switch in place of the dot, and its
- * card is green while it is on and red while it is off; every other card stays
- * neutral, so the grid reads at a glance.
+ * card is green while it is on and red while it is off; the activity colours
+ * the other cards by their own state (see {@link #setLook}), so the grid reads
+ * at a glance.
  */
 final class FeatureTile extends LinearLayout {
     /** Called when the user flips the tile's switch; the caller decides what actually happens. */
@@ -42,6 +43,7 @@ final class FeatureTile extends LinearLayout {
     private CompactSwitch toggle;
     private boolean mirroring;
     private boolean toggleReady = true;
+    private int fixedLook = Ui.TONE_NEUTRAL;
     private boolean wide;
     private String status = "";
     private String detail = "";
@@ -314,14 +316,22 @@ final class FeatureTile extends LinearLayout {
 
     /**
      * The colour the card shows. A feature with a switch is green when it is on and red when it
-     * is off; every other card stays neutral. The state the card reports for the overview's dial
-     * and counts ({@link #tone()}) is separate and unchanged.
+     * is off; any other card shows what {@link #setLook} last gave it, neutral by default. The
+     * state the card reports for the overview's dial and counts ({@link #tone()}) is separate.
      */
     private int look() {
         if (toggle == null) {
-            return Ui.TONE_NEUTRAL;
+            return fixedLook;
         }
         return toggle.isChecked() ? Ui.TONE_OK : Ui.TONE_BAD;
+    }
+
+    /** Colours a card that has no switch: {@link Ui#TONE_OK} green, {@link Ui#TONE_BAD} red, else neutral. */
+    void setLook(int tone) {
+        if (fixedLook != tone) {
+            fixedLook = tone;
+            applyStyle();
+        }
     }
 
     private Drawable dotDrawable() {

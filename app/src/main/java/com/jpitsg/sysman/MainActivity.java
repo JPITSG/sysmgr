@@ -2247,6 +2247,7 @@ public final class MainActivity extends Activity {
             historyPage.tile.setStatus(count == 0 ? "Empty" : (count == 1 ? "1 saved" : count + " saved"),
                     count > 0 ? Ui.TONE_OK : Ui.TONE_NEUTRAL);
             historyPage.tile.setDetail("Kept on this phone");
+            historyPage.tile.setLook(count > 0 ? Ui.TONE_OK : Ui.TONE_NEUTRAL);
         }
         if (notificationHistoryList == null) {
             return;
@@ -2343,6 +2344,7 @@ public final class MainActivity extends Activity {
         List<Config.VolumeRule> rules = Config.get(this).volumeRules();
         String label = rules.size() == 1 ? "1 RULE" : rules.size() + " RULES";
         setTileDetail("volume", rules.isEmpty() ? "No schedule" : "Next at " + nextVolumeRuleTime(rules));
+        setTileLook("volume", rules.isEmpty() ? Ui.TONE_BAD : Ui.TONE_OK);
         setPillState(
                 volumeControlPill,
                 label,
@@ -4823,6 +4825,7 @@ public final class MainActivity extends Activity {
         }
         setTileDetail("permissions", permissionsNeedingAttention == 0
                 ? "Everything granted" : permissionsNeedingAttention + " to fix");
+        setTileLook("permissions", permissionsNeedingAttention == 0 ? Ui.TONE_OK : Ui.TONE_BAD);
         refreshDashboard();
         refreshToggleReadiness();
 
@@ -5346,6 +5349,7 @@ public final class MainActivity extends Activity {
         }
         setPillState(systemBackupPill, label, background, foreground);
         setTileDetail("backup", "Settings, history, VPN");
+        setTileLook("backup", exists || config.lastBackupMillis() > 0L ? Ui.TONE_OK : Ui.TONE_NEUTRAL);
         boolean canBackUp = connected && checked && available && !backupOperationInFlight;
         applyButtonState(backUpButton, canBackUp, COLOR_PRIMARY, COLOR_ON_ACCENT);
         applyButtonState(restoreBackupButton, canBackUp && exists,
@@ -5573,6 +5577,14 @@ public final class MainActivity extends Activity {
         FeatureTile tile = dashboard == null ? null : dashboard.tile(id);
         if (tile != null) {
             tile.setDetail(detail);
+        }
+    }
+
+    /** Colours an overview card that has no switch of its own. */
+    private void setTileLook(String id, int tone) {
+        FeatureTile tile = dashboard == null ? null : dashboard.tile(id);
+        if (tile != null) {
+            tile.setLook(tone);
         }
     }
 
