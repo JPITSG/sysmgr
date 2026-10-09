@@ -5372,6 +5372,14 @@ public final class MainActivity extends Activity {
                 && RemoteLinkStateStore.isConnected(this);
         boolean checked = UpgradeStateStore.isChecked(this);
         boolean exists = UpgradeStateStore.apkExists(this);
+        String offered = UpgradeStateStore.apkVersionName(this);
+        long offeredCode = UpgradeStateStore.apkVersionCode(this);
+        long installedCode = AppVersion.code(this);
+        boolean versionKnown = exists && UpgradeStateStore.isApkVersionReady(this)
+                && !offered.isEmpty() && offeredCode > 0L;
+        boolean newer = versionKnown && offeredCode > installedCode;
+        boolean sameVersion = versionKnown && offeredCode == installedCode;
+        boolean olderOnServer = versionKnown && offeredCode < installedCode;
         String label;
         int background;
         int foreground;
@@ -5395,17 +5403,31 @@ public final class MainActivity extends Activity {
             label = "MISSING";
             background = COLOR_DANGER_CONTAINER;
             foreground = COLOR_DANGER_ON_CONTAINER;
-        } else {
-            label = "AVAILABLE";
+        } else if (!versionKnown) {
+            // The server has an APK but has not said which version it is yet.
+            label = "CHECKING";
+            background = COLOR_NEUTRAL_CONTAINER;
+            foreground = COLOR_NEUTRAL_ON_CONTAINER;
+        } else if (newer) {
+            label = "UPDATE AVAILABLE";
             background = COLOR_PRIMARY_CONTAINER;
             foreground = COLOR_PRIMARY_ON_CONTAINER;
+        } else {
+            // The server's APK is this version, or an older one Android would refuse to install.
+            label = "UP TO DATE";
+            background = COLOR_NEUTRAL_CONTAINER;
+            foreground = COLOR_NEUTRAL_ON_CONTAINER;
         }
         setPillState(upgradePill, label, background, foreground);
-        String offered = UpgradeStateStore.apkVersionName(this);
-        boolean newer = exists && UpgradeStateStore.isApkVersionReady(this) && !offered.isEmpty()
-                && UpgradeStateStore.apkVersionCode(this) > AppVersion.code(this);
         dashboard.setUpdate(newer ? offered : null);
-        setTileDetail("upgrade", newer ? "Version " + offered : "Version " + AppVersion.name(this));
+        String installed = AppVersion.name(this);
+        if (newer) {
+            setTileDetail("upgrade", "Version " + offered + " ready to install");
+        } else if (olderOnServer) {
+            setTileDetail("upgrade", "Version " + installed + " installed; server has " + offered);
+        } else {
+            setTileDetail("upgrade", "Version " + installed + " installed");
+        }
 
         upgradeCurrentVersionValue.setText(AppVersion.name(this));
         upgradeCurrentVersionValue.setTextColor(COLOR_TEXT);
@@ -5452,7 +5474,9 @@ public final class MainActivity extends Activity {
         boolean idleAndConnected = connected && !upgradeDownloadInFlight;
         applyButtonState(upgradeRefreshButton, idleAndConnected,
                 COLOR_PRIMARY_CONTAINER, COLOR_PRIMARY_ON_CONTAINER);
-        applyButtonState(upgradeInstallButton, idleAndConnected && checked && exists,
+        // The same version can be installed again; an older one cannot, Android refuses downgrades.
+        upgradeInstallButton.setText(sameVersion ? "Reinstall" : "Upgrade");
+        applyButtonState(upgradeInstallButton, idleAndConnected && checked && exists && !olderOnServer,
                 COLOR_PRIMARY, COLOR_ON_ACCENT);
     }
 
