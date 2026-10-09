@@ -18,10 +18,10 @@ import android.widget.TextView;
 
 /**
  * One feature on the overview: an icon chip in the feature's own hue, a state
- * dot, the feature name and a live line of status. Colour carries the state —
- * a running tile is lit, an attention tile is red, an idle tile is grey — so
- * the grid reads at a glance. A feature that can be switched on and off from
- * here has a real switch in place of the dot.
+ * dot, the feature name and a live line of status. A feature that can be
+ * switched on and off from here has a real switch in place of the dot, and its
+ * card is green while it is on and red while it is off; every other card stays
+ * neutral, so the grid reads at a glance.
  */
 final class FeatureTile extends LinearLayout {
     /** Called when the user flips the tile's switch; the caller decides what actually happens. */
@@ -178,6 +178,7 @@ final class FeatureTile extends LinearLayout {
                     listener.onToggled(checked);
                 }
                 applyToggleLook();
+                applyStyle();
             }
         });
         applyToggleLook();
@@ -217,6 +218,7 @@ final class FeatureTile extends LinearLayout {
             mirroring = false;
         }
         applyToggleLook();
+        applyStyle();
     }
 
     int tone() {
@@ -251,32 +253,35 @@ final class FeatureTile extends LinearLayout {
         int corner = Ui.dp(c, Ui.CARD_CORNER);
         int surface = Ui.COLOR_SURFACE;
         int accentFg = Ui.accentFg(accent);
-        int accentBg = Ui.accentContainer(accent);
+        int look = look();
 
         Drawable base;
         int chipBg;
         int chipFg;
-        if (tone == Ui.TONE_OK) {
-            int wash = Ui.blend(accentBg, surface, Ui.dark ? 0.55f : 0.62f);
+        int rippleColor = accentFg;
+        if (look == Ui.TONE_OK) {
+            int wash = Ui.blend(Ui.COLOR_PRIMARY_CONTAINER, surface, Ui.dark ? 0.55f : 0.62f);
             GradientDrawable g = Ui.gradient(GradientDrawable.Orientation.TL_BR, wash, surface, corner);
-            g.setStroke(Ui.dp(c, 1), Ui.blend(accentFg, surface, Ui.dark ? 0.32f : 0.28f));
+            g.setStroke(Ui.dp(c, 1), Ui.blend(Ui.COLOR_PRIMARY, surface, Ui.dark ? 0.32f : 0.28f));
             base = g;
-            chipBg = accentBg;
-            chipFg = accentFg;
-        } else if (tone == Ui.TONE_BAD) {
+            chipBg = Ui.COLOR_PRIMARY_CONTAINER;
+            chipFg = Ui.COLOR_PRIMARY;
+            rippleColor = Ui.COLOR_PRIMARY;
+        } else if (look == Ui.TONE_BAD) {
             int wash = Ui.blend(Ui.COLOR_DANGER_CONTAINER, surface, Ui.dark ? 0.7f : 0.75f);
             GradientDrawable g = Ui.gradient(GradientDrawable.Orientation.TL_BR, wash, surface, corner);
             g.setStroke(Ui.dp(c, 1), Ui.blend(Ui.COLOR_DANGER, surface, 0.45f));
             base = g;
             chipBg = Ui.COLOR_DANGER_CONTAINER;
             chipFg = Ui.COLOR_DANGER;
+            rippleColor = Ui.COLOR_DANGER;
         } else {
             base = Ui.roundedFill(surface, corner, Ui.dp(c, 1), Ui.COLOR_BORDER);
             chipBg = Ui.COLOR_NEUTRAL_CONTAINER;
             chipFg = Ui.COLOR_TEXT_FAINT;
         }
-        setBackground(Ui.ripple(Ui.alpha(accentFg, 0.14f), base, corner));
-        Ui.elevate(this, tone == Ui.TONE_NEUTRAL ? 1f : 2f);
+        setBackground(Ui.ripple(Ui.alpha(rippleColor, 0.14f), base, corner));
+        Ui.elevate(this, look == Ui.TONE_NEUTRAL ? 1f : 2f);
 
         chip.setBackground(Ui.roundedFill(chipBg, Ui.dp(c, 14), 0, 0));
         chipIcon.setColorFilter(chipFg);
@@ -284,8 +289,8 @@ final class FeatureTile extends LinearLayout {
 
         titleView.setTextColor(Ui.COLOR_TEXT);
         SpannableStringBuilder line = new SpannableStringBuilder();
-        int statusColor = tone == Ui.TONE_OK ? Ui.COLOR_OK
-                : tone == Ui.TONE_BAD ? Ui.COLOR_BAD : Ui.COLOR_TEXT_DIM;
+        int statusColor = look == Ui.TONE_OK ? Ui.COLOR_OK
+                : look == Ui.TONE_BAD ? Ui.COLOR_BAD : Ui.COLOR_TEXT_DIM;
         if (!status.isEmpty()) {
             line.append(status);
             line.setSpan(new ForegroundColorSpan(statusColor), 0, line.length(),
@@ -307,10 +312,23 @@ final class FeatureTile extends LinearLayout {
         setContentDescription(title + ". " + status + (detail.isEmpty() ? "" : ", " + detail));
     }
 
+    /**
+     * The colour the card shows. A feature with a switch is green when it is on and red when it
+     * is off; every other card stays neutral. The state the card reports for the overview's dial
+     * and counts ({@link #tone()}) is separate and unchanged.
+     */
+    private int look() {
+        if (toggle == null) {
+            return Ui.TONE_NEUTRAL;
+        }
+        return toggle.isChecked() ? Ui.TONE_OK : Ui.TONE_BAD;
+    }
+
     private Drawable dotDrawable() {
         Context c = getContext();
-        int color = Ui.toneAccent(tone);
-        if (tone == Ui.TONE_NEUTRAL) {
+        int look = look();
+        int color = Ui.toneAccent(look);
+        if (look == Ui.TONE_NEUTRAL) {
             GradientDrawable ring = new GradientDrawable();
             ring.setShape(GradientDrawable.OVAL);
             ring.setColor(0);
