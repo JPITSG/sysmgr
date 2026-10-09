@@ -30,9 +30,10 @@ final class CompactSwitch extends View implements Checkable {
     static final int TOUCH_X = 10;
     static final int TOUCH_Y = 10;
 
-    private static final int THUMB_OFF = 9;
-    private static final int THUMB_ON = 12;
-    private static final float OUTLINE = 1.5f;
+    /** Thumb diameters off and on, and the off track's outline, in dp. Page switches share them. */
+    static final int THUMB_OFF = 9;
+    static final int THUMB_ON = 12;
+    static final float OUTLINE = 1.5f;
     private static final float HALO = 11f;
     private static final int SLIDE_MS = 160;
     private static final float DIMMED = 0.45f;

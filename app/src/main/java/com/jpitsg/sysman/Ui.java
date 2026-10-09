@@ -4,12 +4,17 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ColorFilter;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.ClipDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.InsetDrawable;
 import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.graphics.drawable.StateListDrawable;
@@ -496,27 +501,36 @@ final class Ui {
      * Pill track with a thumb that grows when on. The thumb box equals the
      * track height so the thumb sits level with both ends of its travel.
      */
+    /**
+     * Styles a page switch to look exactly like the overview's {@link CompactSwitch}: the same
+     * small track, the same thumb and colours, the same size on and off. The thumb box is
+     * {@link CompactSwitch#TRACK_W} minus twice its own width, and the track pads it in by the
+     * remainder, so the thumb stops where the overview's does.
+     */
     static void styleSwitch(Switch sw) {
         Context c = sw.getContext();
-        int trackW = dp(c, 52);
-        int trackH = dp(c, 30);
-        int box = trackH;
+        float density = c.getResources().getDisplayMetrics().density;
+        int trackW = dp(c, CompactSwitch.TRACK_W);
+        int trackH = dp(c, CompactSwitch.TRACK_H);
+        int thumbW = dp(c, CompactSwitch.THUMB_ON);
+        int inset = Math.max(0, (trackW - 2 * thumbW) / 2);
+        float outline = CompactSwitch.OUTLINE * density;
 
-        GradientDrawable trackOn = roundedFill(COLOR_PRIMARY, trackH / 2, 0, 0);
-        trackOn.setSize(trackW, trackH);
-        GradientDrawable trackOff = roundedFill(COLOR_SWITCH_OFF_TRACK, trackH / 2, dp(c, 2), COLOR_SWITCH_OFF_STROKE);
-        trackOff.setSize(trackW, trackH);
         StateListDrawable track = new StateListDrawable();
-        track.addState(new int[]{android.R.attr.state_checked}, trackOn);
-        track.addState(new int[]{}, trackOff);
-        track.setEnterFadeDuration(140);
-        track.setExitFadeDuration(140);
+        track.addState(new int[]{android.R.attr.state_checked},
+                new SwitchTrack(trackW, trackH, inset, COLOR_PRIMARY, 0f, 0));
+        track.addState(new int[]{},
+                new SwitchTrack(trackW, trackH, inset, COLOR_SWITCH_OFF_TRACK, outline, COLOR_SWITCH_OFF_STROKE));
+        track.setEnterFadeDuration(160);
+        track.setExitFadeDuration(160);
 
         StateListDrawable thumb = new StateListDrawable();
-        thumb.addState(new int[]{android.R.attr.state_checked}, thumbCircle(c, COLOR_ON_ACCENT, 22, box));
-        thumb.addState(new int[]{}, thumbCircle(c, COLOR_SWITCH_OFF_STROKE, 14, box));
-        thumb.setEnterFadeDuration(140);
-        thumb.setExitFadeDuration(140);
+        thumb.addState(new int[]{android.R.attr.state_checked},
+                new SwitchThumb(thumbW, trackH, CompactSwitch.THUMB_ON * density, COLOR_ON_ACCENT));
+        thumb.addState(new int[]{},
+                new SwitchThumb(thumbW, trackH, CompactSwitch.THUMB_OFF * density, COLOR_SWITCH_OFF_STROKE));
+        thumb.setEnterFadeDuration(160);
+        thumb.setExitFadeDuration(160);
 
         sw.setTrackDrawable(track);
         sw.setThumbDrawable(thumb);
@@ -528,14 +542,127 @@ final class Ui {
         sw.setBackground(null);
     }
 
-    private static Drawable thumbCircle(Context c, int color, int diameterDp, int boxPx) {
-        GradientDrawable circle = new GradientDrawable();
-        circle.setShape(GradientDrawable.OVAL);
-        circle.setColor(color);
-        int d = dp(c, diameterDp);
-        circle.setSize(d, d);
-        int inset = Math.max(0, (boxPx - d) / 2);
-        return new InsetDrawable(circle, inset);
+    /** A switch track: a rounded bar with an optional outline, padded so the thumb stops short of its ends. */
+    private static final class SwitchTrack extends Drawable {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF rect = new RectF();
+        private final int width;
+        private final int height;
+        private final int inset;
+        private final int fill;
+        private final float stroke;
+        private final int strokeColor;
+        private int alpha = 255;
+
+        SwitchTrack(int width, int height, int inset, int fill, float stroke, int strokeColor) {
+            this.width = width;
+            this.height = height;
+            this.inset = inset;
+            this.fill = fill;
+            this.stroke = stroke;
+            this.strokeColor = strokeColor;
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            float corner = b.height() / 2f;
+            rect.set(b);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(alpha(fill, alpha / 255f));
+            canvas.drawRoundRect(rect, corner, corner, paint);
+            if (stroke > 0f) {
+                rect.inset(stroke / 2f, stroke / 2f);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(stroke);
+                paint.setColor(alpha(strokeColor, alpha / 255f));
+                canvas.drawRoundRect(rect, corner - stroke / 2f, corner - stroke / 2f, paint);
+            }
+        }
+
+        @Override
+        public boolean getPadding(Rect padding) {
+            padding.set(inset, 0, inset, 0);
+            return true;
+        }
+
+        @Override
+        public int getIntrinsicWidth() {
+            return width;
+        }
+
+        @Override
+        public int getIntrinsicHeight() {
+            return height;
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            this.alpha = alpha;
+            invalidateSelf();
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter colorFilter) {
+            paint.setColorFilter(colorFilter);
+            invalidateSelf();
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
+    }
+
+    /** A switch thumb: a dot of the given diameter centred in a box the size of the thumb's travel step. */
+    private static final class SwitchThumb extends Drawable {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final int width;
+        private final int height;
+        private final float diameter;
+        private final int color;
+        private int alpha = 255;
+
+        SwitchThumb(int width, int height, float diameter, int color) {
+            this.width = width;
+            this.height = height;
+            this.diameter = diameter;
+            this.color = color;
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            paint.setColor(alpha(color, alpha / 255f));
+            canvas.drawCircle(b.exactCenterX(), b.exactCenterY(), diameter / 2f, paint);
+        }
+
+        @Override
+        public int getIntrinsicWidth() {
+            return width;
+        }
+
+        @Override
+        public int getIntrinsicHeight() {
+            return height;
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            this.alpha = alpha;
+            invalidateSelf();
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter colorFilter) {
+            paint.setColorFilter(colorFilter);
+            invalidateSelf();
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
     }
 
     static void styleSeekBar(SeekBar bar) {
