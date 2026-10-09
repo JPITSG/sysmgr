@@ -418,8 +418,7 @@ final class Dashboard {
             headline = "All systems normal";
         }
         headlineView.setText(headline);
-        int off = n - on - attention;
-        String counts = on + " on · " + off + " off" + (attention > 0 ? " · " + attention + " need attention" : "");
+        String counts = on + " of " + n + " on" + (attention > 0 ? " · " + attention + " need attention" : "");
         sublineView.setText(counts);
         ring.setContentDescription(headline + ". " + counts + ".");
 
